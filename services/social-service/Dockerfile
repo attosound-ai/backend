@@ -11,6 +11,7 @@ RUN npx prisma generate
 
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY src ./src
+COPY proto /proto
 
 RUN npm run build
 
@@ -27,6 +28,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /proto /proto
 
 USER appuser
 

@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package atto.user;
+
+option go_package = "github.com/atto-sound/proto/user";
+
+import "common.proto";
+
+service UserService {
+  rpc GetUser(GetUserRequest) returns (UserResponse);
+  rpc GetUsersBatch(GetUsersBatchRequest) returns (GetUsersBatchResponse);
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+  rpc VerifyUserForContentUpload(VerificationRequest) returns (VerificationResponse);
+  rpc GetUserContentPermissions(PermissionRequest) returns (PermissionResponse);
+}
+
+// ── Requests ──
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+message GetUsersBatchRequest {
+  repeated string user_ids = 1;
+}
+
+message ValidateTokenRequest {
+  string token = 1;
+}
+
+message VerificationRequest {
+  string user_id = 1;
+  string inmate_number = 2;
+}
+
+message PermissionRequest {
+  string user_id = 1;
+}
+
+// ── Responses ──
+
+message UserResponse {
+  string id = 1;
+  string username = 2;
+  string display_name = 3;
+  optional string avatar = 4;
+  optional string bio = 5;
+  string role = 6;
+  optional string inmate_number = 7;
+  bool profile_verified = 8;
+  optional string representative_id = 9;
+  int64 followers_count = 10;
+  int64 following_count = 11;
+  int64 posts_count = 12;
+  string created_at = 13;
+}
+
+message GetUsersBatchResponse {
+  repeated UserResponse users = 1;
+}
+
+message ValidateTokenResponse {
+  bool valid = 1;
+  string user_id = 2;
+  string role = 3;
+}
+
+message VerificationResponse {
+  bool is_verified = 1;
+  repeated string allowed_content_types = 2;
+}
+
+message PermissionResponse {
+  bool can_upload = 1;
+  repeated string allowed_content_types = 2;
+  int64 max_file_size_bytes = 3;
+}
