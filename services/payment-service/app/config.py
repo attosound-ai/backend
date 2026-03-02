@@ -33,7 +33,12 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "", "case_sensitive": False}
 
     @model_validator(mode="after")
-    def validate_stripe_keys(self) -> "Settings":
+    def fix_database_url_and_validate(self) -> "Settings":
+        # Railway provides postgresql:// but asyncpg requires postgresql+asyncpg://
+        if self.database_url.startswith("postgresql://"):
+            self.database_url = self.database_url.replace(
+                "postgresql://", "postgresql+asyncpg://", 1
+            )
         if not self.stripe_secret_key:
             raise ValueError(
                 "STRIPE_SECRET_KEY is empty or not set. "
