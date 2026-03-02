@@ -1,7 +1,9 @@
 package config
 
 import (
+	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -25,6 +27,7 @@ type Config struct {
 }
 
 // Load reads configuration from environment variables with sensible defaults.
+// If DATABASE_URL is set (Railway standard), it overrides the individual DB_* vars.
 func Load() *Config {
 	cfg := &Config{
 		HTTPPort:         getEnv("HTTP_PORT", "8080"),
@@ -43,6 +46,24 @@ func Load() *Config {
 		JWTRefreshExpiry: parseDuration(getEnv("JWT_REFRESH_EXPIRY", "168h"), 168*time.Hour),
 		OTPServiceURL:    getEnv("OTP_SERVICE_URL", "http://otp-service:8000"),
 	}
+
+	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
+		if u, err := url.Parse(dbURL); err == nil {
+			cfg.DBHost = u.Hostname()
+			cfg.DBPort = u.Port()
+			cfg.DBName = strings.TrimPrefix(u.Path, "/")
+			cfg.DBUser = u.User.Username()
+			if p, ok := u.User.Password(); ok {
+				cfg.DBPassword = p
+			}
+			if ssl := u.Query().Get("sslmode"); ssl != "" {
+				cfg.DBSSLMode = ssl
+			} else {
+				cfg.DBSSLMode = "require"
+			}
+		}
+	}
+
 	return cfg
 }
 
