@@ -9,7 +9,7 @@ COPY docker-entrypoint.sh /docker-entrypoint-custom.sh
 RUN chmod +x /docker-entrypoint-custom.sh
 
 ENV KONG_DATABASE=off
-ENV KONG_DECLARATIVE_CONFIG=/etc/kong/kong.yml
+# KONG_DECLARATIVE_CONFIG is set at runtime by docker-entrypoint.sh after envsubst
 
 USER kong
 ENTRYPOINT ["/docker-entrypoint-custom.sh"]

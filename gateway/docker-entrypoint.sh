@@ -11,7 +11,8 @@ export OTP_SERVICE_URL="${OTP_SERVICE_URL:-http://otp-service.railway.internal:8
 export PAYMENT_SERVICE_URL="${PAYMENT_SERVICE_URL:-http://payment-service.railway.internal:8000}"
 export TELEPHONY_SERVICE_URL="${TELEPHONY_SERVICE_URL:-http://telephony-service.railway.internal:3009}"
 
-# Generate kong.yml from template
-envsubst < /etc/kong/kong.yml.template > /etc/kong/kong.yml
+# Generate kong.yml from template into /tmp (writable by kong user)
+envsubst < /etc/kong/kong.yml.template > /tmp/kong.yml
+export KONG_DECLARATIVE_CONFIG=/tmp/kong.yml
 
 exec /docker-entrypoint.sh kong docker-start
