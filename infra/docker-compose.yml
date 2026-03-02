@@ -1,0 +1,556 @@
+services:
+  # ════════════════════════════════════════════
+  # DATABASES
+  # ════════════════════════════════════════════
+
+  # PostgreSQL for User Service
+  postgres-user:
+    image: postgres:16-alpine
+    container_name: atto-postgres-user
+    environment:
+      POSTGRES_DB: atto_users
+      POSTGRES_USER: atto
+      POSTGRES_PASSWORD: atto_dev
+    ports:
+      - "5440:5432"
+    volumes:
+      - pgdata-user:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atto -d atto_users"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atto-network
+
+  # PostgreSQL for Social Service
+  postgres-social:
+    image: postgres:16-alpine
+    container_name: atto-postgres-social
+    environment:
+      POSTGRES_DB: atto_social
+      POSTGRES_USER: atto
+      POSTGRES_PASSWORD: atto_dev
+    ports:
+      - "5441:5432"
+    volumes:
+      - pgdata-social:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atto -d atto_social"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atto-network
+
+  # PostgreSQL for Telephony Service
+  postgres-telephony:
+    image: postgres:16-alpine
+    container_name: atto-postgres-telephony
+    environment:
+      POSTGRES_DB: atto_telephony
+      POSTGRES_USER: atto
+      POSTGRES_PASSWORD: atto_dev
+    ports:
+      - "5442:5432"
+    volumes:
+      - pgdata-telephony:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atto -d atto_telephony"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atto-network
+
+  # PostgreSQL for Payment Service
+  postgres-payment:
+    image: postgres:16-alpine
+    container_name: atto-postgres-payment
+    environment:
+      POSTGRES_DB: atto_payments
+      POSTGRES_USER: atto
+      POSTGRES_PASSWORD: atto_dev
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata-payment:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atto -d atto_payments"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atto-network
+
+  # MongoDB for Content Service
+  mongodb:
+    image: mongo:7
+    container_name: atto-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: atto
+      MONGO_INITDB_ROOT_PASSWORD: atto_dev
+      MONGO_INITDB_DATABASE: atto_content
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atto-network
+
+  # Redis for Social Service
+  redis:
+    image: redis:7-alpine
+    container_name: atto-redis
+    ports:
+      - "6380:6379"
+    command: redis-server --requirepass atto_dev
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "atto_dev", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atto-network
+
+  # Cassandra for Chat Service
+  cassandra:
+    image: cassandra:4.1
+    container_name: atto-cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: atto_cluster
+      CASSANDRA_DC: dc1
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    volumes:
+      - cassandradata:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - atto-network
+
+  # MinIO (S3-compatible object storage for audio segments)
+  minio:
+    image: minio/minio:latest
+    container_name: atto-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: atto_minio
+      MINIO_ROOT_PASSWORD: atto_minio_dev
+    ports:
+      - "9002:9000"    # Host 9002 → Container 9000 (S3 API)
+      - "9003:9001"    # Host 9003 → Container 9001 (Console UI)
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atto-network
+
+  # ════════════════════════════════════════════
+  # MESSAGING
+  # ════════════════════════════════════════════
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: atto-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zkdata:/var/lib/zookeeper/data
+    networks:
+      - atto-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: atto-kafka
+    depends_on:
+      zookeeper:
+        condition: service_started
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - atto-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: atto-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: atto-sound
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks:
+      - atto-network
+
+  # ════════════════════════════════════════════
+  # INFRASTRUCTURE
+  # ════════════════════════════════════════════
+
+  # Service Discovery
+  consul:
+    image: hashicorp/consul:1.17
+    container_name: atto-consul
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    command: agent -server -bootstrap-expect=1 -ui -client=0.0.0.0 -datacenter=atto-dc1
+    volumes:
+      - consuldata:/consul/data
+    networks:
+      - atto-network
+
+  # Distributed Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.52
+    container_name: atto-jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "14268:14268"   # Collector HTTP
+      - "6831:6831/udp" # Thrift compact
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    networks:
+      - atto-network
+
+  # ════════════════════════════════════════════
+  # API GATEWAY
+  # ════════════════════════════════════════════
+
+  kong:
+    image: kong:3.5
+    container_name: atto-kong
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_LOG_LEVEL: info
+      KONG_PLUGINS: bundled
+    volumes:
+      - ../gateway/kong.yml:/kong/kong.yml:ro
+    ports:
+      - "8000:8000"   # Proxy — frontend talks here
+      - "8001:8001"   # Admin API
+    networks:
+      - atto-network
+    profiles:
+      - gateway
+
+  # ════════════════════════════════════════════
+  # APPLICATION SERVICES
+  # ════════════════════════════════════════════
+
+  # User Service (Go + Fiber + PostgreSQL)
+  user-service:
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    container_name: atto-user-service
+    depends_on:
+      postgres-user:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "3001:8080"    # HTTP
+      - "50051:50051"  # gRPC
+    environment:
+      APP_ENV: development
+      HTTP_PORT: 8080
+      GRPC_PORT: 50051
+      DB_HOST: postgres-user
+      DB_PORT: 5432
+      DB_NAME: atto_users
+      DB_USER: atto
+      DB_PASSWORD: atto_dev
+      DB_SSLMODE: disable
+      KAFKA_BROKERS: kafka:29092
+      CONSUL_ADDR: consul:8500
+      JAEGER_ENDPOINT: http://jaeger:4318/v1/traces
+      JWT_SECRET: atto-dev-secret-change-in-production
+      JWT_ACCESS_EXPIRY: 15m
+      JWT_REFRESH_EXPIRY: 7d
+      OTP_SERVICE_URL: http://otp-service:8000
+    networks:
+      - atto-network
+    profiles:
+      - services
+
+  # Content Service (Rust + Actix-web + MongoDB)
+  content-service:
+    build:
+      context: ../services/content-service
+      dockerfile: Dockerfile
+    container_name: atto-content-service
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "3006:8081"    # HTTP
+      - "50052:50052"  # gRPC
+    environment:
+      APP_ENV: development
+      HTTP_PORT: 8081
+      GRPC_PORT: 50052
+      MONGO_URI: mongodb://atto:atto_dev@mongodb:27017/atto_content?authSource=admin
+      KAFKA_BROKERS: kafka:29092
+      CONSUL_ADDR: consul:8500
+      JAEGER_ENDPOINT: http://jaeger:4318/v1/traces
+      UPLOAD_DIR: /app/uploads
+      MAX_FILE_SIZE: 52428800
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
+      JWT_SECRET: atto-dev-secret-change-in-production
+    volumes:
+      - media-uploads:/app/uploads
+    networks:
+      - atto-network
+    profiles:
+      - services
+
+  # Social Service (NestJS + Prisma + Redis + PostgreSQL)
+  social-service:
+    build:
+      context: ../services/social-service
+      dockerfile: Dockerfile
+    container_name: atto-social-service
+    depends_on:
+      postgres-social:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "3003:3000"    # HTTP
+      - "50053:50053"  # gRPC
+    environment:
+      APP_ENV: development
+      HTTP_PORT: 3000
+      GRPC_PORT: 50053
+      DATABASE_URL: postgresql://atto:atto_dev@postgres-social:5432/atto_social
+      REDIS_URL: redis://:atto_dev@redis:6379
+      KAFKA_BROKERS: kafka:29092
+      USER_SERVICE_GRPC: user-service:50051
+      CONTENT_SERVICE_GRPC: content-service:50052
+      JWT_SECRET: atto-dev-secret-change-in-production
+      CONSUL_ADDR: consul:8500
+      JAEGER_ENDPOINT: http://jaeger:4318/v1/traces
+    volumes:
+      - ../proto:/proto:ro
+    networks:
+      - atto-network
+    profiles:
+      - services
+
+  # Chat Service (Elixir + Phoenix + Cassandra)
+  chat-service:
+    build:
+      context: ../services/chat-service
+      dockerfile: Dockerfile
+    container_name: atto-chat-service
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "3004:4000"    # HTTP + WebSocket
+      - "50054:50054"  # gRPC
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    environment:
+      APP_ENV: development
+      HTTP_PORT: 4000
+      GRPC_PORT: 50054
+      CASSANDRA_NODES: cassandra:9042
+      CASSANDRA_KEYSPACE: atto_chat
+      KAFKA_BROKERS: kafka:29092
+      USER_SERVICE_GRPC: user-service:50051
+      CONSUL_ADDR: consul:8500
+      JAEGER_ENDPOINT: http://jaeger:4318/v1/traces
+      SECRET_KEY_BASE: atto-dev-secret-key-base-at-least-64-bytes-long-change-in-production-please
+    networks:
+      - atto-network
+    profiles:
+      - services
+
+  # OTP Service (Go + Fiber + Redis)
+  otp-service:
+    build:
+      context: ../services/otp-service
+      dockerfile: Dockerfile
+    container_name: atto-otp-service
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3008:8000"    # HTTP
+    environment:
+      APP_ENV: development
+      HTTP_PORT: 8000
+      REDIS_URL: redis://:atto_dev@redis:6379
+      OTP_LENGTH: 6
+      OTP_EXPIRY_SECONDS: 600
+      RATE_LIMIT_SECONDS: 60
+      MAX_ATTEMPTS: 5
+      DELIVERY_PROVIDER: ${DELIVERY_PROVIDER:-console}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_PHONE: ${TWILIO_FROM_PHONE:-}
+      MAX_OTP_PER_HOUR: 5
+      MAX_OTP_PER_DAY: 10
+      MAX_OTP_PER_IP_HOUR: 10
+      BLOCK_DURATION_MINUTES: 30
+      MAX_CONSEC_FAILURES: 3
+    networks:
+      - atto-network
+    profiles:
+      - services
+
+  # Payment Service (Python + FastAPI + PostgreSQL)
+  payment-service:
+    build:
+      context: ../services/payment-service
+      dockerfile: Dockerfile
+    container_name: atto-payment-service
+    depends_on:
+      postgres-payment:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "3007:8000"    # HTTP
+      - "50055:50055"  # gRPC
+    environment:
+      APP_ENV: development
+      HTTP_PORT: 8000
+      GRPC_PORT: 50055
+      DATABASE_URL: postgresql+asyncpg://atto:atto_dev@postgres-payment:5432/atto_payments
+      KAFKA_BROKERS: kafka:29092
+      USER_SERVICE_GRPC: user-service:50051
+      CONSUL_ADDR: consul:8500
+      JAEGER_ENDPOINT: http://jaeger:4318/v1/traces
+      JWT_SECRET: atto-dev-secret-change-in-production
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_ANNUAL_PRICE_ID: ${STRIPE_ANNUAL_PRICE_ID:-}
+      STRIPE_MONTHLY_PRICE_ID: ${STRIPE_MONTHLY_PRICE_ID:-}
+      TWILIO_BRIDGE_NUMBER: ${TWILIO_BRIDGE_NUMBER:-}
+    networks:
+      - atto-network
+    profiles:
+      - services
+
+  # Telephony Service (NestJS + TypeORM + PostgreSQL + Twilio)
+  telephony-service:
+    build:
+      context: ../services/telephony-service
+      dockerfile: Dockerfile
+    container_name: atto-telephony-service
+    depends_on:
+      postgres-telephony:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "3009:3009"
+    environment:
+      PORT: 3009
+      DATABASE_URL: postgresql://atto:atto_dev@postgres-telephony:5432/atto_telephony
+      KAFKA_BROKERS: kafka:29092
+      JWT_SECRET: atto-dev-secret-change-in-production
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_API_KEY_SID: ${TWILIO_API_KEY_SID:-}
+      TWILIO_API_KEY_SECRET: ${TWILIO_API_KEY_SECRET:-}
+      TWILIO_TWIML_APP_SID: ${TWILIO_TWIML_APP_SID:-}
+      TWILIO_PUSH_CREDENTIAL_SID_FCM: ${TWILIO_PUSH_CREDENTIAL_SID_FCM:-}
+      TWILIO_PUSH_CREDENTIAL_SID_APNS: ${TWILIO_PUSH_CREDENTIAL_SID_APNS:-}
+      TWILIO_DEV_MODE: ${TWILIO_DEV_MODE:-true}
+      WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:-http://localhost:3009}
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://192.168.0.65:9002}
+      S3_ACCESS_KEY: atto_minio
+      S3_SECRET_KEY: atto_minio_dev
+      S3_BUCKET: atto-audio-segments
+      S3_REGION: us-east-1
+    networks:
+      - atto-network
+    profiles:
+      - services
+
+# ════════════════════════════════════════════
+# VOLUMES & NETWORKS
+# ════════════════════════════════════════════
+
+volumes:
+  pgdata-user:
+  pgdata-social:
+  pgdata-payment:
+  pgdata-telephony:
+  mongodata:
+  redisdata:
+  cassandradata:
+  zkdata:
+  kafkadata:
+  consuldata:
+  media-uploads:
+  minio-data:
+
+networks:
+  atto-network:
+    driver: bridge
+    name: atto-network

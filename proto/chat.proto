@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package atto.chat;
+
+option go_package = "github.com/atto-sound/proto/chat";
+
+service ChatService {
+  rpc GetConversation(GetConversationRequest) returns (ConversationResponse);
+  rpc GetUnreadCount(UnreadCountRequest) returns (UnreadCountResponse);
+}
+
+// ── Requests ──
+
+message GetConversationRequest {
+  string user_id = 1;
+  string participant_id = 2;
+}
+
+message UnreadCountRequest {
+  string user_id = 1;
+}
+
+// ── Responses ──
+
+message ConversationResponse {
+  string conversation_id = 1;
+  string participant_id = 2;
+  string last_message = 3;
+  int64 unread_count = 4;
+  string updated_at = 5;
+}
+
+message UnreadCountResponse {
+  int64 total_unread = 1;
+}

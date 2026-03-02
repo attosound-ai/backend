@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package atto.payment;
+
+option go_package = "github.com/atto-sound/proto/payment";
+
+service PaymentService {
+  rpc GetTransactionStatus(TransactionStatusRequest) returns (TransactionStatusResponse);
+  rpc GetUserSubscription(UserSubscriptionRequest) returns (UserSubscriptionResponse);
+}
+
+// ── Requests ──
+
+message TransactionStatusRequest {
+  string transaction_id = 1;
+}
+
+message UserSubscriptionRequest {
+  string user_id = 1;
+}
+
+// ── Responses ──
+
+message TransactionStatusResponse {
+  string transaction_id = 1;
+  string status = 2;
+  string amount = 3;
+  string currency = 4;
+  string type = 5;
+  string created_at = 6;
+}
+
+message UserSubscriptionResponse {
+  string subscription_id = 1;
+  string plan = 2;
+  string status = 3;
+  string starts_at = 4;
+  string expires_at = 5;
+}

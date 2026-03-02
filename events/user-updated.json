@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UserUpdated",
+  "description": "Published when a user profile is updated",
+  "type": "object",
+  "properties": {
+    "event_type": { "const": "user.updated" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string", "format": "uuid" },
+        "fields": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": ["user_id", "fields"]
+    }
+  },
+  "required": ["event_type", "event_id", "timestamp", "data"]
+}

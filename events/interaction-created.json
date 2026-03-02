@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InteractionCreated",
+  "description": "Published when a user interacts with content (like, comment, share)",
+  "type": "object",
+  "properties": {
+    "event_type": { "const": "interaction.created" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "interaction_type": { "type": "string", "enum": ["LIKE", "COMMENT", "SHARE"] },
+        "user_id": { "type": "string", "format": "uuid" },
+        "content_id": { "type": "string" },
+        "comment_text": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["interaction_type", "user_id", "content_id", "created_at"]
+    }
+  },
+  "required": ["event_type", "event_id", "timestamp", "data"]
+}

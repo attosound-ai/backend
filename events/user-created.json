@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UserCreated",
+  "description": "Published when a new user registers",
+  "type": "object",
+  "properties": {
+    "event_type": { "const": "user.created" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string", "format": "uuid" },
+        "username": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["Artist", "Representative", "Listener"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["user_id", "username", "email", "role", "created_at"]
+    }
+  },
+  "required": ["event_type", "event_id", "timestamp", "data"]
+}

@@ -1,0 +1,55 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Follow {
+  id          String   @id @default(uuid())
+  followerId  String   @map("follower_id")
+  followingId String   @map("following_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+model Interaction {
+  id        String          @id @default(uuid())
+  userId    String          @map("user_id")
+  contentId String          @map("content_id")
+  type      InteractionType
+  comment   String?
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  @@unique([userId, contentId, type])
+  @@index([contentId, type])
+  @@index([userId])
+  @@map("interactions")
+}
+
+enum InteractionType {
+  LIKE
+  COMMENT
+  SHARE
+}
+
+model Notification {
+  id          String   @id @default(uuid())
+  recipientId String   @map("recipient_id")
+  type        String
+  actorId     String   @map("actor_id")
+  referenceId String?  @map("reference_id")
+  isRead      Boolean  @default(false) @map("is_read")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([recipientId, createdAt])
+  @@index([recipientId, isRead])
+  @@map("notifications")
+}

@@ -1,0 +1,53 @@
+# Environment files — NEVER commit secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Go build artifacts
+*/tmp/
+*.exe
+*.test
+
+# Rust build
+target/
+
+# Elixir/Mix
+_build/
+deps/
+*.beam
+
+# TypeScript build output
+dist/
+build/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Docker volumes / data
+infra/data/
+infra/pgdata*/
+infra/mongo*/
+infra/redis*/
+infra/cassandra*/
+infra/minio*/
+infra/kafka*/
+infra/zookeeper*/

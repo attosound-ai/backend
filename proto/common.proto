@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package atto.common;
+
+option go_package = "github.com/atto-sound/proto/common";
+
+message Pagination {
+  string cursor = 1;
+  int32 limit = 2;
+}
+
+message PaginatedMeta {
+  string next_cursor = 1;
+  bool has_more = 2;
+  int64 total = 3;
+}
+
+message UserSummary {
+  string id = 1;
+  string username = 2;
+  string display_name = 3;
+  optional string avatar = 4;
+}
+
+message Empty {}

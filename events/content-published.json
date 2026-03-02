@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ContentPublished",
+  "description": "Published when new content is created",
+  "type": "object",
+  "properties": {
+    "event_type": { "const": "content.published" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "content_id": { "type": "string" },
+        "author_id": { "type": "string", "format": "uuid" },
+        "content_type": { "type": "string", "enum": ["Audio", "Image", "Text"] },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["content_id", "author_id", "content_type", "created_at"]
+    }
+  },
+  "required": ["event_type", "event_id", "timestamp", "data"]
+}

@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package atto.content;
+
+option go_package = "github.com/atto-sound/proto/content";
+
+import "common.proto";
+
+service ContentService {
+  rpc GetContent(GetContentRequest) returns (ContentResponse);
+  rpc GetContentBatch(GetContentBatchRequest) returns (GetContentBatchResponse);
+  rpc CreateContent(CreateContentRequest) returns (ContentResponse);
+  rpc DeleteContent(DeleteContentRequest) returns (atto.common.Empty);
+  rpc GetContentByAuthor(GetContentByAuthorRequest) returns (GetContentBatchResponse);
+}
+
+// ── Requests ──
+
+message GetContentRequest {
+  string content_id = 1;
+}
+
+message GetContentBatchRequest {
+  repeated string content_ids = 1;
+  atto.common.Pagination pagination = 2;
+}
+
+message CreateContentRequest {
+  string author_id = 1;
+  string content_type = 2;
+  string text_content = 3;
+  repeated string file_paths = 4;
+  map<string, string> metadata = 5;
+  repeated string tags = 6;
+}
+
+message DeleteContentRequest {
+  string content_id = 1;
+  string author_id = 2;
+}
+
+message GetContentByAuthorRequest {
+  string author_id = 1;
+  atto.common.Pagination pagination = 2;
+}
+
+// ── Responses ──
+
+message ContentResponse {
+  string id = 1;
+  string author_id = 2;
+  string content_type = 3;
+  string text_content = 4;
+  repeated string file_paths = 5;
+  map<string, string> metadata = 6;
+  repeated string tags = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+message GetContentBatchResponse {
+  repeated ContentResponse contents = 1;
+  atto.common.PaginatedMeta meta = 2;
+}

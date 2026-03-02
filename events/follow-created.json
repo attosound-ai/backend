@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FollowCreated",
+  "description": "Published when a user follows another user",
+  "type": "object",
+  "properties": {
+    "event_type": { "const": "follow.created" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "follower_id": { "type": "string", "format": "uuid" },
+        "following_id": { "type": "string", "format": "uuid" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["follower_id", "following_id", "created_at"]
+    }
+  },
+  "required": ["event_type", "event_id", "timestamp", "data"]
+}

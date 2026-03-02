@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MessageSent",
+  "description": "Published when a chat message is sent",
+  "type": "object",
+  "properties": {
+    "event_type": { "const": "message.sent" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "message_id": { "type": "string" },
+        "sender_id": { "type": "string", "format": "uuid" },
+        "receiver_id": { "type": "string", "format": "uuid" },
+        "conversation_id": { "type": "string", "format": "uuid" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["message_id", "sender_id", "receiver_id", "conversation_id", "created_at"]
+    }
+  },
+  "required": ["event_type", "event_id", "timestamp", "data"]
+}

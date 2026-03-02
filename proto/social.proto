@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package atto.social;
+
+option go_package = "github.com/atto-sound/proto/social";
+
+service SocialService {
+  rpc GetFollowersCount(UserIdRequest) returns (CountResponse);
+  rpc GetFollowingCount(UserIdRequest) returns (CountResponse);
+  rpc GetPostsCount(UserIdRequest) returns (CountResponse);
+  rpc GetInteractionCounts(ContentIdRequest) returns (InteractionCountsResponse);
+  rpc IsFollowing(IsFollowingRequest) returns (BoolResponse);
+  rpc IsLiked(IsLikedRequest) returns (BoolResponse);
+}
+
+// ── Requests ──
+
+message UserIdRequest {
+  string user_id = 1;
+}
+
+message ContentIdRequest {
+  string content_id = 1;
+}
+
+message IsFollowingRequest {
+  string follower_id = 1;
+  string following_id = 2;
+}
+
+message IsLikedRequest {
+  string user_id = 1;
+  string content_id = 2;
+}
+
+// ── Responses ──
+
+message CountResponse {
+  int64 count = 1;
+}
+
+message BoolResponse {
+  bool result = 1;
+}
+
+message InteractionCountsResponse {
+  int64 likes_count = 1;
+  int64 comments_count = 2;
+  int64 shares_count = 3;
+}

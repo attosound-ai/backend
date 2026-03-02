@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UserVerified",
+  "description": "Published when an artist profile is verified",
+  "type": "object",
+  "properties": {
+    "event_type": { "const": "user.verified" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string", "format": "uuid" },
+        "verified_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["user_id", "verified_at"]
+    }
+  },
+  "required": ["event_type", "event_id", "timestamp", "data"]
+}

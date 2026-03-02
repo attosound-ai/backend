@@ -1,0 +1,217 @@
+_format_version: "3.0"
+_transform: true
+
+# ── Services & Routes ──
+
+services:
+  # AUTH routes → User Service (Go)
+  - name: auth-service
+    url: ${USER_SERVICE_URL}/auth
+    routes:
+      - name: auth-routes
+        paths:
+          - /api/v1/auth
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+
+  # USERS routes → User Service (Go)
+  - name: user-service
+    url: ${USER_SERVICE_URL}/users
+    routes:
+      - name: user-routes
+        paths:
+          - /api/v1/users
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+
+  # POSTS & FEED routes → Social Service (NestJS)
+  - name: posts-service
+    url: ${SOCIAL_SERVICE_URL}/api/v1/posts
+    routes:
+      - name: post-routes
+        paths:
+          - /api/v1/posts
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+
+  # NOTIFICATIONS routes → Social Service (NestJS)
+  - name: notification-service
+    url: ${SOCIAL_SERVICE_URL}/api/v1/notifications
+    routes:
+      - name: notification-routes
+        paths:
+          - /api/v1/notifications
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - PATCH
+          - OPTIONS
+
+  # MESSAGES routes → Chat Service (Elixir/Phoenix)
+  - name: chat-service
+    url: ${CHAT_SERVICE_URL}/api/v1/messages
+    routes:
+      - name: message-routes
+        paths:
+          - /api/v1/messages
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - OPTIONS
+      - name: websocket-routes
+        paths:
+          - /socket
+        strip_path: false
+        protocols:
+          - http
+          - https
+
+  # MEDIA routes → Content Service (Rust)
+  - name: media-service
+    url: ${CONTENT_SERVICE_URL}
+    routes:
+      - name: media-routes
+        paths:
+          - /api/v1/media
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+
+  # CONTENT routes → Content Service (Rust)
+  - name: content-service
+    url: ${CONTENT_SERVICE_URL}
+    routes:
+      - name: content-routes
+        paths:
+          - /api/v1/content
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+
+  # OTP routes → OTP Service (Go)
+  - name: otp-service
+    url: ${OTP_SERVICE_URL}/otp
+    routes:
+      - name: otp-routes
+        paths:
+          - /api/v1/otp
+        strip_path: true
+        methods:
+          - POST
+          - OPTIONS
+
+  # PAYMENT routes → Payment Service (Python)
+  - name: payment-service
+    url: ${PAYMENT_SERVICE_URL}/payments
+    routes:
+      - name: payment-routes
+        paths:
+          - /api/v1/payments
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+
+  # TELEPHONY webhooks → direct (no JWT, validated by Twilio signature)
+  - name: telephony-webhooks
+    url: ${TELEPHONY_SERVICE_URL}/telephony/webhooks
+    routes:
+      - name: telephony-webhook-routes
+        paths:
+          - /api/v1/telephony/webhooks
+        strip_path: true
+        methods:
+          - POST
+          - OPTIONS
+
+  # TELEPHONY API → authenticated
+  - name: telephony-service
+    url: ${TELEPHONY_SERVICE_URL}/telephony
+    routes:
+      - name: telephony-api-routes
+        paths:
+          - /api/v1/telephony
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+      - name: telephony-ws-routes
+        paths:
+          - /telephony/media-stream
+        strip_path: false
+        protocols:
+          - http
+          - https
+
+# ── Global Plugins ──
+
+plugins:
+  # CORS - Allow frontend to communicate
+  - name: cors
+    config:
+      origins:
+        - "*"
+      methods:
+        - GET
+        - POST
+        - PUT
+        - PATCH
+        - DELETE
+        - OPTIONS
+      headers:
+        - Authorization
+        - Content-Type
+        - Accept
+        - X-Request-ID
+        - X-User-ID
+        - X-Twilio-Signature
+      exposed_headers:
+        - X-Request-ID
+      credentials: true
+      max_age: 3600
+
+  # Rate Limiting - Protect against abuse
+  - name: rate-limiting
+    config:
+      minute: 120
+      hour: 5000
+      policy: local
+      fault_tolerant: true
+      hide_client_headers: false
+
+  # Request ID - Distributed tracing correlation
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true
