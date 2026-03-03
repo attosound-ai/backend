@@ -41,7 +41,7 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   const port = process.env.PORT || 3009;
-  await app.listen(port);
+  await app.listen(port, '::');
 
   logger.log(`Telephony Service listening on port ${port}`);
   logger.log(`Webhooks: http://localhost:${port}/telephony/webhooks/voice/incoming`);

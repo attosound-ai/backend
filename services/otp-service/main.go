@@ -104,8 +104,8 @@ func main() {
 	}()
 
 	// ── Start HTTP server ──
-	log.Printf("[STARTUP] HTTP server listening on :%s", cfg.HTTPPort)
-	if err := app.Listen(":" + cfg.HTTPPort); err != nil {
+	log.Printf("[STARTUP] HTTP server listening on [::]:%s", cfg.HTTPPort)
+	if err := app.Listen("[::]:"+cfg.HTTPPort); err != nil {
 		log.Fatalf("[STARTUP] HTTP server failed: %v", err)
 	}
 }

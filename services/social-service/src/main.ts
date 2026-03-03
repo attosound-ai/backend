@@ -38,7 +38,7 @@ async function bootstrap() {
   app.enableShutdownHooks();
 
   const port = process.env.PORT || 3000;
-  await app.listen(port);
+  await app.listen(port, '::');
 
   logger.log(`Social Service HTTP server listening on port ${port}`);
   logger.log(`Health check: http://localhost:${port}/health`);

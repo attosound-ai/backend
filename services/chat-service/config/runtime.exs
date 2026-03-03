@@ -9,7 +9,7 @@ if config_env() == :prod do
       """
 
   config :chat_service, ChatServiceWeb.Endpoint,
-    http: [ip: {0, 0, 0, 0}, port: String.to_integer(System.get_env("PORT") || "4000")],
+    http: [ip: {0, 0, 0, 0, 0, 0, 0, 0}, port: String.to_integer(System.get_env("PORT") || "4000")],
     secret_key_base: secret_key_base,
     server: true
 

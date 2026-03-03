@@ -98,7 +98,7 @@ async fn main() -> std::io::Result<()> {
             .service(content_handler::list_content)
             .service(content_handler::delete_content)
     })
-    .bind(format!("0.0.0.0:{}", http_port))?
+    .bind(format!("[::]:{}",  http_port))?
     .run()
     .await
 }
