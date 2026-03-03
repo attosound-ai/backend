@@ -106,14 +106,16 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
    * user.created -> create default notification preferences (welcome notification)
    */
   private async handleUserCreated(data: {
-    user_id: string;
+    id?: string;
+    user_id?: string;
     username: string;
   }): Promise<void> {
-    this.logger.log(`Processing user.created for user ${data.user_id}`);
+    const userId = data.id ?? data.user_id;
+    this.logger.log(`Processing user.created for user ${userId}`);
 
     await this.prisma.notification.create({
       data: {
-        recipientId: data.user_id,
+        recipientId: userId,
         type: 'welcome',
         actorId: 'system',
         referenceId: null,

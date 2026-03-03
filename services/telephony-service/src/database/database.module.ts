@@ -17,7 +17,7 @@ import { TimelineClip } from '../entities/timeline-clip.entity';
         type: 'postgres' as const,
         url: config.get<string>('database.url'),
         entities: [PhoneNumberAssignment, Call, AudioSegment, ProvisionedNumber, Project, TimelineClip],
-        synchronize: process.env.NODE_ENV !== 'production',
+        synchronize: true,
         logging: process.env.NODE_ENV !== 'production',
       }),
     }),
