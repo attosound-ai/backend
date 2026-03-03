@@ -111,6 +111,10 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     username: string;
   }): Promise<void> {
     const userId = data.id ?? data.user_id;
+    if (!userId) {
+      this.logger.error('user.created event missing user id, skipping');
+      return;
+    }
     this.logger.log(`Processing user.created for user ${userId}`);
 
     await this.prisma.notification.create({
@@ -123,7 +127,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       },
     });
 
-    this.logger.log(`Welcome notification created for user ${data.user_id}`);
+    this.logger.log(`Welcome notification created for user ${userId}`);
   }
 
   /**
