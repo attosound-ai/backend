@@ -64,6 +64,7 @@ func main() {
 	app := fiber.New(fiber.Config{
 		AppName:      "atto-user-service",
 		ErrorHandler: globalErrorHandler,
+		Network:      "tcp",
 	})
 
 	app.Use(recover.New())
