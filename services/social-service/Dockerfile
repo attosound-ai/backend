@@ -24,11 +24,11 @@ RUN apk add --no-cache openssl && \
     addgroup -g 1001 -S appgroup && \
     adduser -S appuser -u 1001 -G appgroup
 
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /proto /proto
+COPY --chown=appuser:appgroup --from=builder /app/dist ./dist
+COPY --chown=appuser:appgroup --from=builder /app/node_modules ./node_modules
+COPY --chown=appuser:appgroup --from=builder /app/package.json ./
+COPY --chown=appuser:appgroup --from=builder /app/prisma ./prisma
+COPY --chown=appuser:appgroup --from=builder /proto /proto
 
 USER appuser
 
