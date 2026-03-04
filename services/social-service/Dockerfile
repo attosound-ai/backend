@@ -35,4 +35,4 @@ USER appuser
 ENV NODE_ENV=production
 EXPOSE 3000 50053
 
-CMD ["node", "dist/main"]
+CMD ["sh", "-c", "npx prisma db push --skip-generate && node dist/main"]
