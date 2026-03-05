@@ -12,13 +12,17 @@ import (
 
 // SendRequest is the DTO for OTP send requests.
 type SendRequest struct {
-	Phone string `json:"phone"`
+	Phone   string `json:"phone"`
+	Channel string `json:"channel"` // "sms" (default) or "email"
+	Email   string `json:"email"`   // required when channel="email"
 }
 
 // VerifyRequest is the DTO for OTP verify requests.
 type VerifyRequest struct {
-	Phone string `json:"phone"`
-	Code  string `json:"code"`
+	Phone   string `json:"phone"`
+	Code    string `json:"code"`
+	Channel string `json:"channel"` // "sms" (default) or "email"
+	Email   string `json:"email"`   // required when channel="email"
 }
 
 // APIResponse is the standard JSON response envelope.
@@ -38,7 +42,7 @@ func NewOTPHandler(otpService *services.OTPService) *OTPHandler {
 	return &OTPHandler{otpService: otpService}
 }
 
-// Send handles POST /send — generates and sends an OTP via SMS.
+// Send handles POST /send — generates and sends an OTP via SMS or email.
 func (h *OTPHandler) Send(c *fiber.Ctx) error {
 	var req SendRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -48,17 +52,35 @@ func (h *OTPHandler) Send(c *fiber.Ctx) error {
 		})
 	}
 
-	phone, err := normalizePhone(req.Phone)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(APIResponse{
-			Success: false,
-			Error:   "a valid phone number is required (e.g. +12025551234)",
-		})
+	channel := req.Channel
+	if channel == "" {
+		channel = "sms"
+	}
+
+	var identifier string
+	if channel == "email" {
+		email := strings.TrimSpace(req.Email)
+		if email == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(APIResponse{
+				Success: false,
+				Error:   "email is required for email channel",
+			})
+		}
+		identifier = email
+	} else {
+		phone, err := normalizePhone(req.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(APIResponse{
+				Success: false,
+				Error:   "a valid phone number is required (e.g. +12025551234)",
+			})
+		}
+		identifier = phone
 	}
 
 	clientIP := c.IP()
 
-	if err := h.otpService.SendOTP(c.Context(), phone, clientIP); err != nil {
+	if err := h.otpService.SendOTP(c.Context(), identifier, clientIP, channel); err != nil {
 		return mapServiceError(c, err)
 	}
 
@@ -70,7 +92,7 @@ func (h *OTPHandler) Send(c *fiber.Ctx) error {
 	})
 }
 
-// Verify handles POST /verify — verifies the OTP code for the given phone.
+// Verify handles POST /verify — verifies the OTP code for the given phone or email.
 func (h *OTPHandler) Verify(c *fiber.Ctx) error {
 	var req VerifyRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -80,12 +102,30 @@ func (h *OTPHandler) Verify(c *fiber.Ctx) error {
 		})
 	}
 
-	phone, err := normalizePhone(req.Phone)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(APIResponse{
-			Success: false,
-			Error:   "a valid phone number is required",
-		})
+	channel := req.Channel
+	if channel == "" {
+		channel = "sms"
+	}
+
+	var identifier string
+	if channel == "email" {
+		email := strings.TrimSpace(req.Email)
+		if email == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(APIResponse{
+				Success: false,
+				Error:   "email is required for email channel",
+			})
+		}
+		identifier = email
+	} else {
+		phone, err := normalizePhone(req.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(APIResponse{
+				Success: false,
+				Error:   "a valid phone number is required",
+			})
+		}
+		identifier = phone
 	}
 
 	req.Code = strings.TrimSpace(req.Code)
@@ -96,14 +136,14 @@ func (h *OTPHandler) Verify(c *fiber.Ctx) error {
 		})
 	}
 
-	if err := h.otpService.VerifyCode(c.Context(), phone, req.Code); err != nil {
+	if err := h.otpService.VerifyCode(c.Context(), identifier, req.Code); err != nil {
 		return mapServiceError(c, err)
 	}
 
 	return c.Status(fiber.StatusOK).JSON(APIResponse{
 		Success: true,
 		Data: map[string]string{
-			"message": "phone verified successfully",
+			"message": "verified successfully",
 		},
 	})
 }

@@ -15,17 +15,19 @@ import (
 
 // OTPService handles the business logic for OTP operations.
 type OTPService struct {
-	cfg      *config.Config
-	repo     *repository.RedisRepository
-	delivery providers.DeliveryProvider
+	cfg           *config.Config
+	repo          *repository.RedisRepository
+	delivery      providers.DeliveryProvider // SMS
+	emailDelivery providers.DeliveryProvider // Email
 }
 
 // NewOTPService creates a new OTPService.
-func NewOTPService(cfg *config.Config, repo *repository.RedisRepository, delivery providers.DeliveryProvider) *OTPService {
+func NewOTPService(cfg *config.Config, repo *repository.RedisRepository, delivery providers.DeliveryProvider, emailDelivery providers.DeliveryProvider) *OTPService {
 	return &OTPService{
-		cfg:      cfg,
-		repo:     repo,
-		delivery: delivery,
+		cfg:           cfg,
+		repo:          repo,
+		delivery:      delivery,
+		emailDelivery: emailDelivery,
 	}
 }
 
@@ -109,9 +111,10 @@ func (s *OTPService) checkSendLimits(ctx context.Context, phone, clientIP string
 	return nil
 }
 
-// SendOTP generates an OTP, hashes it, stores it in Redis, and sends it via SMS.
-func (s *OTPService) SendOTP(ctx context.Context, phone, clientIP string) error {
-	if err := s.checkSendLimits(ctx, phone, clientIP); err != nil {
+// SendOTP generates an OTP, hashes it, stores it in Redis, and sends it via the given channel.
+// Channel can be "sms" (default) or "email". Identifier is the phone (E.164) or email address.
+func (s *OTPService) SendOTP(ctx context.Context, identifier, clientIP, channel string) error {
+	if err := s.checkSendLimits(ctx, identifier, clientIP); err != nil {
 		return err
 	}
 
@@ -128,35 +131,41 @@ func (s *OTPService) SendOTP(ctx context.Context, phone, clientIP string) error 
 	}
 
 	// Store hashed OTP in Redis with TTL
-	if err := s.repo.StoreOTP(ctx, phone, hashedCode, s.cfg.OTPExpiry); err != nil {
+	if err := s.repo.StoreOTP(ctx, identifier, hashedCode, s.cfg.OTPExpiry); err != nil {
 		return fmt.Errorf("failed to store OTP: %w", err)
 	}
 
 	// Set rate limit cooldown
-	if err := s.repo.SetRateLimit(ctx, phone, s.cfg.RateLimitSeconds); err != nil {
-		log.Printf("[OTP] Warning: failed to set rate limit for %s: %v", phone, err)
+	if err := s.repo.SetRateLimit(ctx, identifier, s.cfg.RateLimitSeconds); err != nil {
+		log.Printf("[OTP] Warning: failed to set rate limit for %s: %v", identifier, err)
 	}
 
 	// Increment counters
-	_ = s.repo.IncrementHourly(ctx, phone)
-	_ = s.repo.IncrementDaily(ctx, phone)
+	_ = s.repo.IncrementHourly(ctx, identifier)
+	_ = s.repo.IncrementDaily(ctx, identifier)
 	if clientIP != "" {
 		_ = s.repo.IncrementIPHourly(ctx, clientIP)
 	}
 
-	// Send SMS
+	// Send via appropriate channel
 	message := fmt.Sprintf(
 		"Your Atto Sound code is: %s. Expires in %d min.",
 		code,
 		int(s.cfg.OTPExpiry.Minutes()),
 	)
 
-	if err := s.delivery.Send(phone, message); err != nil {
-		_ = s.repo.DeleteOTP(ctx, phone)
-		return fmt.Errorf("failed to send OTP: %w", err)
+	var sendErr error
+	if channel == "email" {
+		sendErr = s.emailDelivery.Send(identifier, message)
+	} else {
+		sendErr = s.delivery.Send(identifier, message)
+	}
+	if sendErr != nil {
+		_ = s.repo.DeleteOTP(ctx, identifier)
+		return fmt.Errorf("failed to send OTP: %w", sendErr)
 	}
 
-	log.Printf("[OTP] Code sent to %s", phone)
+	log.Printf("[OTP] Code sent to %s via %s", identifier, channel)
 	return nil
 }
 
@@ -169,6 +178,14 @@ func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
 	}
 	if blocked {
 		return fmt.Errorf(errBlocked)
+	}
+
+	// Dev bypass: accept "000000" when BYPASS_OTP=true
+	if s.cfg.BypassOTP && code == "000000" {
+		log.Printf("[OTP] Bypass code accepted for %s (dev mode)", phone)
+		_ = s.repo.DeleteOTP(ctx, phone)
+		_ = s.repo.ClearFailures(ctx, phone)
+		return nil
 	}
 
 	// Retrieve hashed OTP and attempt count from Redis

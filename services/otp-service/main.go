@@ -48,7 +48,17 @@ func main() {
 	// ── Initialise dependencies ──
 	repo := repository.NewRedisRepository(redisClient)
 	delivery := providers.NewDeliveryProvider(cfg)
-	otpService := services.NewOTPService(cfg, repo, delivery)
+
+	var emailDelivery providers.DeliveryProvider
+	if cfg.SMTPHost != "" {
+		log.Println("[DELIVERY] Using SMTP email provider")
+		emailDelivery = providers.NewEmailProvider(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFrom)
+	} else {
+		log.Println("[DELIVERY] Using console provider for email (development mode)")
+		emailDelivery = providers.NewConsoleProvider()
+	}
+
+	otpService := services.NewOTPService(cfg, repo, delivery, emailDelivery)
 	otpHandler := handlers.NewOTPHandler(otpService)
 	healthHandler := handlers.NewHealthHandler()
 

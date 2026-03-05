@@ -29,6 +29,16 @@ type Config struct {
 	MaxOTPPerIPHour   int
 	BlockDuration     time.Duration
 	MaxConsecFailures int
+
+	// SMTP for email OTP delivery
+	SMTPHost     string
+	SMTPPort     string
+	SMTPUser     string
+	SMTPPassword string
+	SMTPFrom     string
+
+	// Dev-only: accept "000000" as valid OTP
+	BypassOTP bool
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -51,6 +61,14 @@ func Load() *Config {
 		MaxOTPPerIPHour:   getEnvInt("MAX_OTP_PER_IP_HOUR", 10),
 		BlockDuration:     time.Duration(getEnvInt("BLOCK_DURATION_MINUTES", 30)) * time.Minute,
 		MaxConsecFailures: getEnvInt("MAX_CONSEC_FAILURES", 3),
+
+		SMTPHost:     getEnv("SMTP_HOST", ""),
+		SMTPPort:     getEnv("SMTP_PORT", "587"),
+		SMTPUser:     getEnv("SMTP_USER", ""),
+		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
+		SMTPFrom:     getEnv("SMTP_FROM", "noreply@attosound.com"),
+
+		BypassOTP: getEnv("BYPASS_OTP", "false") == "true",
 	}
 	return cfg
 }
