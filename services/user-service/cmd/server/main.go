@@ -91,10 +91,20 @@ func main() {
 	auth.Post("/login/otp", authHandler.LoginOTP)
 	auth.Post("/logout", authHandler.Logout)
 	auth.Post("/refresh", authHandler.Refresh)
+	auth.Post("/forgot-password", authHandler.ForgotPassword)
+	auth.Post("/reset-password", authHandler.ResetPassword)
+
+	// 2FA login (public — uses temp token, not JWT)
+	auth.Post("/login/2fa", authHandler.Login2FA)
 
 	// Auth routes (protected)
 	auth.Get("/me", middleware.RequireAuth(jwtMgr), authHandler.Me)
 	auth.Post("/complete-registration", middleware.RequireAuth(jwtMgr), authHandler.CompleteRegistration)
+
+	// 2FA management (protected)
+	auth.Post("/2fa/enable", middleware.RequireAuth(jwtMgr), authHandler.Enable2FAInit)
+	auth.Post("/2fa/confirm", middleware.RequireAuth(jwtMgr), authHandler.Enable2FAConfirm)
+	auth.Post("/2fa/disable", middleware.RequireAuth(jwtMgr), authHandler.Disable2FA)
 
 	// User routes (protected — must be registered before parameterized routes)
 	users := app.Group("/users")

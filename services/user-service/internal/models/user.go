@@ -54,6 +54,7 @@ type UserCredentials struct {
 	PasswordHash     string    `gorm:"size:255;not null" json:"-"`
 	TOTPSecret       *string   `gorm:"size:255" json:"-"`
 	TwoFactorEnabled bool      `gorm:"default:false" json:"twoFactorEnabled"`
+	TwoFactorMethod  string    `gorm:"size:10;default:''" json:"twoFactorMethod"`
 	CreatedAt        time.Time `json:"createdAt"`
 	UpdatedAt        time.Time `json:"updatedAt"`
 }

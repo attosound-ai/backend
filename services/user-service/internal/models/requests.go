@@ -54,9 +54,10 @@ type UpdateProfileRequest struct {
 }
 
 // LoginRequest is the DTO for user login.
+// Identifier can be an email, username, or phone number (without country code).
 type LoginRequest struct {
-	Email    string `json:"email" validate:"required,email"`
-	Password string `json:"password" validate:"required"`
+	Identifier string `json:"identifier" validate:"required"`
+	Password   string `json:"password" validate:"required"`
 }
 
 // LoginOTPRequest is the DTO for OTP-based login (passwordless).
@@ -110,12 +111,26 @@ type UserProfile struct {
 	ArtistEmail        *string `json:"artistEmail,omitempty"`
 	ArtistPhone        *string `json:"artistPhone,omitempty"`
 	ProfileVerified    bool    `json:"profileVerified"`
+	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
+	TwoFactorMethod    string `json:"twoFactorMethod"`
 	RegistrationStatus string  `json:"registrationStatus"`
 	RepresentativeID   *uint64 `json:"representativeId,omitempty"`
 	FollowersCount     int64   `json:"followersCount"`
 	FollowingCount     int64   `json:"followingCount"`
 	PostsCount         int64   `json:"postsCount"`
 	CreatedAt          string  `json:"createdAt"`
+}
+
+// ForgotPasswordRequest initiates the password reset flow.
+type ForgotPasswordRequest struct {
+	Email string `json:"email" validate:"required,email"`
+}
+
+// ResetPasswordRequest sets a new password after OTP verification.
+type ResetPasswordRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	OTP      string `json:"otp" validate:"required,len=6"`
+	Password string `json:"password" validate:"required,min=8"`
 }
 
 // InmateLookupResponse holds parsed inmate data from a state DOC website.
@@ -163,4 +178,44 @@ func (u *User) ToProfile() *UserProfile {
 		p.RepresentativeID = u.RepresentativeID
 	}
 	return p
+}
+
+// ToProfileWith2FA converts a User model to a UserProfile DTO including 2FA status.
+func (u *User) ToProfileWith2FA(creds *UserCredentials) *UserProfile {
+	p := u.ToProfile()
+	if creds != nil {
+		p.TwoFactorEnabled = creds.TwoFactorEnabled
+		p.TwoFactorMethod = creds.TwoFactorMethod
+	}
+	return p
+}
+
+// Enable2FARequest initiates 2FA setup — sends a verification OTP.
+type Enable2FARequest struct {
+	Method string `json:"method"` // "sms" or "email"
+}
+
+// Verify2FASetupRequest confirms the OTP to finalize 2FA enablement.
+type Verify2FASetupRequest struct {
+	Code   string `json:"code"`
+	Method string `json:"method"` // "sms" or "email"
+}
+
+// Disable2FARequest disables 2FA (requires password confirmation).
+type Disable2FARequest struct {
+	Password string `json:"password"`
+}
+
+// Login2FARequest completes login when 2FA is required.
+type Login2FARequest struct {
+	TempToken string `json:"tempToken"`
+	Code      string `json:"code"`
+}
+
+// Login2FAResponse is returned when login requires a second factor.
+type Login2FAResponse struct {
+	Requires2FA  bool   `json:"requires2FA"`
+	Method       string `json:"method"`
+	TempToken    string `json:"tempToken"`
+	MaskedTarget string `json:"maskedTarget"`
 }

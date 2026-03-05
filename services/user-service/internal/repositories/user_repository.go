@@ -79,6 +79,19 @@ func (r *UserRepository) FindByFullPhone(fullPhone string) (*models.User, error)
 	return &user, nil
 }
 
+// FindByPhoneNumber retrieves a user by their phone number (without country code).
+func (r *UserRepository) FindByPhoneNumber(number string) (*models.User, error) {
+	var user models.User
+	err := r.db.Where("phone_number = ?", number).First(&user).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &user, nil
+}
+
 // FindByUsername retrieves a user by their username.
 func (r *UserRepository) FindByUsername(username string) (*models.User, error) {
 	var user models.User
@@ -140,6 +153,23 @@ func (r *UserRepository) UpdateUser(user *models.User) error {
 // UpdateUserFields updates only the specified columns on a user record.
 func (r *UserRepository) UpdateUserFields(id uint64, updates map[string]interface{}) error {
 	return r.db.Model(&models.User{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// UpdateCredentialsPassword updates only the password_hash for a given user.
+func (r *UserRepository) UpdateCredentialsPassword(userID uint64, passwordHash string) error {
+	return r.db.Model(&models.UserCredentials{}).
+		Where("user_id = ?", userID).
+		Update("password_hash", passwordHash).Error
+}
+
+// UpdateCredentials2FA updates the 2FA fields on UserCredentials.
+func (r *UserRepository) UpdateCredentials2FA(userID uint64, enabled bool, method string) error {
+	return r.db.Model(&models.UserCredentials{}).
+		Where("user_id = ?", userID).
+		Updates(map[string]interface{}{
+			"two_factor_enabled": enabled,
+			"two_factor_method":  method,
+		}).Error
 }
 
 // CreateUserWithCredentials creates a user and their credentials in a single transaction.

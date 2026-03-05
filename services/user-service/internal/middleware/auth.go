@@ -102,6 +102,35 @@ func (m *JWTManager) ValidateToken(tokenStr string) (*JWTClaims, error) {
 	return claims, nil
 }
 
+// Generate2FAToken creates a short-lived JWT (5 min) for the 2FA verification step.
+func (m *JWTManager) Generate2FAToken(userID uint64) (string, error) {
+	now := time.Now()
+	idStr := strconv.FormatUint(userID, 10)
+	claims := JWTClaims{
+		UserID: idStr,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   idStr,
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(5 * time.Minute)),
+			Issuer:    "atto-sound-2fa",
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(m.secret)
+}
+
+// Validate2FAToken validates a 2FA temporary token and checks the issuer.
+func (m *JWTManager) Validate2FAToken(tokenStr string) (*JWTClaims, error) {
+	claims, err := m.ValidateToken(tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	if claims.Issuer != "atto-sound-2fa" {
+		return nil, jwt.ErrSignatureInvalid
+	}
+	return claims, nil
+}
+
 // RequireAuth is a Fiber middleware that validates the JWT from the Authorization header.
 // On success it stores the claims in c.Locals("claims") and the user ID in c.Locals("userID").
 func RequireAuth(jwtMgr *JWTManager) fiber.Handler {

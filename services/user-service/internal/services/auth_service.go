@@ -170,23 +170,77 @@ func (s *AuthService) LoginWithOTP(ctx context.Context, req *models.LoginOTPRequ
 	}, nil
 }
 
-// Login authenticates a user by email and password, returning tokens on success.
-func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest) (*models.AuthResponse, error) {
-	user, err := s.repo.FindByEmail(req.Email)
+// isDigitsOnly returns true if s contains only ASCII digits and is non-empty.
+func isDigitsOnly(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Login authenticates a user by identifier (email, username, or phone) and password.
+// Returns *models.AuthResponse if no 2FA, or *models.Login2FAResponse if 2FA is required.
+func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest) (interface{}, error) {
+	identifier := strings.TrimSpace(req.Identifier)
+
+	var user *models.User
+	var err error
+
+	switch {
+	case strings.Contains(identifier, "@"):
+		user, err = s.repo.FindByEmail(strings.ToLower(identifier))
+	case isDigitsOnly(identifier):
+		user, err = s.repo.FindByPhoneNumber(identifier)
+	default:
+		user, err = s.repo.FindByUsername(strings.ToLower(identifier))
+	}
+
 	if err != nil {
 		return nil, errors.New("internal error")
 	}
 	if user == nil {
-		return nil, errors.New("invalid email or password")
+		return nil, errors.New("invalid credentials")
 	}
 
 	creds, err := s.repo.FindCredentialsByUserID(user.ID)
 	if err != nil || creds == nil {
-		return nil, errors.New("invalid email or password")
+		return nil, errors.New("invalid credentials")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(creds.PasswordHash), []byte(req.Password)); err != nil {
-		return nil, errors.New("invalid email or password")
+		return nil, errors.New("invalid credentials")
+	}
+
+	// Check if 2FA is enabled
+	if creds.TwoFactorEnabled && creds.TwoFactorMethod != "" {
+		tempToken, err := s.jwtMgr.Generate2FAToken(user.ID)
+		if err != nil {
+			return nil, errors.New("internal error")
+		}
+
+		// Send OTP to user's chosen channel
+		var target string
+		if creds.TwoFactorMethod == "email" {
+			target = user.Email
+		} else {
+			if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
+				return nil, errors.New("no phone number on file for 2FA")
+			}
+			target = *user.PhoneCountryCode + *user.PhoneNumber
+		}
+		s.sendOTPViaService(target, creds.TwoFactorMethod)
+
+		return &models.Login2FAResponse{
+			Requires2FA:  true,
+			Method:       creds.TwoFactorMethod,
+			TempToken:    tempToken,
+			MaskedTarget: maskTarget(target, creds.TwoFactorMethod),
+		}, nil
 	}
 
 	tokens, err := s.jwtMgr.GenerateTokenPair(user)
@@ -198,6 +252,198 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest) (*mod
 		User:   user.ToProfile(),
 		Tokens: tokens,
 	}, nil
+}
+
+// Login2FA completes the second step of 2FA login.
+func (s *AuthService) Login2FA(ctx context.Context, req *models.Login2FARequest) (*models.AuthResponse, error) {
+	claims, err := s.jwtMgr.Validate2FAToken(req.TempToken)
+	if err != nil {
+		return nil, errors.New("invalid or expired 2FA token")
+	}
+
+	userID, err := strconv.ParseUint(claims.UserID, 10, 64)
+	if err != nil {
+		return nil, errors.New("invalid token")
+	}
+
+	user, err := s.repo.FindByID(userID)
+	if err != nil || user == nil {
+		return nil, errors.New("user not found")
+	}
+
+	creds, err := s.repo.FindCredentialsByUserID(userID)
+	if err != nil || creds == nil {
+		return nil, errors.New("internal error")
+	}
+
+	// Determine OTP identifier
+	var otpIdentifier string
+	if creds.TwoFactorMethod == "email" {
+		otpIdentifier = user.Email
+	} else {
+		if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
+			return nil, errors.New("no phone on file")
+		}
+		otpIdentifier = *user.PhoneCountryCode + *user.PhoneNumber
+	}
+
+	// Verify OTP via OTP service
+	if err := s.verifyOTPViaService(otpIdentifier, req.Code, creds.TwoFactorMethod); err != nil {
+		return nil, err
+	}
+
+	tokens, err := s.jwtMgr.GenerateTokenPair(user)
+	if err != nil {
+		return nil, errors.New("failed to generate tokens")
+	}
+
+	return &models.AuthResponse{
+		User:   user.ToProfile(),
+		Tokens: tokens,
+	}, nil
+}
+
+// Enable2FAInit sends a verification OTP to confirm the user controls the channel.
+func (s *AuthService) Enable2FAInit(ctx context.Context, userID string, req *models.Enable2FARequest) (string, error) {
+	uid, err := strconv.ParseUint(userID, 10, 64)
+	if err != nil {
+		return "", errors.New("invalid user ID")
+	}
+
+	user, err := s.repo.FindByID(uid)
+	if err != nil || user == nil {
+		return "", errors.New("user not found")
+	}
+
+	var target string
+	if req.Method == "email" {
+		target = user.Email
+	} else {
+		if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
+			return "", errors.New("no phone number on file — add a phone number first")
+		}
+		target = *user.PhoneCountryCode + *user.PhoneNumber
+	}
+
+	s.sendOTPViaService(target, req.Method)
+	return maskTarget(target, req.Method), nil
+}
+
+// Enable2FAConfirm verifies the OTP and enables 2FA.
+func (s *AuthService) Enable2FAConfirm(ctx context.Context, userID string, req *models.Verify2FASetupRequest) error {
+	uid, err := strconv.ParseUint(userID, 10, 64)
+	if err != nil {
+		return errors.New("invalid user ID")
+	}
+
+	user, err := s.repo.FindByID(uid)
+	if err != nil || user == nil {
+		return errors.New("user not found")
+	}
+
+	var otpIdentifier string
+	if req.Method == "email" {
+		otpIdentifier = user.Email
+	} else {
+		if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
+			return errors.New("no phone number on file")
+		}
+		otpIdentifier = *user.PhoneCountryCode + *user.PhoneNumber
+	}
+
+	if err := s.verifyOTPViaService(otpIdentifier, req.Code, req.Method); err != nil {
+		return err
+	}
+
+	return s.repo.UpdateCredentials2FA(uid, true, req.Method)
+}
+
+// Disable2FA turns off 2FA after password verification.
+func (s *AuthService) Disable2FA(ctx context.Context, userID string, req *models.Disable2FARequest) error {
+	uid, err := strconv.ParseUint(userID, 10, 64)
+	if err != nil {
+		return errors.New("invalid user ID")
+	}
+
+	creds, err := s.repo.FindCredentialsByUserID(uid)
+	if err != nil || creds == nil {
+		return errors.New("internal error")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(creds.PasswordHash), []byte(req.Password)); err != nil {
+		return errors.New("incorrect password")
+	}
+
+	return s.repo.UpdateCredentials2FA(uid, false, "")
+}
+
+// sendOTPViaService sends an OTP via the OTP microservice.
+func (s *AuthService) sendOTPViaService(target, channel string) {
+	body := map[string]string{"channel": channel}
+	if channel == "email" {
+		body["email"] = target
+	} else {
+		body["phone"] = target
+	}
+	jsonBody, _ := json.Marshal(body)
+	otpURL := fmt.Sprintf("%s/otp/send", s.otpServiceURL)
+	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(jsonBody))
+	if err != nil {
+		log.Printf("[AUTH] Failed to send 2FA OTP: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[AUTH] OTP service returned %d for 2FA send", resp.StatusCode)
+	}
+}
+
+// verifyOTPViaService verifies an OTP code via the OTP microservice.
+func (s *AuthService) verifyOTPViaService(identifier, code, channel string) error {
+	body := map[string]string{"code": code, "channel": channel}
+	if channel == "email" {
+		body["email"] = identifier
+	} else {
+		body["phone"] = identifier
+	}
+	jsonBody, _ := json.Marshal(body)
+	otpURL := fmt.Sprintf("%s/otp/verify", s.otpServiceURL)
+	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(jsonBody))
+	if err != nil {
+		return errors.New("failed to verify code")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var otpResp struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&otpResp)
+		if otpResp.Error != "" {
+			return errors.New(otpResp.Error)
+		}
+		return errors.New("invalid or expired code")
+	}
+	return nil
+}
+
+// maskTarget masks an email or phone for display (e.g. "d***@gmail.com", "***1234").
+func maskTarget(target, method string) string {
+	if method == "email" {
+		parts := strings.SplitN(target, "@", 2)
+		if len(parts) == 2 {
+			name := parts[0]
+			if len(name) > 2 {
+				return name[:1] + strings.Repeat("*", len(name)-2) + name[len(name)-1:] + "@" + parts[1]
+			}
+			return name[:1] + "***@" + parts[1]
+		}
+		return "***"
+	}
+	if len(target) > 4 {
+		return strings.Repeat("*", len(target)-4) + target[len(target)-4:]
+	}
+	return "***"
 }
 
 // RefreshToken validates a refresh token and issues a new access token.
@@ -406,6 +652,68 @@ func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, r
 	}, nil
 }
 
+// ForgotPassword sends an OTP to the user's registered phone for password reset.
+// Always returns nil to prevent email enumeration.
+func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPasswordRequest) error {
+	user, err := s.repo.FindByEmail(req.Email)
+	if err != nil {
+		return nil
+	}
+	if user == nil || user.PhoneCountryCode == nil || user.PhoneNumber == nil {
+		return nil
+	}
+
+	fullPhone := *user.PhoneCountryCode + *user.PhoneNumber
+	otpBody, _ := json.Marshal(map[string]string{"phone": fullPhone})
+	otpURL := fmt.Sprintf("%s/otp/send", s.otpServiceURL)
+	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(otpBody))
+	if err != nil {
+		log.Printf("[AUTH] Failed to send password reset OTP for %s: %v", req.Email, err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[AUTH] OTP service returned %d for password reset: %s", resp.StatusCode, req.Email)
+	}
+	return nil
+}
+
+// ResetPassword verifies the OTP and updates the user's password.
+func (s *AuthService) ResetPassword(ctx context.Context, req *models.ResetPasswordRequest) error {
+	user, err := s.repo.FindByEmail(req.Email)
+	if err != nil || user == nil {
+		return errors.New("invalid request")
+	}
+	if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
+		return errors.New("no phone number on file for this account")
+	}
+
+	fullPhone := *user.PhoneCountryCode + *user.PhoneNumber
+
+	// Verify OTP via OTP service
+	otpBody, _ := json.Marshal(map[string]string{"phone": fullPhone, "code": req.OTP})
+	otpURL := fmt.Sprintf("%s/otp/verify", s.otpServiceURL)
+	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(otpBody))
+	if err != nil {
+		log.Printf("[AUTH] Failed to reach OTP service for password reset: %v", err)
+		return errors.New("failed to verify code")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return errors.New("invalid or expired code")
+	}
+
+	// Hash and store new password
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return errors.New("failed to process new password")
+	}
+
+	return s.repo.UpdateCredentialsPassword(user.ID, string(hash))
+}
+
 // GetCurrentUser retrieves the user profile for the given user ID (from JWT claims).
 func (s *AuthService) GetCurrentUser(ctx context.Context, userID string) (*models.UserProfile, error) {
 	uid, err := strconv.ParseUint(userID, 10, 64)
@@ -421,5 +729,6 @@ func (s *AuthService) GetCurrentUser(ctx context.Context, userID string) (*model
 		return nil, errors.New("user not found")
 	}
 
-	return user.ToProfile(), nil
+	creds, _ := s.repo.FindCredentialsByUserID(uid)
+	return user.ToProfileWith2FA(creds), nil
 }

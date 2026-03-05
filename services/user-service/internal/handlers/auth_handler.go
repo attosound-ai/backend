@@ -81,10 +81,10 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		})
 	}
 
-	if req.Email == "" || req.Password == "" {
+	if req.Identifier == "" || req.Password == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
-			Error:   "email and password are required",
+			Error:   "identifier and password are required",
 		})
 	}
 
@@ -309,6 +309,222 @@ func (h *AuthHandler) CompleteRegistration(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
 		Data:    result,
+	})
+}
+
+// ForgotPassword handles POST /auth/forgot-password
+func (h *AuthHandler) ForgotPassword(c *fiber.Ctx) error {
+	var req models.ForgotPasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid request body",
+		})
+	}
+
+	if req.Email == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "email is required",
+		})
+	}
+
+	// Always return 200 regardless of whether email exists (prevents enumeration)
+	_ = h.authService.ForgotPassword(c.Context(), &req)
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data: map[string]string{
+			"message": "if this email is registered, a code has been sent to the associated phone number",
+		},
+	})
+}
+
+// ResetPassword handles POST /auth/reset-password
+func (h *AuthHandler) ResetPassword(c *fiber.Ctx) error {
+	var req models.ResetPasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid request body",
+		})
+	}
+
+	if req.Email == "" || req.OTP == "" || req.Password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "email, otp, and password are required",
+		})
+	}
+	if len(req.Password) < 8 {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "password must be at least 8 characters",
+		})
+	}
+
+	if err := h.authService.ResetPassword(c.Context(), &req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    map[string]string{"message": "password updated successfully"},
+	})
+}
+
+// Login2FA handles POST /auth/login/2fa — completes 2FA verification.
+func (h *AuthHandler) Login2FA(c *fiber.Ctx) error {
+	var req models.Login2FARequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid request body",
+		})
+	}
+	if req.TempToken == "" || req.Code == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "tempToken and code are required",
+		})
+	}
+
+	result, err := h.authService.Login2FA(c.Context(), &req)
+	if err != nil {
+		status := fiber.StatusUnauthorized
+		if err.Error() == "internal error" || err.Error() == "failed to verify code" {
+			status = fiber.StatusInternalServerError
+		}
+		return c.Status(status).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    result,
+	})
+}
+
+// Enable2FAInit handles POST /auth/2fa/enable (requires JWT)
+func (h *AuthHandler) Enable2FAInit(c *fiber.Ctx) error {
+	claims, ok := c.Locals("claims").(*middleware.JWTClaims)
+	if !ok || claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+			Success: false,
+			Error:   "unauthorized",
+		})
+	}
+
+	var req models.Enable2FARequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid request body",
+		})
+	}
+	if req.Method != "sms" && req.Method != "email" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "method must be 'sms' or 'email'",
+		})
+	}
+
+	maskedTarget, err := h.authService.Enable2FAInit(c.Context(), claims.UserID, &req)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data: map[string]string{
+			"message":      "verification code sent",
+			"maskedTarget": maskedTarget,
+		},
+	})
+}
+
+// Enable2FAConfirm handles POST /auth/2fa/confirm (requires JWT)
+func (h *AuthHandler) Enable2FAConfirm(c *fiber.Ctx) error {
+	claims, ok := c.Locals("claims").(*middleware.JWTClaims)
+	if !ok || claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+			Success: false,
+			Error:   "unauthorized",
+		})
+	}
+
+	var req models.Verify2FASetupRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid request body",
+		})
+	}
+	if req.Code == "" || req.Method == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "code and method are required",
+		})
+	}
+
+	if err := h.authService.Enable2FAConfirm(c.Context(), claims.UserID, &req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    map[string]string{"message": "2FA enabled successfully"},
+	})
+}
+
+// Disable2FA handles POST /auth/2fa/disable (requires JWT)
+func (h *AuthHandler) Disable2FA(c *fiber.Ctx) error {
+	claims, ok := c.Locals("claims").(*middleware.JWTClaims)
+	if !ok || claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+			Success: false,
+			Error:   "unauthorized",
+		})
+	}
+
+	var req models.Disable2FARequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid request body",
+		})
+	}
+	if req.Password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "password is required",
+		})
+	}
+
+	if err := h.authService.Disable2FA(c.Context(), claims.UserID, &req); err != nil {
+		status := fiber.StatusBadRequest
+		if err.Error() == "incorrect password" {
+			status = fiber.StatusUnauthorized
+		}
+		return c.Status(status).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    map[string]string{"message": "2FA disabled successfully"},
 	})
 }
 
