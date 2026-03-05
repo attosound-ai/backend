@@ -161,7 +161,7 @@ async def confirm_payment(
             detail=f"Payment not completed (status: {pi.status})",
         )
 
-    plan_id = (pi.metadata or {}).get("plan_id", "annual")
+    plan_id = (pi.metadata or {}).get("plan_id", "record")
     amount = Decimal(pi.amount) / Decimal(100)
 
     svc = PaymentService(session)

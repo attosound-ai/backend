@@ -11,6 +11,7 @@ import { promises as fs } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
+import { CacheService } from "../cache/cache.service";
 
 @Injectable()
 export class AudioProcessorService {
@@ -23,6 +24,7 @@ export class AudioProcessorService {
     private readonly segmentRepo: Repository<AudioSegment>,
     private readonly storageService: AudioStorageService,
     private readonly config: ConfigService,
+    private readonly cache: CacheService,
   ) {
     this.bucket = this.config.get<string>("s3.bucket", "atto-audio-segments");
 
@@ -48,6 +50,11 @@ export class AudioProcessorService {
     segmentId: string,
     numSamples: number,
   ): Promise<number[]> {
+    // Check Redis cache first (waveforms are immutable)
+    const cacheKey = `telephony:waveform:${segmentId}:${numSamples}`;
+    const cached = await this.cache.get<number[]>(cacheKey);
+    if (cached) return cached;
+
     const segment = await this.segmentRepo.findOne({
       where: { id: segmentId },
     });
@@ -102,6 +109,9 @@ export class AudioProcessorService {
         // Normalize to 0-1 range (Int16 max = 32768)
         amplitudes.push(Math.round((rms / 32768) * 1000) / 1000);
       }
+
+      // Cache for ~14 days with jitter
+      await this.cache.set(cacheKey, amplitudes, this.cache.jitterTtl(14 * 86400));
 
       return amplitudes;
     } catch (error) {

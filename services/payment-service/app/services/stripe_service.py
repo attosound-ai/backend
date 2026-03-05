@@ -23,14 +23,16 @@ logger.info(
 
 # Plan lookup: plan_id -> Stripe Price ID
 PLAN_PRICE_MAP: dict[str, str] = {
-    "annual": settings.stripe_annual_price_id,   # ATTO Pro  $99/year
-    "monthly": settings.stripe_monthly_price_id,  # ATTO      $9.99/month
+    "record": settings.stripe_record_price_id,          # $99/year
+    "record_pro": settings.stripe_record_pro_price_id,  # $139/year
+    "connect_pro": settings.stripe_connect_pro_price_id, # $1,999/year
 }
 
 # Amount in cents used for one-time PaymentIntent when no recurring price
 PLAN_AMOUNT_MAP: dict[str, int] = {
-    "annual": 9900,    # $99.00
-    "monthly": 999,    # $9.99
+    "record": 9900,       # $99.00
+    "record_pro": 13900,  # $139.00
+    "connect_pro": 199900, # $1,999.00
 }
 
 

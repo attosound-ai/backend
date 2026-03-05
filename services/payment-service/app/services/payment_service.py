@@ -9,6 +9,7 @@ from app.kafka.producer import publish_event
 from app.models.subscription import Subscription
 from app.models.transaction import Transaction
 from app.repositories.transaction_repo import TransactionRepository
+from app.entitlements import get_entitlements
 from app.schemas.subscription import CancelSubscriptionResponse, SubscriptionResponse
 from app.schemas.transaction import TransactionResponse
 
@@ -21,21 +22,23 @@ TOPIC_SUBSCRIPTION_CANCELLED = "subscription.cancelled"
 
 # Plan configuration
 PLAN_DURATIONS_DAYS: dict[str, int] = {
-    "free": 36500,  # ~100 years (effectively unlimited)
-    "basic": 30,
-    "premium": 30,
-    "artist_pro": 30,
+    "connect_free": 36500,  # ~100 years (effectively unlimited)
+    "record": 365,
+    "record_pro": 365,
+    "connect_pro": 365,
+    # Legacy mappings (for in-flight subscriptions)
+    "free": 36500,
     "annual": 365,
-    "monthly": 30,
 }
 
 PLAN_PRICES: dict[str, Decimal] = {
+    "connect_free": Decimal("0.00"),
+    "record": Decimal("99.00"),
+    "record_pro": Decimal("139.00"),
+    "connect_pro": Decimal("1999.00"),
+    # Legacy
     "free": Decimal("0.00"),
-    "basic": Decimal("9.99"),
-    "premium": Decimal("19.99"),
-    "artist_pro": Decimal("29.99"),
     "annual": Decimal("99.00"),
-    "monthly": Decimal("9.99"),
 }
 
 
@@ -58,14 +61,16 @@ def _txn_to_response(txn: Transaction) -> TransactionResponse:
 
 def _sub_to_response(sub: Subscription) -> SubscriptionResponse:
     """Convert a Subscription ORM model to an API response schema."""
+    plan_str = sub.plan if isinstance(sub.plan, str) else sub.plan.value
     return SubscriptionResponse(
         id=str(sub.id),
         user_id=str(sub.user_id),
-        plan=sub.plan if isinstance(sub.plan, str) else sub.plan.value,
+        plan=plan_str,
         status=sub.status if isinstance(sub.status, str) else sub.status.value,
         starts_at=sub.starts_at.isoformat() if sub.starts_at else "",
         expires_at=sub.expires_at.isoformat() if sub.expires_at else "",
         transaction_id=str(sub.transaction_id) if sub.transaction_id else None,
+        entitlements=sorted(e.value for e in get_entitlements(plan_str)),
         created_at=sub.created_at.isoformat() if sub.created_at else "",
         updated_at=sub.updated_at.isoformat() if sub.updated_at else "",
     )
@@ -247,14 +252,26 @@ class PaymentService:
         )
 
     async def create_free_subscription(self, user_id: str) -> SubscriptionResponse:
-        """Create a default free-tier subscription for a new user."""
+        """Create a default free-tier subscription for a new user.
+
+        Skips creation if the user already has an active subscription
+        (e.g. they paid during registration before the Kafka event arrived).
+        """
+        existing = await self.repo.get_active_subscription(user_id)
+        if existing:
+            logger.info(
+                "User %s already has active subscription %s (plan=%s), skipping free tier",
+                user_id, existing.id, existing.plan,
+            )
+            return _sub_to_response(existing)
+
         now = datetime.now(timezone.utc)
         sub = Subscription(
             id=uuid4(),
             user_id=user_id,
-            plan="free",
+            plan="connect_free",
             starts_at=now,
-            expires_at=now + timedelta(days=PLAN_DURATIONS_DAYS["free"]),
+            expires_at=now + timedelta(days=PLAN_DURATIONS_DAYS["connect_free"]),
             status="active",
             transaction_id=None,
         )
@@ -313,7 +330,7 @@ class PaymentService:
         sub = Subscription(
             id=uuid4(),
             user_id=user_id,
-            plan=plan_id if plan_id in ("free", "basic", "premium", "artist_pro", "annual", "monthly") else "premium",
+            plan=plan_id if plan_id in ("connect_free", "record", "record_pro", "connect_pro") else "record",
             starts_at=now,
             expires_at=now + timedelta(days=duration_days),
             status="active",

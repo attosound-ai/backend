@@ -9,6 +9,7 @@ import { MediaModule } from './media/media.module';
 import { KafkaModule } from './kafka/kafka.module';
 import { NumbersModule } from './numbers/numbers.module';
 import { ProjectsModule } from './projects/projects.module';
+import { CacheModule } from './cache/cache.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { ProjectsModule } from './projects/projects.module';
       isGlobal: true,
       load: [configuration],
     }),
+    CacheModule,
     DatabaseModule,
     WebhooksModule,
     TokensModule,

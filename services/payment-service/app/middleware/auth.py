@@ -65,8 +65,12 @@ class AuthMiddleware:
             req = StarletteRequest(scope, receive)
             path = req.url.path
 
-            # Enforce auth on payment routes (skip webhook which uses Stripe signature, skip health)
-            needs_auth = path.startswith("/payments/") and not path.endswith("/webhook")
+            # Enforce auth on payment routes (skip webhook, plans listing, and health)
+            needs_auth = (
+                path.startswith("/payments/")
+                and not path.endswith("/webhook")
+                and path != "/payments/subscriptions/plans"
+            )
             if needs_auth:
                 authorization = req.headers.get("Authorization")
                 user_id = req.headers.get("X-User-ID")

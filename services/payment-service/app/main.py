@@ -108,7 +108,7 @@ async def global_exception_handler(_request: Request, exc: Exception) -> JSONRes
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
-        host="::",
+        host="0.0.0.0",
         port=settings.http_port,
         log_level="info",
     )

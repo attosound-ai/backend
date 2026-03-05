@@ -1,8 +1,10 @@
 import {
   Controller,
   Get,
+  Post,
   Param,
   Query,
+  Body,
   ParseIntPipe,
   DefaultValuePipe,
 } from "@nestjs/common";
@@ -22,5 +24,21 @@ export class SegmentsController {
       samples,
     );
     return { success: true, data };
+  }
+
+  @Post("waveforms/batch")
+  async getWaveformsBatch(
+    @Body() body: { segmentIds: string[]; samples?: number },
+  ) {
+    const samples = body.samples ?? 100;
+    const results: Record<string, number[]> = {};
+
+    await Promise.all(
+      body.segmentIds.map(async (id) => {
+        results[id] = await this.projectsService.getWaveformData(id, samples);
+      }),
+    );
+
+    return { success: true, data: results };
   }
 }

@@ -490,8 +490,9 @@ services:
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
-      STRIPE_ANNUAL_PRICE_ID: ${STRIPE_ANNUAL_PRICE_ID:-}
-      STRIPE_MONTHLY_PRICE_ID: ${STRIPE_MONTHLY_PRICE_ID:-}
+      STRIPE_RECORD_PRICE_ID: ${STRIPE_RECORD_PRICE_ID:-}
+      STRIPE_RECORD_PRO_PRICE_ID: ${STRIPE_RECORD_PRO_PRICE_ID:-}
+      STRIPE_CONNECT_PRO_PRICE_ID: ${STRIPE_CONNECT_PRO_PRICE_ID:-}
       TWILIO_BRIDGE_NUMBER: ${TWILIO_BRIDGE_NUMBER:-}
     networks:
       - atto-network
@@ -511,12 +512,17 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "3009:3009"
     environment:
       PORT: 3009
       DATABASE_URL: postgresql://atto:atto_dev@postgres-telephony:5432/atto_telephony
       KAFKA_BROKERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: atto_dev
       JWT_SECRET: atto-dev-secret-change-in-production
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}

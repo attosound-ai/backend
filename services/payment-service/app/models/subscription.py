@@ -10,6 +10,11 @@ from app.models.base import Base
 
 
 class SubscriptionPlan(str, enum.Enum):
+    connect_free = "connect_free"
+    record = "record"
+    record_pro = "record_pro"
+    connect_pro = "connect_pro"
+    # Legacy (kept for existing DB rows until migration confirmed)
     free = "free"
     basic = "basic"
     premium = "premium"

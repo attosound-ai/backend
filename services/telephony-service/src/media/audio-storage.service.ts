@@ -8,6 +8,7 @@ import {
   GetObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { CacheService } from "../cache/cache.service";
 
 @Injectable()
 export class AudioStorageService implements OnModuleInit {
@@ -16,7 +17,10 @@ export class AudioStorageService implements OnModuleInit {
   private readonly s3Public: S3Client;
   private readonly bucket: string;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly cache: CacheService,
+  ) {
     this.bucket = this.config.get<string>("s3.bucket", "atto-audio-segments");
 
     const region = this.config.get<string>("s3.region", "us-east-1");
@@ -97,8 +101,16 @@ export class AudioStorageService implements OnModuleInit {
     key: string,
     expiresIn = 3600,
   ): Promise<string> {
+    const cacheKey = `telephony:presigned:${bucket}:${key}`;
+    const cached = await this.cache.get<string>(cacheKey);
+    if (cached) return cached;
+
     const command = new GetObjectCommand({ Bucket: bucket, Key: key });
-    return getSignedUrl(this.s3Public, command, { expiresIn });
+    const url = await getSignedUrl(this.s3Public, command, { expiresIn });
+
+    // Cache for 50% of expiry time to ensure URLs are still valid when served
+    await this.cache.set(cacheKey, url, Math.floor(expiresIn * 0.5));
+    return url;
   }
 
   /** Build a storage key for an audio segment. */

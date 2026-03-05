@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_publishable_key: str = ""
+    stripe_record_price_id: str = ""
+    stripe_record_pro_price_id: str = ""
+    stripe_connect_pro_price_id: str = ""
+    # Deprecated (keep temporarily for backward compatibility)
     stripe_annual_price_id: str = ""
     stripe_monthly_price_id: str = ""
 

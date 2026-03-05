@@ -34,4 +34,9 @@ export default () => ({
     bucket: process.env.S3_BUCKET || "atto-audio-segments",
     region: process.env.S3_REGION || "us-east-1",
   },
+  redis: {
+    host: process.env.REDIS_HOST || "redis",
+    port: parseInt(process.env.REDIS_PORT ?? "6379", 10),
+    password: process.env.REDIS_PASSWORD || "atto_dev",
+  },
 });
