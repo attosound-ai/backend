@@ -106,9 +106,11 @@ async def global_exception_handler(_request: Request, exc: Exception) -> JSONRes
 # ── Entrypoint ────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Railway uses IPv6 internally; Docker Compose uses IPv4.
+    host = "::" if settings.app_env == "production" else "0.0.0.0"
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
+        host=host,
         port=settings.http_port,
         log_level="info",
     )
