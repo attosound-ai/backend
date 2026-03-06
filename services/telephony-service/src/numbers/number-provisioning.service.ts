@@ -48,6 +48,17 @@ export class NumberProvisioningService {
         userId,
         existing.phoneNumber,
       );
+      // Re-publish so payment-service updates the new subscription's bridge_number
+      try {
+        await this.kafka.publish("number.provisioned", {
+          userId,
+          subscriptionId,
+          phoneNumber: existing.phoneNumber,
+          twilioNumberSid: existing.twilioNumberSid,
+        });
+      } catch (err) {
+        this.logger.warn("Failed to re-publish number.provisioned: %s", err);
+      }
       return existing.phoneNumber;
     }
 
