@@ -49,8 +49,14 @@ export class AudioStorageService implements OnModuleInit {
     });
 
     // Public client for generating presigned URLs accessible from outside Docker
+    const publicEp = s3PublicEndpoint || s3Endpoint;
+    this.logger.log(
+      "S3 public endpoint: %s (from env: %s)",
+      publicEp,
+      s3PublicEndpoint || "(empty, falling back to internal)",
+    );
     this.s3Public = new S3Client({
-      endpoint: s3PublicEndpoint || s3Endpoint,
+      endpoint: publicEp,
       region,
       credentials,
       forcePathStyle: true,
@@ -59,6 +65,11 @@ export class AudioStorageService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     await this.ensureBucket();
+    // Flush any cached presigned URLs from a previous deploy (endpoint may have changed)
+    const flushed = await this.cache.deletePattern("telephony:presigned:*");
+    if (flushed > 0) {
+      this.logger.log("Flushed %d cached presigned URLs", flushed);
+    }
   }
 
   /** Create the bucket if it doesn't exist. */

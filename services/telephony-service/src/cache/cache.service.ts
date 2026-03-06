@@ -69,6 +69,26 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Delete all keys matching a glob pattern (e.g. "telephony:presigned:*"). */
+  async deletePattern(pattern: string): Promise<number> {
+    if (!this.connected) return 0;
+    try {
+      let deleted = 0;
+      let cursor = "0";
+      do {
+        const [next, keys] = await this.client.scan(cursor, "MATCH", pattern, "COUNT", 100);
+        cursor = next;
+        if (keys.length > 0) {
+          await this.client.del(...keys);
+          deleted += keys.length;
+        }
+      } while (cursor !== "0");
+      return deleted;
+    } catch {
+      return 0;
+    }
+  }
+
   /** Add ±10% jitter to a TTL to prevent thundering herd. */
   jitterTtl(baseTtl: number): number {
     const jitter = baseTtl * 0.1;
