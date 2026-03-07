@@ -85,11 +85,6 @@ services:
         paths:
           - /socket
         strip_path: false
-        protocols:
-          - http
-          - https
-          - ws
-          - wss
 
   # MEDIA routes → Content Service (Rust)
   - name: media-service
