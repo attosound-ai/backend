@@ -88,6 +88,8 @@ services:
         protocols:
           - http
           - https
+          - ws
+          - wss
 
   # MEDIA routes → Content Service (Rust)
   - name: media-service
