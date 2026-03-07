@@ -76,6 +76,11 @@ services:
           - GET
           - POST
           - OPTIONS
+
+  # WebSocket → Chat Service root (Phoenix expects /socket/websocket)
+  - name: chat-websocket
+    url: http://chat-service:4000
+    routes:
       - name: websocket-routes
         paths:
           - /socket

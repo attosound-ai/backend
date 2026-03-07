@@ -138,7 +138,7 @@ func (r *UserRepository) SearchUsers(query string, limit int) ([]models.User, er
 		limit = 100
 	}
 	pattern := "%" + query + "%"
-	err := r.db.Where("(username ILIKE ? OR display_name ILIKE ?) AND registration_status = ?", pattern, pattern, "completed").
+	err := r.db.Where("(username ILIKE ? OR display_name ILIKE ? OR email ILIKE ? OR phone_number ILIKE ?) AND registration_status = ?", pattern, pattern, pattern, pattern, "completed").
 		Limit(limit).
 		Order("username ASC").
 		Find(&users).Error

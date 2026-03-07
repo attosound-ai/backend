@@ -225,9 +225,10 @@ export class NumberProvisioningService {
 
     if (devMode) {
       this.logger.log("DEV MODE: Creating fake provisioned number");
+      const suffix = Math.floor(1000 + Math.random() * 9000);
       const provisioned = this.numberRepo.create({
         twilioNumberSid: `PN_dev_${randomUUID()}`,
-        phoneNumber: "+15005550006",
+        phoneNumber: `+1500555${suffix}`,
         status: "available",
       });
       return this.numberRepo.save(provisioned);

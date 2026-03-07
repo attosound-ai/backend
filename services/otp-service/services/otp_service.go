@@ -114,8 +114,10 @@ func (s *OTPService) checkSendLimits(ctx context.Context, phone, clientIP string
 // SendOTP generates an OTP, hashes it, stores it in Redis, and sends it via the given channel.
 // Channel can be "sms" (default) or "email". Identifier is the phone (E.164) or email address.
 func (s *OTPService) SendOTP(ctx context.Context, identifier, clientIP, channel string) error {
-	if err := s.checkSendLimits(ctx, identifier, clientIP); err != nil {
-		return err
+	if !s.cfg.BypassOTP {
+		if err := s.checkSendLimits(ctx, identifier, clientIP); err != nil {
+			return err
+		}
 	}
 
 	// Generate OTP
@@ -171,6 +173,14 @@ func (s *OTPService) SendOTP(ctx context.Context, identifier, clientIP, channel 
 
 // VerifyCode verifies the OTP code for the given phone number.
 func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
+	// Dev bypass: accept "000000" when BYPASS_OTP=true (check BEFORE block/rate limits)
+	if s.cfg.BypassOTP && code == "000000" {
+		log.Printf("[OTP] Bypass code accepted for %s (dev mode)", phone)
+		_ = s.repo.DeleteOTP(ctx, phone)
+		_ = s.repo.ClearFailures(ctx, phone)
+		return nil
+	}
+
 	// Check if phone is blocked
 	blocked, err := s.repo.IsBlocked(ctx, phone)
 	if err != nil {
@@ -178,14 +188,6 @@ func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
 	}
 	if blocked {
 		return fmt.Errorf(errBlocked)
-	}
-
-	// Dev bypass: accept "000000" when BYPASS_OTP=true
-	if s.cfg.BypassOTP && code == "000000" {
-		log.Printf("[OTP] Bypass code accepted for %s (dev mode)", phone)
-		_ = s.repo.DeleteOTP(ctx, phone)
-		_ = s.repo.ClearFailures(ctx, phone)
-		return nil
 	}
 
 	// Retrieve hashed OTP and attempt count from Redis

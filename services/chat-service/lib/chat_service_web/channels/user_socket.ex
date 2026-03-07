@@ -4,6 +4,7 @@ defmodule ChatServiceWeb.UserSocket do
   require Logger
 
   channel "chat:*", ChatServiceWeb.ChatChannel
+  channel "user:*", ChatServiceWeb.UserChannel
 
   @doc """
   Authenticate the WebSocket connection via a token parameter.
@@ -45,7 +46,7 @@ defmodule ChatServiceWeb.UserSocket do
         # Fallback: treat the token as a raw user_id for development/testing
         # In production, this branch should be removed or replaced with
         # a gRPC call to the User Service for token validation.
-        if valid_uuid?(token) do
+        if valid_user_id?(token) do
           {:ok, token}
         else
           {:error, :invalid_token}
@@ -53,10 +54,8 @@ defmodule ChatServiceWeb.UserSocket do
     end
   end
 
-  defp valid_uuid?(string) do
-    case Regex.match?(~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, string) do
-      true -> true
-      false -> false
-    end
+  defp valid_user_id?(string) do
+    Regex.match?(~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, string) or
+      Regex.match?(~r/^\d+$/, string)
   end
 end

@@ -49,6 +49,14 @@ defmodule ChatServiceWeb.ChatChannel do
     {:noreply, socket}
   end
 
+  @impl true
+  def handle_info({:new_message, message}, socket) do
+    push(socket, "new_message", message)
+    {:noreply, socket}
+  end
+
+  def handle_info(_msg, socket), do: {:noreply, socket}
+
   @doc """
   Handle incoming "new_message" events from the client.
 
@@ -62,11 +70,23 @@ defmodule ChatServiceWeb.ChatChannel do
     conversation_id = socket.assigns.conversation_id
     content_type = Map.get(payload, "content_type", "text")
 
-    case MessageService.send_message(user_id, conversation_id, content, content_type) do
-      {:ok, message} ->
-        broadcast!(socket, "new_message", Message.to_map(message))
-        {:reply, {:ok, Message.to_map(message)}, socket}
+    with {:ok, conversation} <- ConversationService.find_conversation(user_id, conversation_id),
+         {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type) do
+      message_map = Message.to_map(message)
+      broadcast!(socket, "new_message", message_map)
 
+      # Notify both participants' user channels so conversation lists update in real-time
+      notify_payload = %{
+        conversation_id: conversation_id,
+        last_message: content,
+        sender_id: user_id
+      }
+
+      ChatServiceWeb.Endpoint.broadcast("user:#{user_id}", "conversation_updated", notify_payload)
+      ChatServiceWeb.Endpoint.broadcast("user:#{conversation.participant_id}", "conversation_updated", notify_payload)
+
+      {:reply, {:ok, message_map}, socket}
+    else
       {:error, reason} ->
         Logger.error("Failed to send message via channel: #{inspect(reason)}")
         {:reply, {:error, %{reason: "send_failed"}}, socket}
