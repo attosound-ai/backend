@@ -76,6 +76,12 @@ services:
           - GET
           - POST
           - OPTIONS
+
+  # WebSocket → Chat Service root (Phoenix socket is at /socket/websocket)
+  # Separate service because the upstream URL must NOT include /api/v1/messages
+  - name: chat-websocket
+    url: ${CHAT_SERVICE_URL}
+    routes:
       - name: websocket-routes
         paths:
           - /socket
@@ -83,6 +89,8 @@ services:
         protocols:
           - http
           - https
+          - ws
+          - wss
 
   # MEDIA routes → Content Service (Rust)
   - name: media-service
