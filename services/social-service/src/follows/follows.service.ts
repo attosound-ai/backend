@@ -49,10 +49,14 @@ export class FollowsService {
       },
     });
 
-    // Update Redis cache
-    await this.redis.addFollow(followerId, followingId);
-    await this.redis.incrementCount('followers', followingId);
-    await this.redis.incrementCount('following', followerId);
+    // Update Redis cache (best-effort — DB is source of truth)
+    try {
+      await this.redis.addFollow(followerId, followingId);
+      await this.redis.incrementCount('followers', followingId);
+      await this.redis.incrementCount('following', followerId);
+    } catch (err) {
+      this.logger.warn(`Redis follow cache update failed: ${(err as Error).message}`);
+    }
 
     // Create notification for the followed user
     await this.prisma.notification.create({
@@ -110,10 +114,14 @@ export class FollowsService {
       },
     });
 
-    // Update Redis cache
-    await this.redis.removeFollow(followerId, followingId);
-    await this.redis.decrementCount('followers', followingId);
-    await this.redis.decrementCount('following', followerId);
+    // Update Redis cache (best-effort — DB is source of truth)
+    try {
+      await this.redis.removeFollow(followerId, followingId);
+      await this.redis.decrementCount('followers', followingId);
+      await this.redis.decrementCount('following', followerId);
+    } catch (err) {
+      this.logger.warn(`Redis unfollow cache update failed: ${(err as Error).message}`);
+    }
 
     this.logger.log(`User ${followerId} unfollowed ${followingId}`);
   }

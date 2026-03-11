@@ -34,17 +34,18 @@ export class FeedService {
     posts: FeedPostDto[];
     meta: { nextCursor: number | null; hasMore: boolean };
   }> {
-    // Step 1: Try to get feed from Redis sorted set cache
-    const cachedFeed = await this.redis.getFeedContentIds(
-      userId,
-      cursor,
-      limit,
-    );
+    // Step 1: Try to get feed from Redis sorted set cache (best-effort)
+    let contentIds: string[] = [];
+    let nextCursor: number | null = null;
+    try {
+      const cachedFeed = await this.redis.getFeedContentIds(userId, cursor, limit);
+      contentIds = cachedFeed.contentIds;
+      nextCursor = cachedFeed.nextCursor;
+    } catch (err) {
+      this.logger.warn(`Redis feed read failed, falling back to DB: ${(err as Error).message}`);
+    }
 
-    let contentIds = cachedFeed.contentIds;
-    let nextCursor = cachedFeed.nextCursor;
-
-    // If Redis cache is empty, build feed from following list
+    // If Redis cache is empty (or Redis is down), build feed from following list
     if (contentIds.length === 0 && cursor === 0) {
       this.logger.debug(
         `Feed cache empty for user ${userId}, building from following list`,
@@ -126,13 +127,13 @@ export class FeedService {
     const REEL_TYPES = new Set(['reel', 'video']);
 
     // Get personalised feed IDs (larger window so we have enough reels after filtering)
-    const { contentIds: feedIds } = await this.redis.getFeedContentIds(
-      userId,
-      cursor,
-      limit * 5,
-    );
-
-    let personalIds = feedIds;
+    let personalIds: string[] = [];
+    try {
+      const { contentIds: feedIds } = await this.redis.getFeedContentIds(userId, cursor, limit * 5);
+      personalIds = feedIds;
+    } catch (err) {
+      this.logger.warn(`Redis reels feed read failed, using empty list: ${(err as Error).message}`);
+    }
     if (personalIds.length === 0 && cursor === 0) {
       const result = await this.buildFeedFromFollowing(userId, 0, limit * 5);
       personalIds = result.contentIds;
@@ -335,8 +336,7 @@ export class FeedService {
           for (const content of result.contents) {
             const timestamp = new Date(content.created_at).getTime();
             allContents.push({ id: content.id, timestamp });
-            // Populate the feed cache
-            await this.redis.addToFeed(userId, content.id, timestamp);
+            try { await this.redis.addToFeed(userId, content.id, timestamp); } catch { /* ignore */ }
           }
         }
       }
@@ -350,7 +350,7 @@ export class FeedService {
     for (const content of ownContent.contents) {
       const timestamp = new Date(content.created_at).getTime();
       allContents.push({ id: content.id, timestamp });
-      await this.redis.addToFeed(userId, content.id, timestamp);
+      try { await this.redis.addToFeed(userId, content.id, timestamp); } catch { /* ignore */ }
     }
 
     // Fallback: fill with recent posts from non-followed accounts so the feed
@@ -362,7 +362,7 @@ export class FeedService {
         if (!fetchedAuthorIds.has(content.author_id)) {
           const timestamp = new Date(content.created_at).getTime();
           allContents.push({ id: content.id, timestamp });
-          await this.redis.addToFeed(userId, content.id, timestamp);
+          try { await this.redis.addToFeed(userId, content.id, timestamp); } catch { /* ignore */ }
         }
       }
     } catch (err) {
