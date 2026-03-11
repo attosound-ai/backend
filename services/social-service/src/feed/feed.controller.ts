@@ -12,7 +12,7 @@ import {
 import { AuthGuard } from '../common/guards/auth.guard';
 import { CurrentUserId } from '../common/decorators/current-user.decorator';
 import { FeedService } from './feed.service';
-import { CreatePostDto, FeedQueryDto, ReelViewDto, ReelsQueryDto, UserPostsQueryDto } from './dto/feed.dto';
+import { CreatePostDto, ExploreQueryDto, FeedQueryDto, ReelViewDto, ReelsQueryDto, UserPostsQueryDto } from './dto/feed.dto';
 
 @Controller('api/v1/posts')
 @UseGuards(AuthGuard)
@@ -116,6 +116,24 @@ export class FeedController {
       dto.watchMs,
       dto.replays ?? 0,
     );
+  }
+
+  @Get('explore')
+  async getExploreFeed(
+    @CurrentUserId() userId: string,
+    @Query() query: ExploreQueryDto,
+  ) {
+    const result = await this.feedService.getExploreFeed(
+      userId,
+      query.cursor || 0,
+      query.limit || 20,
+    );
+    return {
+      success: true,
+      data: result.posts,
+      error: null,
+      meta: { nextCursor: result.meta.nextCursor, hasMore: result.meta.hasMore },
+    };
   }
 
   @Get(':id')

@@ -126,3 +126,18 @@ export class ReelViewDto {
   @Min(0)
   replays?: number;
 }
+
+export class ExploreQueryDto {
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Type(() => Number)
+  cursor?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(30)
+  @Type(() => Number)
+  limit?: number;
+}

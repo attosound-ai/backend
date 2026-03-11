@@ -199,6 +199,86 @@ export class FeedService {
   }
 
   /**
+   * GET /api/v1/posts/explore - Instagram-style explore grid.
+   *
+   * Same as getReelsFeed() but includes ALL content types (not just reel/video).
+   */
+  async getExploreFeed(
+    userId: string,
+    cursor: number,
+    limit: number,
+  ): Promise<{ posts: FeedPostDto[]; meta: { nextCursor: number | null; hasMore: boolean } }> {
+    // Get personalised feed IDs (larger window)
+    const { contentIds: feedIds } = await this.redis.getFeedContentIds(userId, cursor, limit * 5);
+    let personalIds = feedIds;
+    if (personalIds.length === 0 && cursor === 0) {
+      const result = await this.buildFeedFromFollowing(userId, 0, limit * 5);
+      personalIds = result.contentIds;
+    }
+
+    // Trending IDs by like count over last 7 days
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const trending = await this.prisma.interaction.groupBy({
+      by: ['contentId'],
+      where: { type: 'LIKE', createdAt: { gte: sevenDaysAgo } },
+      _count: { contentId: true },
+      orderBy: { _count: { contentId: 'desc' } },
+      take: 50,
+    });
+    const trendingIds = trending.map((t) => t.contentId);
+
+    // Deduplicate: trending first, then personal
+    const seenIds = new Set<string>();
+    const candidateIds: string[] = [];
+    for (const id of [...trendingIds, ...personalIds]) {
+      if (!seenIds.has(id)) {
+        seenIds.add(id);
+        candidateIds.push(id);
+      }
+    }
+
+    let contents: Awaited<ReturnType<typeof this.grpcClients.getContentBatch>>['contents'];
+
+    if (candidateIds.length === 0) {
+      // Fallback: no follows + no trending likes → list all recent content directly
+      const result = await this.grpcClients.listRecentContent('', limit * 5);
+      contents = result.contents;
+    } else {
+      const result = await this.grpcClients.getContentBatch(candidateIds.slice(0, limit * 5));
+      contents = result.contents;
+    }
+    if (contents.length === 0) {
+      return { posts: [], meta: { nextCursor: null, hasMore: false } };
+    }
+
+    // Fetch authors and interactions
+    const authorIds = [...new Set(contents.map((c) => c.author_id))];
+    const users = await this.grpcClients.getUsersBatch(authorIds);
+    const userMap = new Map(users.map((u) => [u.id, u]));
+
+    const posts = await Promise.all(
+      contents.map(async (content) => {
+        const author = userMap.get(content.author_id);
+        const [counts, isLiked, isBookmarked, isReposted] = await Promise.all([
+          this.interactionsService.getInteractionCounts(content.id),
+          this.interactionsService.isLiked(userId, content.id),
+          this.interactionsService.isBookmarked(userId, content.id),
+          this.interactionsService.isReposted(userId, content.id),
+        ]);
+        return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
+      }),
+    );
+
+    posts.sort((a, b) => this.computeReelScore(b) - this.computeReelScore(a));
+
+    const page = posts.slice(0, limit);
+    const hasMore = posts.length > limit;
+    const lastTs = page.length > 0 ? new Date(page[page.length - 1].createdAt).getTime() : null;
+
+    return { posts: page, meta: { nextCursor: hasMore ? lastTs : null, hasMore } };
+  }
+
+  /**
    * POST /api/v1/posts/reels/view - Record a reel view event for future FYP signals.
    */
   async recordReelView(

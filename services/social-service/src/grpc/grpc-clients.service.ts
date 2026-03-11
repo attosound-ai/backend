@@ -207,6 +207,34 @@ export class GrpcClientsService implements OnModuleInit {
     });
   }
 
+  /**
+   * List all content (no ID filter) — used by the explore feed.
+   * Calls GetContentBatch with empty content_ids, which triggers the paginated-list
+   * branch in the Rust gRPC server.
+   */
+  async listRecentContent(
+    cursor: string,
+    limit: number,
+  ): Promise<{ contents: ContentResponse[]; meta: PaginatedMeta }> {
+    return new Promise((resolve) => {
+      this.contentClient.GetContentBatch(
+        { content_ids: [], pagination: { cursor, limit } },
+        { deadline: this.deadline() },
+        (err: any, response: { contents: ContentResponse[]; meta: PaginatedMeta }) => {
+          if (err) {
+            this.logger.error(`listRecentContent failed: ${err.message}`);
+            resolve({ contents: [], meta: { next_cursor: '', has_more: false, total: 0 } });
+          } else {
+            resolve({
+              contents: response.contents || [],
+              meta: response.meta || { next_cursor: '', has_more: false, total: 0 },
+            });
+          }
+        },
+      );
+    });
+  }
+
   async getContentBatch(
     contentIds: string[],
     pagination?: { cursor: string; limit: number },
