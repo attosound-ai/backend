@@ -89,6 +89,21 @@ func (s *UserService) SearchUsers(ctx context.Context, query string, limit int) 
 	return profiles, nil
 }
 
+// DiscoverUsers returns a list of registered users excluding the requester.
+func (s *UserService) DiscoverUsers(ctx context.Context, excludeID uint64, limit int) ([]*models.UserProfile, error) {
+	users, err := s.repo.DiscoverUsers(excludeID, limit)
+	if err != nil {
+		log.Printf("[USER] Error discovering users: %v", err)
+		return nil, errors.New("internal error")
+	}
+
+	profiles := make([]*models.UserProfile, 0, len(users))
+	for i := range users {
+		profiles = append(profiles, users[i].ToProfile())
+	}
+	return profiles, nil
+}
+
 // collectOptionalStringUpdates sets non-nil *string values into the updates map.
 // Returns true if at least one field was set.
 func collectOptionalStringUpdates(updates map[string]interface{}, fields map[string]*string) bool {

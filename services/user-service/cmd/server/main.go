@@ -117,6 +117,7 @@ func main() {
 
 	// User routes (public)
 	users.Get("/search", userHandler.SearchUsers)
+	users.Get("/discover", middleware.RequireAuth(jwtMgr), userHandler.DiscoverUsers)
 	users.Get("/:id", userHandler.GetUser)
 	users.Get("/:id/followers", userHandler.GetFollowers)
 	users.Get("/:id/following", userHandler.GetFollowing)
