@@ -69,8 +69,24 @@ export class FeedPostDto {
     likesCount: number;
     commentsCount: number;
     sharesCount: number;
+    repostsCount: number;
     isLiked: boolean;
+    isBookmarked: boolean;
+    isReposted: boolean;
   };
+}
+
+export class UserPostsQueryDto {
+  @IsOptional()
+  @IsString()
+  cursor?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  limit?: number = 20;
 }
 
 export class FeedResponseDto {
@@ -79,4 +95,34 @@ export class FeedResponseDto {
     nextCursor: number | null;
     hasMore: boolean;
   };
+}
+
+export class ReelsQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  cursor?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  limit?: number = 10;
+}
+
+export class ReelViewDto {
+  @IsString()
+  @IsNotEmpty()
+  postId: string;
+
+  @IsInt()
+  @Min(0)
+  watchMs: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  replays?: number;
 }

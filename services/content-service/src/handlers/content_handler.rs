@@ -27,6 +27,13 @@ pub struct PaginationQuery {
     pub limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+    pub content_type: Option<String>,
+    pub limit: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 struct ContentResponse {
     id: String,
@@ -140,6 +147,27 @@ pub async fn get_content(
             HttpResponse::Ok().json(json!({
                 "success": true,
                 "data": resp,
+                "error": null
+            }))
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+#[get("/api/v1/content/search")]
+pub async fn search_content(
+    query: web::Query<SearchQuery>,
+    svc: web::Data<ContentService>,
+) -> HttpResponse {
+    let limit = query.limit.unwrap_or(20).min(50).max(1);
+    let ct = query.content_type.as_deref();
+    match svc.search_content(&query.q, ct, limit).await {
+        Ok(contents) => {
+            let items: Vec<ContentResponse> = contents.into_iter().map(|c| c.into()).collect();
+            HttpResponse::Ok().json(json!({
+                "success": true,
+                "data": items,
+                "meta": { "total": items.len(), "has_more": false },
                 "error": null
             }))
         }

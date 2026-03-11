@@ -80,23 +80,19 @@ export class FeedService {
     const posts = await Promise.all(
       contents.map(async (content) => {
         const author = userMap.get(content.author_id);
-        const counts = await this.interactionsService.getInteractionCounts(
-          content.id,
-        );
-        const isLiked = await this.interactionsService.isLiked(
-          userId,
-          content.id,
-        );
+        const [counts, isLiked, isBookmarked, isReposted] = await Promise.all([
+          this.interactionsService.getInteractionCounts(content.id),
+          this.interactionsService.isLiked(userId, content.id),
+          this.interactionsService.isBookmarked(userId, content.id),
+          this.interactionsService.isReposted(userId, content.id),
+        ]);
 
-        return this.buildFeedPost(content, author, counts, isLiked);
+        return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
       }),
     );
 
-    // Sort by creation time descending
-    posts.sort(
-      (a, b) =>
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    );
+    // Sort by EdgeRank score (engagement × recency decay) instead of raw timestamp
+    posts.sort((a, b) => this.computeEdgeRankScore(b) - this.computeEdgeRankScore(a));
 
     return {
       posts,
@@ -105,6 +101,115 @@ export class FeedService {
         hasMore: nextCursor !== null,
       },
     };
+  }
+
+  /**
+   * GET /api/v1/posts/reels - TikTok-style FYP reels feed.
+   *
+   * Mixes personalised (from following) + globally trending reels,
+   * scored with a completion-weighted EdgeRank.
+   */
+  async getReelsFeed(
+    userId: string,
+    cursor: number,
+    limit: number,
+  ): Promise<{
+    posts: FeedPostDto[];
+    meta: { nextCursor: number | null; hasMore: boolean };
+  }> {
+    const REEL_TYPES = new Set(['reel', 'video']);
+
+    // Get personalised feed IDs (larger window so we have enough reels after filtering)
+    const { contentIds: feedIds } = await this.redis.getFeedContentIds(
+      userId,
+      cursor,
+      limit * 5,
+    );
+
+    let personalIds = feedIds;
+    if (personalIds.length === 0 && cursor === 0) {
+      const result = await this.buildFeedFromFollowing(userId, 0, limit * 5);
+      personalIds = result.contentIds;
+    }
+
+    // Trending content IDs by like count over last 7 days
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const trending = await this.prisma.interaction.groupBy({
+      by: ['contentId'],
+      where: { type: 'LIKE', createdAt: { gte: sevenDaysAgo } },
+      _count: { contentId: true },
+      orderBy: { _count: { contentId: 'desc' } },
+      take: 50,
+    });
+    const trendingIds = trending.map((t) => t.contentId);
+
+    // Deduplicate: trending first, then personal
+    const seenIds = new Set<string>();
+    const candidateIds: string[] = [];
+    for (const id of [...trendingIds, ...personalIds]) {
+      if (!seenIds.has(id)) {
+        seenIds.add(id);
+        candidateIds.push(id);
+      }
+    }
+
+    if (candidateIds.length === 0) {
+      return { posts: [], meta: { nextCursor: null, hasMore: false } };
+    }
+
+    // Fetch content and filter to reel/video types
+    const { contents } = await this.grpcClients.getContentBatch(
+      candidateIds.slice(0, limit * 5),
+    );
+    const reelContents = contents.filter((c) => REEL_TYPES.has(c.content_type));
+
+    if (reelContents.length === 0) {
+      return { posts: [], meta: { nextCursor: null, hasMore: false } };
+    }
+
+    // Fetch authors and interactions
+    const authorIds = [...new Set(reelContents.map((c) => c.author_id))];
+    const users = await this.grpcClients.getUsersBatch(authorIds);
+    const userMap = new Map(users.map((u) => [u.id, u]));
+
+    const posts = await Promise.all(
+      reelContents.map(async (content) => {
+        const author = userMap.get(content.author_id);
+        const [counts, isLiked, isBookmarked, isReposted] = await Promise.all([
+          this.interactionsService.getInteractionCounts(content.id),
+          this.interactionsService.isLiked(userId, content.id),
+          this.interactionsService.isBookmarked(userId, content.id),
+          this.interactionsService.isReposted(userId, content.id),
+        ]);
+        return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
+      }),
+    );
+
+    // Score with reels formula (faster decay; shares weighted highest)
+    posts.sort((a, b) => this.computeReelScore(b) - this.computeReelScore(a));
+
+    const page = posts.slice(0, limit);
+    const hasMore = posts.length > limit;
+    const lastTs = page.length > 0 ? new Date(page[page.length - 1].createdAt).getTime() : null;
+
+    return {
+      posts: page,
+      meta: { nextCursor: hasMore ? lastTs : null, hasMore },
+    };
+  }
+
+  /**
+   * POST /api/v1/posts/reels/view - Record a reel view event for future FYP signals.
+   */
+  async recordReelView(
+    userId: string,
+    contentId: string,
+    watchMs: number,
+    replays: number,
+  ): Promise<void> {
+    await this.prisma.reelView.create({
+      data: { userId, contentId, watchMs, replays },
+    });
   }
 
   /**
@@ -118,45 +223,46 @@ export class FeedService {
     // Get who the user follows
     const followingIds = await this.followsService.getFollowingIds(userId);
 
-    if (followingIds.length === 0) {
-      return { contentIds: [], nextCursor: null };
-    }
-
-    // Fetch recent content from all followed users
     const allContents: { id: string; timestamp: number }[] = [];
 
-    // Batch fetch content from followed users
-    const batchSize = 10;
-    for (let i = 0; i < followingIds.length; i += batchSize) {
-      const batch = followingIds.slice(i, i + batchSize);
-      const results = await Promise.all(
-        batch.map((authorId) =>
-          this.grpcClients.getContentByAuthor(authorId, {
-            cursor: '',
-            limit: 20,
-          }),
-        ),
-      );
+    // Batch fetch content from followed users (if any)
+    if (followingIds.length > 0) {
+      const batchSize = 10;
+      for (let i = 0; i < followingIds.length; i += batchSize) {
+        const batch = followingIds.slice(i, i + batchSize);
+        const results = await Promise.all(
+          batch.map((authorId) =>
+            this.grpcClients.getContentByAuthor(authorId, {
+              cursor: '',
+              limit: 100,
+            }),
+          ),
+        );
 
-      for (const result of results) {
-        for (const content of result.contents) {
-          const timestamp = new Date(content.created_at).getTime();
-          allContents.push({ id: content.id, timestamp });
-          // Populate the feed cache
-          await this.redis.addToFeed(userId, content.id, timestamp);
+        for (const result of results) {
+          for (const content of result.contents) {
+            const timestamp = new Date(content.created_at).getTime();
+            allContents.push({ id: content.id, timestamp });
+            // Populate the feed cache
+            await this.redis.addToFeed(userId, content.id, timestamp);
+          }
         }
       }
     }
 
-    // Also include user's own posts
+    // Always include user's own posts
     const ownContent = await this.grpcClients.getContentByAuthor(userId, {
       cursor: '',
-      limit: 20,
+      limit: 100,
     });
     for (const content of ownContent.contents) {
       const timestamp = new Date(content.created_at).getTime();
       allContents.push({ id: content.id, timestamp });
       await this.redis.addToFeed(userId, content.id, timestamp);
+    }
+
+    if (allContents.length === 0) {
+      return { contentIds: [], nextCursor: null };
     }
 
     // Sort by timestamp descending
@@ -230,9 +336,62 @@ export class FeedService {
     return this.buildFeedPost(
       content,
       author,
-      { likesCount: 0, commentsCount: 0, sharesCount: 0 },
+      { likesCount: 0, commentsCount: 0, sharesCount: 0, repostsCount: 0 },
+      false,
+      false,
       false,
     );
+  }
+
+  /**
+   * GET /api/v1/posts/user/:userId - Get posts by a specific user
+   */
+  async getUserPosts(
+    authorId: string,
+    currentUserId: string,
+    cursor: string,
+    limit: number,
+  ): Promise<{
+    posts: FeedPostDto[];
+    meta: { nextCursor: string | null; hasMore: boolean };
+  }> {
+    // Fetch content authored by the target user
+    const { contents, meta } = await this.grpcClients.getContentByAuthor(
+      authorId,
+      { cursor, limit },
+    );
+
+    if (contents.length === 0) {
+      return {
+        posts: [],
+        meta: { nextCursor: null, hasMore: false },
+      };
+    }
+
+    // Fetch the author details once (all posts share the same author)
+    const author = await this.grpcClients.getUser(authorId);
+
+    // Fetch interaction data for each content
+    const posts = await Promise.all(
+      contents.map(async (content) => {
+        const [counts, isLiked, isBookmarked, isReposted] = await Promise.all([
+          this.interactionsService.getInteractionCounts(content.id),
+          this.interactionsService.isLiked(currentUserId, content.id),
+          this.interactionsService.isBookmarked(currentUserId, content.id),
+          this.interactionsService.isReposted(currentUserId, content.id),
+        ]);
+
+        return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
+      }),
+    );
+
+    return {
+      posts,
+      meta: {
+        nextCursor: meta.has_more ? meta.next_cursor : null,
+        hasMore: meta.has_more,
+      },
+    };
   }
 
   /**
@@ -245,20 +404,48 @@ export class FeedService {
       throw new NotFoundException('Post not found');
     }
 
-    const [author, counts, isLiked] = await Promise.all([
+    const [author, counts, isLiked, isBookmarked, isReposted] = await Promise.all([
       this.grpcClients.getUser(content.author_id),
       this.interactionsService.getInteractionCounts(postId),
       this.interactionsService.isLiked(currentUserId, postId),
+      this.interactionsService.isBookmarked(currentUserId, postId),
+      this.interactionsService.isReposted(currentUserId, postId),
     ]);
 
-    return this.buildFeedPost(content, author, counts, isLiked);
+    return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
+  }
+
+  /**
+   * EdgeRank score for home feed.
+   * score = (likes×3 + comments×5 + shares×4 + reposts×2) × exp(-0.05 × hours)
+   */
+  private computeEdgeRankScore(post: FeedPostDto): number {
+    const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
+    const engagement = likesCount * 3 + commentsCount * 5 + sharesCount * 4 + repostsCount * 2;
+    const ageMs = Date.now() - new Date(post.createdAt).getTime();
+    const hours = ageMs / (1000 * 60 * 60);
+    return engagement * Math.exp(-0.05 * hours);
+  }
+
+  /**
+   * Reels FYP score — higher weight on shares and faster time decay.
+   * score = (likes×3 + comments×4 + shares×5 + reposts×3) × exp(-0.08 × hours)
+   */
+  private computeReelScore(post: FeedPostDto): number {
+    const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
+    const engagement = likesCount * 3 + commentsCount * 4 + sharesCount * 5 + repostsCount * 3;
+    const ageMs = Date.now() - new Date(post.createdAt).getTime();
+    const hours = ageMs / (1000 * 60 * 60);
+    return engagement * Math.exp(-0.08 * hours);
   }
 
   private buildFeedPost(
     content: any,
     author: any,
-    counts: { likesCount: number; commentsCount: number; sharesCount: number },
+    counts: { likesCount: number; commentsCount: number; sharesCount: number; repostsCount: number },
     isLiked: boolean,
+    isBookmarked: boolean,
+    isReposted: boolean,
   ): FeedPostDto {
     return {
       id: content.id,
@@ -287,7 +474,10 @@ export class FeedService {
         likesCount: counts.likesCount,
         commentsCount: counts.commentsCount,
         sharesCount: counts.sharesCount,
+        repostsCount: counts.repostsCount,
         isLiked,
+        isBookmarked,
+        isReposted,
       },
     };
   }

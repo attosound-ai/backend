@@ -38,7 +38,7 @@ pub struct CreateContentInput {
 }
 
 /// Allowed content types
-pub const VALID_CONTENT_TYPES: &[&str] = &["audio", "image", "text"];
+pub const VALID_CONTENT_TYPES: &[&str] = &["audio", "image", "text", "video", "reel"];
 
 pub fn is_valid_content_type(ct: &str) -> bool {
     VALID_CONTENT_TYPES.contains(&ct)

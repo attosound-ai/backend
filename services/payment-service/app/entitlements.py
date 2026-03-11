@@ -53,6 +53,7 @@ PLAN_ENTITLEMENTS: dict[str, frozenset[Entitlement]] = {
             Entitlement.BROWSE_SEARCH,
             Entitlement.LISTEN,
             Entitlement.COMMENT,
+            Entitlement.RECORD_UPLOAD,
             Entitlement.ENHANCED_ANALYTICS,
             Entitlement.TALENT_DASHBOARD,
             Entitlement.EXPORTABLE_REPORTS,

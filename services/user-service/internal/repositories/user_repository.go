@@ -145,6 +145,22 @@ func (r *UserRepository) SearchUsers(query string, limit int) ([]models.User, er
 	return users, err
 }
 
+// DiscoverUsers returns up to limit registered users excluding the given ID.
+func (r *UserRepository) DiscoverUsers(excludeID uint64, limit int) ([]models.User, error) {
+	var users []models.User
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	err := r.db.Where("id != ? AND registration_status = ?", excludeID, "completed").
+		Limit(limit).
+		Order("RANDOM()").
+		Find(&users).Error
+	return users, err
+}
+
 // UpdateUser updates an existing user record.
 func (r *UserRepository) UpdateUser(user *models.User) error {
 	return r.db.Save(user).Error

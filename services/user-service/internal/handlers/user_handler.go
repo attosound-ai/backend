@@ -118,6 +118,45 @@ func (h *UserHandler) UpdateProfile(c *fiber.Ctx) error {
 	})
 }
 
+// DiscoverUsers handles GET /users/discover (protected)
+func (h *UserHandler) DiscoverUsers(c *fiber.Ctx) error {
+	claims, ok := c.Locals("claims").(*middleware.JWTClaims)
+	if !ok || claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+			Success: false,
+			Error:   "unauthorized",
+		})
+	}
+
+	uid, err := strconv.ParseUint(claims.UserID, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid user ID",
+		})
+	}
+
+	limit := 20
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	profiles, err := h.userService.DiscoverUsers(c.Context(), uid, limit)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    profiles,
+	})
+}
+
 // GetFollowers handles GET /users/:id/followers (placeholder)
 func (h *UserHandler) GetFollowers(c *fiber.Ctx) error {
 	id := c.Params("id")

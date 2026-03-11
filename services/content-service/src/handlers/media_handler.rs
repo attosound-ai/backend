@@ -47,7 +47,7 @@ pub async fn sign_upload(
             return HttpResponse::BadRequest().json(json!({
                 "success": false,
                 "data": null,
-                "error": "Invalid context. Must be: avatar, content, audio, or chat"
+                "error": "Invalid context. Must be: avatar, content, audio, chat, video, or reel"
             }));
         }
     };
