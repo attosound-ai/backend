@@ -19,6 +19,20 @@ services:
           - DELETE
           - OPTIONS
 
+  # FOLLOW / FOLLOWERS / FOLLOWING routes → Social Service (NestJS)
+  - name: user-social-service
+    url: http://social-service:3000
+    routes:
+      - name: user-social-routes
+        paths:
+          - ~/api/v1/users/[^/]+/(follow|followers|following)
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+
   # USERS routes → User Service (Go)
   - name: user-service
     url: http://user-service:8080/users
