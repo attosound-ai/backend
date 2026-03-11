@@ -91,8 +91,14 @@ export class FeedService {
       }),
     );
 
-    // Sort by EdgeRank score (engagement × recency decay) instead of raw timestamp
-    posts.sort((a, b) => this.computeEdgeRankScore(b) - this.computeEdgeRankScore(a));
+    // Sort by EdgeRank score with 1.5× boost for posts from followed accounts
+    const followingIds = await this.followsService.getFollowingIds(userId);
+    const followingSet = new Set(followingIds);
+    posts.sort(
+      (a, b) =>
+        this.computeEdgeRankScore(b, followingSet.has(b.authorId)) -
+        this.computeEdgeRankScore(a, followingSet.has(a.authorId)),
+    );
 
     return {
       posts,
@@ -185,8 +191,14 @@ export class FeedService {
       }),
     );
 
-    // Score with reels formula (faster decay; shares weighted highest)
-    posts.sort((a, b) => this.computeReelScore(b) - this.computeReelScore(a));
+    // Score with reels formula + 1.5× boost for posts from followed accounts
+    const followingIds = await this.followsService.getFollowingIds(userId);
+    const followingSet = new Set(followingIds);
+    posts.sort(
+      (a, b) =>
+        this.computeReelScore(b, followingSet.has(b.authorId)) -
+        this.computeReelScore(a, followingSet.has(a.authorId)),
+    );
 
     const page = posts.slice(0, limit);
     const hasMore = posts.length > limit;
@@ -339,6 +351,22 @@ export class FeedService {
       const timestamp = new Date(content.created_at).getTime();
       allContents.push({ id: content.id, timestamp });
       await this.redis.addToFeed(userId, content.id, timestamp);
+    }
+
+    // Fallback: fill with recent posts from non-followed accounts so the feed
+    // is never empty and always has content to show beyond the following list.
+    const fetchedAuthorIds = new Set([...followingIds, userId]);
+    try {
+      const exploreResult = await this.grpcClients.listRecentContent('', 100);
+      for (const content of exploreResult.contents) {
+        if (!fetchedAuthorIds.has(content.author_id)) {
+          const timestamp = new Date(content.created_at).getTime();
+          allContents.push({ id: content.id, timestamp });
+          await this.redis.addToFeed(userId, content.id, timestamp);
+        }
+      }
+    } catch (err) {
+      this.logger.warn('listRecentContent fallback failed during feed build', err);
     }
 
     if (allContents.length === 0) {
@@ -499,24 +527,26 @@ export class FeedService {
    * EdgeRank score for home feed.
    * score = (likes×3 + comments×5 + shares×4 + reposts×2) × exp(-0.05 × hours)
    */
-  private computeEdgeRankScore(post: FeedPostDto): number {
+  private computeEdgeRankScore(post: FeedPostDto, fromFollowing = false): number {
     const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
     const engagement = likesCount * 3 + commentsCount * 5 + sharesCount * 4 + repostsCount * 2;
     const ageMs = Date.now() - new Date(post.createdAt).getTime();
     const hours = ageMs / (1000 * 60 * 60);
-    return engagement * Math.exp(-0.05 * hours);
+    const boost = fromFollowing ? 1.5 : 1.0;
+    return engagement * Math.exp(-0.05 * hours) * boost;
   }
 
   /**
    * Reels FYP score — higher weight on shares and faster time decay.
    * score = (likes×3 + comments×4 + shares×5 + reposts×3) × exp(-0.08 × hours)
    */
-  private computeReelScore(post: FeedPostDto): number {
+  private computeReelScore(post: FeedPostDto, fromFollowing = false): number {
     const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
     const engagement = likesCount * 3 + commentsCount * 4 + sharesCount * 5 + repostsCount * 3;
     const ageMs = Date.now() - new Date(post.createdAt).getTime();
     const hours = ageMs / (1000 * 60 * 60);
-    return engagement * Math.exp(-0.08 * hours);
+    const boost = fromFollowing ? 1.5 : 1.0;
+    return engagement * Math.exp(-0.08 * hours) * boost;
   }
 
   private buildFeedPost(
