@@ -12,7 +12,7 @@ import {
 import { AuthGuard } from '../common/guards/auth.guard';
 import { CurrentUserId } from '../common/decorators/current-user.decorator';
 import { FeedService } from './feed.service';
-import { CreatePostDto, FeedQueryDto } from './dto/feed.dto';
+import { CreatePostDto, FeedQueryDto, ReelViewDto, ReelsQueryDto, UserPostsQueryDto } from './dto/feed.dto';
 
 @Controller('api/v1/posts')
 @UseGuards(AuthGuard)
@@ -58,6 +58,64 @@ export class FeedController {
       data: post,
       error: null,
     };
+  }
+
+  @Get('user/:userId')
+  async getUserPosts(
+    @Param('userId') targetUserId: string,
+    @CurrentUserId() currentUserId: string,
+    @Query() query: UserPostsQueryDto,
+  ) {
+    const result = await this.feedService.getUserPosts(
+      targetUserId,
+      currentUserId,
+      query.cursor || '',
+      query.limit || 20,
+    );
+    return {
+      success: true,
+      data: result.posts,
+      error: null,
+      meta: {
+        nextCursor: result.meta.nextCursor,
+        hasMore: result.meta.hasMore,
+      },
+    };
+  }
+
+  @Get('reels')
+  async getReelsFeed(
+    @CurrentUserId() userId: string,
+    @Query() query: ReelsQueryDto,
+  ) {
+    const result = await this.feedService.getReelsFeed(
+      userId,
+      query.cursor || 0,
+      query.limit || 10,
+    );
+    return {
+      success: true,
+      data: result.posts,
+      error: null,
+      meta: {
+        nextCursor: result.meta.nextCursor,
+        hasMore: result.meta.hasMore,
+      },
+    };
+  }
+
+  @Post('reels/view')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async recordReelView(
+    @CurrentUserId() userId: string,
+    @Body() dto: ReelViewDto,
+  ) {
+    await this.feedService.recordReelView(
+      userId,
+      dto.postId,
+      dto.watchMs,
+      dto.replays ?? 0,
+    );
   }
 
   @Get(':id')
