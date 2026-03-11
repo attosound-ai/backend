@@ -294,7 +294,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "3001:8080"    # HTTP
+      - "3031:8080"    # HTTP
       - "50051:50051"  # gRPC
     environment:
       APP_ENV: development
@@ -330,7 +330,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "3006:8081"    # HTTP
+      - "3036:8081"    # HTTP
       - "50052:50052"  # gRPC
     environment:
       APP_ENV: development
@@ -367,7 +367,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "3003:3000"    # HTTP
+      - "3033:3000"    # HTTP
       - "50053:50053"  # gRPC
     environment:
       APP_ENV: development
@@ -400,7 +400,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "3004:4000"    # HTTP + WebSocket
+      - "3034:4000"    # HTTP + WebSocket
       - "50054:50054"  # gRPC
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
@@ -434,7 +434,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "3008:8000"    # HTTP
+      - "3038:8000"    # HTTP
     environment:
       APP_ENV: development
       HTTP_PORT: 8000
@@ -475,7 +475,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "3007:8000"    # HTTP
+      - "3037:8000"    # HTTP
       - "50055:50055"  # gRPC
     environment:
       APP_ENV: development
@@ -515,7 +515,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "3009:3009"
+      - "3039:3009"
     environment:
       PORT: 3009
       DATABASE_URL: postgresql://atto:atto_dev@postgres-telephony:5432/atto_telephony
