@@ -19,6 +19,22 @@ services:
           - DELETE
           - OPTIONS
 
+  # FOLLOW / FOLLOWERS / FOLLOWING routes → Social Service (NestJS)
+  # Must have priority > 0 to win over the /api/v1/users prefix route below
+  - name: user-social-service
+    url: ${SOCIAL_SERVICE_URL}
+    routes:
+      - name: user-social-routes
+        paths:
+          - ~/api/v1/users/[^/]+/(follow|followers|following)
+        strip_path: false
+        priority: 100
+        methods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+
   # USERS routes → User Service (Go)
   - name: user-service
     url: ${USER_SERVICE_URL}/users
