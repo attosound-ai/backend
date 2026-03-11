@@ -65,30 +65,51 @@ export class GrpcClientsService implements OnModuleInit {
   }
 
   private initUserClient(): void {
-    const protoPath = this.resolveProtoPath('user.proto');
-    const packageDefinition = protoLoader.loadSync(protoPath, {
-      keepCase: false,
-      longs: Number,
-      enums: String,
-      defaults: true,
-      oneofs: true,
-      includeDirs: [this.getProtoDir()],
-    });
-    const proto = grpc.loadPackageDefinition(packageDefinition) as any;
-    const address =
-      process.env.USER_SERVICE_GRPC || 'localhost:50051';
+    // The Go user-service uses a JSON codec (not protobuf).
+    // We must build the client with JSON serialize/deserialize.
+    const jsonSerialize = (obj: any): Buffer => Buffer.from(JSON.stringify(obj));
+    const jsonDeserialize = (buf: Buffer): any => JSON.parse(buf.toString());
 
-    this.userClient = new proto.atto.user.UserService(
-      address,
-      grpc.credentials.createInsecure(),
-    );
-    this.logger.log(`User gRPC client connected to ${address}`);
+    const serviceDef: grpc.ServiceDefinition = {
+      GetUser: {
+        path: '/atto.user.UserService/GetUser',
+        requestStream: false,
+        responseStream: false,
+        requestSerialize: jsonSerialize,
+        requestDeserialize: jsonDeserialize,
+        responseSerialize: jsonSerialize,
+        responseDeserialize: jsonDeserialize,
+      },
+      GetUsersBatch: {
+        path: '/atto.user.UserService/GetUsersBatch',
+        requestStream: false,
+        responseStream: false,
+        requestSerialize: jsonSerialize,
+        requestDeserialize: jsonDeserialize,
+        responseSerialize: jsonSerialize,
+        responseDeserialize: jsonDeserialize,
+      },
+      ValidateToken: {
+        path: '/atto.user.UserService/ValidateToken',
+        requestStream: false,
+        responseStream: false,
+        requestSerialize: jsonSerialize,
+        requestDeserialize: jsonDeserialize,
+        responseSerialize: jsonSerialize,
+        responseDeserialize: jsonDeserialize,
+      },
+    };
+
+    const address = process.env.USER_SERVICE_GRPC || 'localhost:50051';
+    const ClientCtor = grpc.makeGenericClientConstructor(serviceDef, 'UserService');
+    this.userClient = new ClientCtor(address, grpc.credentials.createInsecure());
+    this.logger.log(`User gRPC client connected to ${address} (JSON codec)`);
   }
 
   private initContentClient(): void {
     const protoPath = this.resolveProtoPath('content.proto');
     const packageDefinition = protoLoader.loadSync(protoPath, {
-      keepCase: false,
+      keepCase: true,
       longs: Number,
       enums: String,
       defaults: true,
@@ -111,7 +132,7 @@ export class GrpcClientsService implements OnModuleInit {
   async getUser(userId: string): Promise<UserResponse | null> {
     return new Promise((resolve) => {
       this.userClient.GetUser(
-        { userId },
+        { user_id: userId },
         { deadline: this.deadline() },
         (err: any, response: UserResponse) => {
           if (err) {
@@ -129,7 +150,7 @@ export class GrpcClientsService implements OnModuleInit {
     if (userIds.length === 0) return [];
     return new Promise((resolve) => {
       this.userClient.GetUsersBatch(
-        { userIds },
+        { user_ids: userIds },
         { deadline: this.deadline() },
         (err: any, response: { users: UserResponse[] }) => {
           if (err) {
@@ -145,14 +166,14 @@ export class GrpcClientsService implements OnModuleInit {
 
   async validateToken(
     token: string,
-  ): Promise<{ valid: boolean; userId: string; role: string } | null> {
+  ): Promise<{ valid: boolean; user_id: string; role: string } | null> {
     return new Promise((resolve) => {
       this.userClient.ValidateToken(
         { token },
         { deadline: this.deadline() },
         (
           err: any,
-          response: { valid: boolean; userId: string; role: string },
+          response: { valid: boolean; user_id: string; role: string },
         ) => {
           if (err) {
             this.logger.error(`ValidateToken failed: ${err.message}`);
@@ -170,7 +191,7 @@ export class GrpcClientsService implements OnModuleInit {
   async getContent(contentId: string): Promise<ContentResponse | null> {
     return new Promise((resolve) => {
       this.contentClient.GetContent(
-        { contentId },
+        { content_id: contentId },
         { deadline: this.deadline() },
         (err: any, response: ContentResponse) => {
           if (err) {
@@ -195,7 +216,7 @@ export class GrpcClientsService implements OnModuleInit {
     }
     return new Promise((resolve) => {
       this.contentClient.GetContentBatch(
-        { contentIds, pagination: pagination || { cursor: '', limit: 20 } },
+        { content_ids: contentIds, pagination: pagination || { cursor: '', limit: 20 } },
         { deadline: this.deadline() },
         (
           err: any,
@@ -232,7 +253,14 @@ export class GrpcClientsService implements OnModuleInit {
   }): Promise<ContentResponse | null> {
     return new Promise((resolve) => {
       this.contentClient.CreateContent(
-        request,
+        {
+          author_id: request.authorId,
+          content_type: request.contentType,
+          text_content: request.textContent,
+          file_paths: request.filePaths,
+          metadata: request.metadata,
+          tags: request.tags,
+        },
         { deadline: this.deadline() },
         (err: any, response: ContentResponse) => {
           if (err) {
@@ -253,7 +281,7 @@ export class GrpcClientsService implements OnModuleInit {
     return new Promise((resolve) => {
       this.contentClient.GetContentByAuthor(
         {
-          authorId,
+          author_id: authorId,
           pagination: pagination || { cursor: '', limit: 20 },
         },
         { deadline: this.deadline() },

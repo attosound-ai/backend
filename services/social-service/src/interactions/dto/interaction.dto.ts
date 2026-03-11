@@ -6,6 +6,10 @@ export class CreateCommentDto {
   @IsNotEmpty()
   @MaxLength(2000)
   comment: string;
+
+  @IsOptional()
+  @IsString()
+  parentId?: string;
 }
 
 export class InteractionPaginationDto {
@@ -28,6 +32,7 @@ export class CommentResponseDto {
   userId: string;
   contentId: string;
   comment: string;
+  parentId?: string | null;
   createdAt: string;
   author?: {
     id: string;
@@ -35,10 +40,12 @@ export class CommentResponseDto {
     displayName: string;
     avatar: string | null;
   };
+  replies?: CommentResponseDto[];
 }
 
 export class InteractionCountsDto {
   likesCount: number;
   commentsCount: number;
   sharesCount: number;
+  repostsCount: number;
 }
