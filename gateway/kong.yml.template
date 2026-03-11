@@ -20,7 +20,8 @@ services:
           - OPTIONS
 
   # FOLLOW / FOLLOWERS / FOLLOWING routes → Social Service (NestJS)
-  # Must have priority > 0 to win over the /api/v1/users prefix route below
+  # Defined BEFORE user-service so Kong picks this first for /follow paths.
+  # Both this and user-routes use regex (same priority 0) — order decides winner.
   - name: user-social-service
     url: ${SOCIAL_SERVICE_URL}
     routes:
@@ -28,7 +29,6 @@ services:
         paths:
           - ~/api/v1/users/[^/]+/(follow|followers|following)
         strip_path: false
-        priority: 100
         methods:
           - GET
           - POST
@@ -36,12 +36,14 @@ services:
           - OPTIONS
 
   # USERS routes → User Service (Go)
+  # Uses regex (~/api/v1/users) so it shares priority 0 with user-social-routes above.
+  # For /follow paths the social route wins because it is defined first.
   - name: user-service
     url: ${USER_SERVICE_URL}/users
     routes:
       - name: user-routes
         paths:
-          - /api/v1/users
+          - ~/api/v1/users
         strip_path: true
         methods:
           - GET
