@@ -27,6 +27,7 @@ services:
         paths:
           - ~/api/v1/users/[^/]+/(follow|followers|following)
         strip_path: false
+        priority: 100
         methods:
           - GET
           - POST
