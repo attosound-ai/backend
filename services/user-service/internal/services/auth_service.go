@@ -44,7 +44,7 @@ func NewAuthService(repo *repositories.UserRepository, jwtMgr *middleware.JWTMan
 // the user and credentials, publishes a user.created event, and returns tokens.
 func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest) (*models.AuthResponse, error) {
 	// Check if email is already taken
-	existingEmail, err := s.repo.FindByEmail(req.Email)
+	existingEmail, err := s.repo.FindByEmail(strings.ToLower(req.Email))
 	if err != nil {
 		return nil, errors.New("internal error checking email")
 	}
@@ -69,7 +69,7 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 
 	user := &models.User{
 		Username:         req.Username,
-		Email:            req.Email,
+		Email:            strings.ToLower(req.Email),
 		PhoneCountryCode: req.PhoneCountryCode,
 		PhoneNumber:      req.PhoneNumber,
 		DisplayName:      req.DisplayName,
@@ -485,7 +485,7 @@ func (s *AuthService) CheckPhoneAvailability(phone string) (bool, error) {
 // If an email already exists with status "pending", returns the existing tokens (idempotent).
 func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRequest) (*models.AuthResponse, error) {
 	// Check if email already exists
-	existing, err := s.repo.FindByEmail(req.Email)
+	existing, err := s.repo.FindByEmail(strings.ToLower(req.Email))
 	if err != nil {
 		return nil, errors.New("internal error checking email")
 	}
@@ -533,7 +533,7 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 
 	user := &models.User{
 		Username:           req.Username,
-		Email:              req.Email,
+		Email:              strings.ToLower(req.Email),
 		PhoneCountryCode:   req.PhoneCountryCode,
 		PhoneNumber:        req.PhoneNumber,
 		DisplayName:        req.DisplayName,
@@ -655,7 +655,7 @@ func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, r
 // ForgotPassword sends an OTP to the user's registered phone for password reset.
 // Always returns nil to prevent email enumeration.
 func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPasswordRequest) error {
-	user, err := s.repo.FindByEmail(req.Email)
+	user, err := s.repo.FindByEmail(strings.ToLower(req.Email))
 	if err != nil {
 		return nil
 	}
@@ -681,7 +681,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPass
 
 // ResetPassword verifies the OTP and updates the user's password.
 func (s *AuthService) ResetPassword(ctx context.Context, req *models.ResetPasswordRequest) error {
-	user, err := s.repo.FindByEmail(req.Email)
+	user, err := s.repo.FindByEmail(strings.ToLower(req.Email))
 	if err != nil || user == nil {
 		return errors.New("invalid request")
 	}
