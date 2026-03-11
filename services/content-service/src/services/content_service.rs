@@ -191,6 +191,20 @@ impl ContentService {
         self.delete_content(id_str, author_id).await
     }
 
+    /// Search content by query string, optionally filtered by content_type.
+    pub async fn search_content(
+        &self,
+        query: &str,
+        content_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Content>, ContentError> {
+        if query.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        let results = self.repo.search(query, content_type, limit).await?;
+        Ok(results)
+    }
+
     pub fn content_to_metadata_map(metadata: &HashMap<String, String>) -> HashMap<String, String> {
         metadata.clone()
     }

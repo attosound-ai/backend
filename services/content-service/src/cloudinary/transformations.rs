@@ -36,4 +36,14 @@ impl TransformationPresets {
         ]
         .join("|")
     }
+
+    /// Video: generate a thumbnail from the first frame.
+    pub fn video_thumbnail_eager() -> String {
+        "c_limit,w_750,h_750,f_jpg,q_auto/jpg".to_string()
+    }
+
+    /// Reel (vertical video): generate a vertical thumbnail.
+    pub fn reel_thumbnail_eager() -> String {
+        "c_limit,w_480,h_854,f_jpg,q_auto/jpg".to_string()
+    }
 }

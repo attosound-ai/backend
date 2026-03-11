@@ -106,6 +106,38 @@ impl ContentRepository {
         Ok((contents, total))
     }
 
+    /// Full-text search across title, text_content, and tags using regex.
+    /// Optionally filtered by content_type.
+    pub async fn search(
+        &self,
+        query: &str,
+        content_type: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Content>, mongodb::error::Error> {
+        let escaped = regex::escape(query);
+        let regex_filter = doc! {
+            "$or": [
+                { "title": { "$regex": &escaped, "$options": "i" } },
+                { "text_content": { "$regex": &escaped, "$options": "i" } },
+                { "tags": { "$regex": &escaped, "$options": "i" } },
+            ]
+        };
+
+        let filter = if let Some(ct) = content_type {
+            doc! { "$and": [regex_filter, { "content_type": ct }] }
+        } else {
+            regex_filter
+        };
+
+        let options = mongodb::options::FindOptions::builder()
+            .limit(limit)
+            .sort(doc! { "created_at": -1 })
+            .build();
+
+        let cursor = self.collection.find(filter, options).await?;
+        cursor.try_collect().await
+    }
+
     pub async fn delete_by_id(&self, id: &ObjectId) -> Result<bool, mongodb::error::Error> {
         let result = self.collection.delete_one(doc! { "_id": id }, None).await?;
         Ok(result.deleted_count > 0)

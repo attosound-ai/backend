@@ -29,6 +29,7 @@ sha1 = "0.10"
 hex = "0.4"
 urlencoding = "2"
 jsonwebtoken = "9"
+regex = "1"
 
 [build-dependencies]
 tonic-build = "0.11"

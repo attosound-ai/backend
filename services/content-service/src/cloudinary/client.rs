@@ -80,6 +80,8 @@ impl CloudinaryClient {
             )),
             "audio" => Some(("atto/audio", TransformationPresets::audio_eager())),
             "chat" => Some(("atto/chat", Some(TransformationPresets::chat_image_eager()))),
+            "video" => Some(("atto/videos", Some(TransformationPresets::video_thumbnail_eager()))),
+            "reel" => Some(("atto/reels", Some(TransformationPresets::reel_thumbnail_eager()))),
             _ => None,
         }
     }

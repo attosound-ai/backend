@@ -94,6 +94,7 @@ async fn main() -> std::io::Result<()> {
             .service(media_handler::upload_media)
             .service(media_handler::delete_media)
             .service(content_handler::create_content)
+            .service(content_handler::search_content)
             .service(content_handler::get_content)
             .service(content_handler::list_content)
             .service(content_handler::delete_content)
