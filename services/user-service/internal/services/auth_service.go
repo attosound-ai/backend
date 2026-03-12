@@ -67,11 +67,16 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		return nil, errors.New("failed to hash password")
 	}
 
+	var normalizedPhone *string
+	if req.PhoneNumber != nil {
+		n := normalizePhone(*req.PhoneNumber)
+		normalizedPhone = &n
+	}
 	user := &models.User{
 		Username:         req.Username,
 		Email:            strings.ToLower(req.Email),
 		PhoneCountryCode: req.PhoneCountryCode,
-		PhoneNumber:      req.PhoneNumber,
+		PhoneNumber:      normalizedPhone,
 		DisplayName:      req.DisplayName,
 		Role:             models.Role(req.Role),
 		InmateNumber:     req.InmateNumber,
@@ -181,6 +186,17 @@ func isDigitsOnly(s string) bool {
 		}
 	}
 	return true
+}
+
+// normalizePhone strips all non-digit characters from a phone number.
+func normalizePhone(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			out = append(out, s[i])
+		}
+	}
+	return string(out)
 }
 
 // Login authenticates a user by identifier (email, username, or phone) and password.
@@ -531,11 +547,16 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 		return nil, errors.New("failed to hash password")
 	}
 
+	var normalizedPrePhone *string
+	if req.PhoneNumber != nil {
+		n := normalizePhone(*req.PhoneNumber)
+		normalizedPrePhone = &n
+	}
 	user := &models.User{
 		Username:           req.Username,
 		Email:              strings.ToLower(req.Email),
 		PhoneCountryCode:   req.PhoneCountryCode,
-		PhoneNumber:        req.PhoneNumber,
+		PhoneNumber:        normalizedPrePhone,
 		DisplayName:        req.DisplayName,
 		Role:               models.RoleListener,
 		RegistrationStatus: "pending",
@@ -652,19 +673,21 @@ func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, r
 	}, nil
 }
 
-// ForgotPassword sends an OTP to the user's registered phone for password reset.
+// ForgotPassword sends an OTP to the user's email for password reset.
 // Always returns nil to prevent email enumeration.
 func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPasswordRequest) error {
 	user, err := s.repo.FindByEmail(strings.ToLower(req.Email))
 	if err != nil {
 		return nil
 	}
-	if user == nil || user.PhoneCountryCode == nil || user.PhoneNumber == nil {
+	if user == nil {
 		return nil
 	}
 
-	fullPhone := *user.PhoneCountryCode + *user.PhoneNumber
-	otpBody, _ := json.Marshal(map[string]string{"phone": fullPhone})
+	otpBody, _ := json.Marshal(map[string]string{
+		"channel": "email",
+		"email":   user.Email,
+	})
 	otpURL := fmt.Sprintf("%s/otp/send", s.otpServiceURL)
 	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(otpBody))
 	if err != nil {
@@ -679,20 +702,19 @@ func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPass
 	return nil
 }
 
-// ResetPassword verifies the OTP and updates the user's password.
+// ResetPassword verifies the OTP (sent to email) and updates the user's password.
 func (s *AuthService) ResetPassword(ctx context.Context, req *models.ResetPasswordRequest) error {
 	user, err := s.repo.FindByEmail(strings.ToLower(req.Email))
 	if err != nil || user == nil {
 		return errors.New("invalid request")
 	}
-	if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
-		return errors.New("no phone number on file for this account")
-	}
 
-	fullPhone := *user.PhoneCountryCode + *user.PhoneNumber
-
-	// Verify OTP via OTP service
-	otpBody, _ := json.Marshal(map[string]string{"phone": fullPhone, "code": req.OTP})
+	// Verify OTP via OTP service (email channel)
+	otpBody, _ := json.Marshal(map[string]string{
+		"channel": "email",
+		"email":   user.Email,
+		"code":    req.OTP,
+	})
 	otpURL := fmt.Sprintf("%s/otp/verify", s.otpServiceURL)
 	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(otpBody))
 	if err != nil {

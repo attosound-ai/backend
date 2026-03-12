@@ -2,10 +2,18 @@ package repositories
 
 import (
 	"errors"
+	"regexp"
 
 	"github.com/atto-sound/user-service/internal/models"
 	"gorm.io/gorm"
 )
+
+var nonDigitRe = regexp.MustCompile(`[^0-9]`)
+
+// digitsOnly strips all non-digit characters from a phone number string.
+func digitsOnly(s string) string {
+	return nonDigitRe.ReplaceAllString(s, "")
+}
 
 // UserRepository handles all database operations for users.
 type UserRepository struct {
@@ -56,7 +64,7 @@ func (r *UserRepository) FindByEmail(email string) (*models.User, error) {
 // FindByPhone retrieves a user by their phone country code and number.
 func (r *UserRepository) FindByPhone(countryCode, number string) (*models.User, error) {
 	var user models.User
-	err := r.db.Where("phone_country_code = ? AND phone_number = ?", countryCode, number).First(&user).Error
+	err := r.db.Where("phone_country_code = ? AND REGEXP_REPLACE(phone_number, '[^0-9]', '', 'g') = ?", countryCode, digitsOnly(number)).First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -69,7 +77,8 @@ func (r *UserRepository) FindByPhone(countryCode, number string) (*models.User, 
 // FindByFullPhone retrieves a user by their full E.164 phone (country code + number concatenated).
 func (r *UserRepository) FindByFullPhone(fullPhone string) (*models.User, error) {
 	var user models.User
-	err := r.db.Where("CONCAT(COALESCE(phone_country_code, ''), COALESCE(phone_number, '')) = ?", fullPhone).First(&user).Error
+	normalized := digitsOnly(fullPhone)
+	err := r.db.Where("REGEXP_REPLACE(CONCAT(COALESCE(phone_country_code, ''), COALESCE(phone_number, '')), '[^0-9]', '', 'g') = ?", normalized).First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -82,7 +91,7 @@ func (r *UserRepository) FindByFullPhone(fullPhone string) (*models.User, error)
 // FindByPhoneNumber retrieves a user by their phone number (without country code).
 func (r *UserRepository) FindByPhoneNumber(number string) (*models.User, error) {
 	var user models.User
-	err := r.db.Where("phone_number = ?", number).First(&user).Error
+	err := r.db.Where("REGEXP_REPLACE(phone_number, '[^0-9]', '', 'g') = ?", digitsOnly(number)).First(&user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
