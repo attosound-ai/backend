@@ -10,6 +10,11 @@ class CheckoutRequest(BaseModel):
 
     plan_id: str = Field(alias="planId", description="Plan identifier (e.g. 'annual', 'monthly')")
     email: str = Field(description="Customer email address")
+    for_user_id: str | None = Field(
+        default=None,
+        alias="forUserId",
+        description="Optional: create checkout for this user (representative paying for artist)",
+    )
 
 
 class CheckoutResponse(BaseModel):

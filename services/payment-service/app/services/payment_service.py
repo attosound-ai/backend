@@ -1,10 +1,12 @@
 import logging
+import random
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.kafka.producer import publish_event
 from app.models.subscription import Subscription
 from app.models.transaction import Transaction
@@ -204,7 +206,7 @@ class PaymentService:
             expires_at=now + timedelta(days=duration_days),
             status="active",
             transaction_id=transaction_id,
-            bridge_number=None,  # Assigned async via Kafka number.provisioned
+            bridge_number=f"+1555{random.randint(1000000, 9999999)}" if settings.app_env == "development" else None,
         )
         sub = await self.repo.create_subscription(sub)
         logger.info(
@@ -335,7 +337,7 @@ class PaymentService:
             expires_at=now + timedelta(days=duration_days),
             status="active",
             transaction_id=txn.id,
-            bridge_number=None,  # Assigned async via Kafka number.provisioned
+            bridge_number=f"+1555{random.randint(1000000, 9999999)}" if settings.app_env == "development" else None,
         )
         sub = await self.repo.create_subscription(sub)
         logger.info(

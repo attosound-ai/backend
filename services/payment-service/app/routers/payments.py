@@ -36,9 +36,10 @@ async def checkout(
     ``clientSecret`` and ``paymentIntentId`` that the mobile app uses
     with the Stripe SDK.
     """
+    target_user = body.for_user_id or user_id
     try:
         result = await stripe_service.create_checkout_session(
-            user_id=user_id,
+            user_id=target_user,
             plan_id=body.plan_id,
             email=body.email,
         )
@@ -162,21 +163,23 @@ async def confirm_payment(
         )
 
     plan_id = (pi.metadata or {}).get("plan_id", "record")
+    target_user = (pi.metadata or {}).get("user_id", user_id)
     amount = Decimal(pi.amount) / Decimal(100)
 
     svc = PaymentService(session)
 
-    # Check if subscription already exists (idempotent — webhook may have fired too)
-    existing = await svc.get_active_subscription(user_id)
-    if not existing:
+    # Check if a PAID subscription already exists (idempotent — webhook may have fired too).
+    # Skip free-tier subscriptions since we're upgrading to a paid plan.
+    existing = await svc.get_active_subscription(target_user)
+    if not existing or existing.plan == "connect_free":
         await svc.create_subscription_from_webhook(
-            user_id=user_id,
+            user_id=target_user,
             plan_id=plan_id,
             stripe_payment_intent_id=body.payment_intent_id,
             amount=amount,
         )
 
-    bridge_number, status = await svc.get_bridge_number(user_id)
+    bridge_number, status = await svc.get_bridge_number(target_user)
 
     return ApiResponse(
         success=True,

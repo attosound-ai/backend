@@ -25,10 +25,11 @@ async def create_subscription(
     user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """Create or upgrade the authenticated user's subscription."""
+    """Create or upgrade a subscription. Representatives can pay for their artist."""
+    target_user = body.for_user_id or user_id
     svc = PaymentService(session)
     sub = await svc.create_subscription(
-        user_id=user_id,
+        user_id=target_user,
         plan=body.plan,
     )
     return ApiResponse(success=True, data=sub.model_dump())
@@ -99,8 +100,9 @@ async def upgrade_subscription(
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Upgrade to a higher subscription plan via Stripe checkout."""
+    target_user = body.for_user_id or user_id
     svc = PaymentService(session)
-    sub = await svc.get_active_subscription(user_id)
+    sub = await svc.get_active_subscription(target_user)
     current_plan = sub.plan if sub else "connect_free"
 
     if not can_upgrade(current_plan, body.target_plan):
@@ -108,7 +110,7 @@ async def upgrade_subscription(
 
     try:
         result = await stripe_service.create_checkout_session(
-            user_id=user_id,
+            user_id=target_user,
             plan_id=body.target_plan,
             email=body.email,
         )

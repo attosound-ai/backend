@@ -11,6 +11,11 @@ class CreateSubscriptionRequest(BaseModel):
     plan: Literal["connect_free", "record", "record_pro", "connect_pro"] = Field(
         description="Subscription plan to activate"
     )
+    for_user_id: str | None = Field(
+        default=None,
+        alias="forUserId",
+        description="Optional: create subscription for this user (representative paying for artist)",
+    )
 
 
 class UpgradeSubscriptionRequest(BaseModel):
@@ -22,6 +27,11 @@ class UpgradeSubscriptionRequest(BaseModel):
         alias="targetPlan", description="Target plan to upgrade to"
     )
     email: str = Field(description="Customer email address")
+    for_user_id: str | None = Field(
+        default=None,
+        alias="forUserId",
+        description="Optional: upgrade subscription for this user (representative paying for artist)",
+    )
 
 
 class SubscriptionResponse(BaseModel):
