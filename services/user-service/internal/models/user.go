@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
@@ -37,6 +38,9 @@ type User struct {
 	ProfileVerified    bool           `gorm:"default:false" json:"profileVerified"`
 	RegistrationStatus string         `gorm:"type:varchar(20);not null;default:'completed'" json:"registrationStatus"`
 	RepresentativeID   *uint64        `json:"representativeId,omitempty"`
+	IsManagedAccount   bool           `gorm:"default:false" json:"isManagedAccount"`
+	ArtistTypes        pq.StringArray `gorm:"type:text[];column:artist_types" json:"artistTypes,omitempty"`
+	ArtistGenres       pq.StringArray `gorm:"type:text[];column:artist_genres" json:"artistGenres,omitempty"`
 	FollowersCount     int64          `gorm:"default:0" json:"followersCount"`
 	FollowingCount     int64          `gorm:"default:0" json:"followingCount"`
 	PostsCount         int64          `gorm:"default:0" json:"postsCount"`

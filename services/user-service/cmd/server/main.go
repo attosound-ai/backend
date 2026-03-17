@@ -86,6 +86,8 @@ func main() {
 	auth := app.Group("/auth")
 	auth.Post("/register", authHandler.Register)
 	auth.Get("/check-phone", authHandler.CheckPhone)
+	auth.Get("/check-username", authHandler.CheckUsername)
+	auth.Get("/check-email", authHandler.CheckEmail)
 	auth.Post("/pre-register", authHandler.PreRegister)
 	auth.Post("/login", authHandler.Login)
 	auth.Post("/login/otp", authHandler.LoginOTP)
@@ -100,6 +102,7 @@ func main() {
 	// Auth routes (protected)
 	auth.Get("/me", middleware.RequireAuth(jwtMgr), authHandler.Me)
 	auth.Post("/complete-registration", middleware.RequireAuth(jwtMgr), authHandler.CompleteRegistration)
+	auth.Post("/switch-account", middleware.RequireAuth(jwtMgr), authHandler.SwitchAccount)
 
 	// 2FA management (protected)
 	auth.Post("/2fa/enable", middleware.RequireAuth(jwtMgr), authHandler.Enable2FAInit)
@@ -109,6 +112,7 @@ func main() {
 	// User routes (protected — must be registered before parameterized routes)
 	users := app.Group("/users")
 	users.Patch("/me/profile", middleware.RequireAuth(jwtMgr), userHandler.UpdateProfile)
+	users.Get("/me/linked-accounts", middleware.RequireAuth(jwtMgr), authHandler.GetLinkedAccounts)
 	users.Post("/me/verification/send-otp", middleware.RequireAuth(jwtMgr), verificationHandler.SendVerificationOTP)
 	users.Post("/me/verification/verify", middleware.RequireAuth(jwtMgr), verificationHandler.VerifyOTP)
 

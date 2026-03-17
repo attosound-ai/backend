@@ -496,6 +496,24 @@ func (s *AuthService) CheckPhoneAvailability(phone string) (bool, error) {
 	return existing == nil, nil
 }
 
+// CheckUsernameAvailability returns true if the username is not taken.
+func (s *AuthService) CheckUsernameAvailability(username string) (bool, error) {
+	existing, err := s.repo.FindByUsername(strings.ToLower(username))
+	if err != nil {
+		return false, errors.New("internal error")
+	}
+	return existing == nil, nil
+}
+
+// CheckEmailAvailability returns true if the email is not yet registered.
+func (s *AuthService) CheckEmailAvailability(email string) (bool, error) {
+	existing, err := s.repo.FindByEmail(strings.ToLower(email))
+	if err != nil {
+		return false, errors.New("internal error")
+	}
+	return existing == nil, nil
+}
+
 // PreRegister creates a minimal user account after OTP verification.
 // The user is created with role "listener" and registration_status "pending".
 // If an email already exists with status "pending", returns the existing tokens (idempotent).
@@ -598,7 +616,8 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 
 // CompleteRegistration finalizes a pending registration by setting the role
 // and optional representative fields, then returns updated tokens.
-func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, req *models.CompleteRegistrationRequest) (*models.AuthResponse, error) {
+// When role is "representative", also atomically creates a linked managed artist account.
+func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, req *models.CompleteRegistrationRequest) (*models.CompleteRegistrationResponse, error) {
 	uid, err := strconv.ParseUint(userID, 10, 64)
 	if err != nil {
 		return nil, errors.New("invalid user ID")
@@ -667,10 +686,130 @@ func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, r
 		return nil, errors.New("failed to generate tokens")
 	}
 
-	return &models.AuthResponse{
+	resp := &models.CompleteRegistrationResponse{
 		User:   user.ToProfile(),
 		Tokens: tokens,
+	}
+
+	// If registering as a representative, create the linked managed artist account.
+	if req.Role == "representative" && req.RepresentativeFields != nil && req.InmateNumber != nil {
+		// Hash artist password if real account fields are provided
+		var artistPasswordHash string
+		if req.ManagedArtistFields != nil && req.ManagedArtistFields.Password != "" {
+			hash, hashErr := bcrypt.GenerateFromPassword([]byte(req.ManagedArtistFields.Password), bcrypt.DefaultCost)
+			if hashErr != nil {
+				log.Printf("[AUTH] Warning: failed to hash artist password for rep %s: %v", userID, hashErr)
+			} else {
+				artistPasswordHash = string(hash)
+			}
+		}
+
+		managedArtist, createErr := s.repo.CreateManagedArtist(
+			user,
+			req.ManagedArtistFields,
+			artistPasswordHash,
+			*req.InmateNumber,
+			req.RepresentativeFields.InmateState,
+			req.RepresentativeFields.ConsentToRecording,
+		)
+		if createErr != nil {
+			log.Printf("[AUTH] Warning: failed to create managed artist for rep %s: %v", userID, createErr)
+			// Non-fatal: rep registration succeeded, artist creation is best-effort
+		} else {
+			artistTokens, tokenErr := s.jwtMgr.GenerateTokenPair(managedArtist)
+			if tokenErr != nil {
+				log.Printf("[AUTH] Warning: failed to generate artist tokens for rep %s: %v", userID, tokenErr)
+			} else {
+				resp.LinkedAccount = &models.LinkedAccountPayload{
+					User:   managedArtist.ToProfile(),
+					Tokens: artistTokens,
+				}
+				log.Printf("[AUTH] Created managed artist account %d for rep %s", managedArtist.ID, userID)
+			}
+
+			// Publish user.created event for the managed artist (triggers welcome email)
+			go func() {
+				artistIDStr := strconv.FormatUint(managedArtist.ID, 10)
+				eventData := map[string]interface{}{
+					"id":          artistIDStr,
+					"username":    managedArtist.Username,
+					"email":       managedArtist.Email,
+					"displayName": managedArtist.DisplayName,
+					"role":        "artist",
+				}
+				if err := s.producer.Publish(context.Background(), "user.created", artistIDStr, eventData); err != nil {
+					log.Printf("[AUTH] Failed to publish user.created event for artist %s: %v", artistIDStr, err)
+				}
+			}()
+		}
+	}
+
+	return resp, nil
+}
+
+// SwitchAccount generates fresh tokens for a linked account without requiring a password.
+// Caller must be the representative of the target, or the target must be the caller's representative.
+func (s *AuthService) SwitchAccount(ctx context.Context, callerID string, targetUserID uint64) (*models.AuthResponse, error) {
+	uid, err := strconv.ParseUint(callerID, 10, 64)
+	if err != nil {
+		return nil, errors.New("invalid user ID")
+	}
+
+	caller, err := s.repo.FindByID(uid)
+	if err != nil || caller == nil {
+		return nil, errors.New("user not found")
+	}
+
+	target, err := s.repo.FindByID(targetUserID)
+	if err != nil || target == nil {
+		return nil, errors.New("target user not found")
+	}
+
+	// Authorization: accounts must be linked
+	authorized := false
+	if target.RepresentativeID != nil && *target.RepresentativeID == uid {
+		authorized = true // rep → their managed artist
+	}
+	if caller.RepresentativeID != nil && *caller.RepresentativeID == target.ID {
+		authorized = true // managed artist → their rep
+	}
+	if !authorized {
+		return nil, errors.New("forbidden: accounts are not linked")
+	}
+
+	tokens, err := s.jwtMgr.GenerateTokenPair(target)
+	if err != nil {
+		return nil, errors.New("failed to generate tokens")
+	}
+
+	return &models.AuthResponse{
+		User:   target.ToProfile(),
+		Tokens: tokens,
 	}, nil
+}
+
+// GetLinkedAccounts returns the accounts linked to the given caller.
+func (s *AuthService) GetLinkedAccounts(ctx context.Context, callerID string) ([]*models.UserProfile, error) {
+	uid, err := strconv.ParseUint(callerID, 10, 64)
+	if err != nil {
+		return nil, errors.New("invalid user ID")
+	}
+
+	caller, err := s.repo.FindByID(uid)
+	if err != nil || caller == nil {
+		return nil, errors.New("user not found")
+	}
+
+	linked, err := s.repo.GetLinkedAccounts(uid, caller.IsManagedAccount, caller.RepresentativeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get linked accounts: %w", err)
+	}
+
+	profiles := make([]*models.UserProfile, len(linked))
+	for i, u := range linked {
+		profiles[i] = u.ToProfile()
+	}
+	return profiles, nil
 }
 
 // ForgotPassword sends an OTP to the user's email for password reset.
@@ -685,8 +824,9 @@ func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPass
 	}
 
 	otpBody, _ := json.Marshal(map[string]string{
-		"channel": "email",
-		"email":   user.Email,
+		"email":          user.Email,
+		"locale":         req.Locale,
+		"email_template": "password-reset",
 	})
 	otpURL := fmt.Sprintf("%s/otp/send", s.otpServiceURL)
 	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(otpBody))

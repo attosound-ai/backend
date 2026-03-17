@@ -31,11 +31,25 @@ type PreRegisterRequest struct {
 	PhoneNumber      *string `json:"phoneNumber,omitempty"`
 }
 
+// ManagedArtistFields holds the account details for creating a real artist account.
+type ManagedArtistFields struct {
+	Email            string  `json:"email" validate:"required,email"`
+	Password         string  `json:"password" validate:"required,min=8"`
+	Username         string  `json:"username" validate:"required,min=3,max=50"`
+	DisplayName      string  `json:"displayName" validate:"required,min=1,max=100"`
+	PhoneCountryCode *string  `json:"phoneCountryCode,omitempty"`
+	PhoneNumber      *string  `json:"phoneNumber,omitempty"`
+	Avatar           *string  `json:"avatar,omitempty"`
+	ArtistTypes      []string `json:"artistTypes,omitempty"`
+	ArtistGenres     []string `json:"artistGenres,omitempty"`
+}
+
 // CompleteRegistrationRequest finalizes registration with role and optional representative fields.
 type CompleteRegistrationRequest struct {
 	Role                 string                `json:"role" validate:"required,oneof=artist representative listener"`
 	InmateNumber         *string               `json:"inmateNumber,omitempty"`
 	RepresentativeFields *RepresentativeFields `json:"representativeFields,omitempty"`
+	ManagedArtistFields  *ManagedArtistFields  `json:"managedArtistFields,omitempty"`
 }
 
 // UpdateProfileRequest is the DTO for updating user profile fields.
@@ -92,6 +106,20 @@ type AuthResponse struct {
 	Tokens *TokenPair   `json:"tokens"`
 }
 
+// LinkedAccountPayload holds the user profile and tokens of a linked (managed) account.
+type LinkedAccountPayload struct {
+	User   *UserProfile `json:"user"`
+	Tokens *TokenPair   `json:"tokens"`
+}
+
+// CompleteRegistrationResponse extends AuthResponse with an optional linked account.
+// When a representative registers, a managed artist account is also created and returned here.
+type CompleteRegistrationResponse struct {
+	User          *UserProfile          `json:"user"`
+	Tokens        *TokenPair            `json:"tokens"`
+	LinkedAccount *LinkedAccountPayload `json:"linkedAccount,omitempty"`
+}
+
 // UserProfile is the public-facing user data returned in API responses.
 type UserProfile struct {
 	ID                 uint64  `json:"id"`
@@ -109,12 +137,15 @@ type UserProfile struct {
 	Relationship       *string `json:"relationship,omitempty"`
 	ConsentToRecording *bool   `json:"consentToRecording,omitempty"`
 	ArtistEmail        *string `json:"artistEmail,omitempty"`
-	ArtistPhone        *string `json:"artistPhone,omitempty"`
-	ProfileVerified    bool    `json:"profileVerified"`
+	ArtistPhone        *string  `json:"artistPhone,omitempty"`
+	ArtistTypes        []string `json:"artistTypes,omitempty"`
+	ArtistGenres       []string `json:"artistGenres,omitempty"`
+	ProfileVerified    bool     `json:"profileVerified"`
 	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
 	TwoFactorMethod    string `json:"twoFactorMethod"`
 	RegistrationStatus string  `json:"registrationStatus"`
 	RepresentativeID   *uint64 `json:"representativeId,omitempty"`
+	IsManagedAccount   bool    `json:"isManagedAccount"`
 	FollowersCount     int64   `json:"followersCount"`
 	FollowingCount     int64   `json:"followingCount"`
 	PostsCount         int64   `json:"postsCount"`
@@ -123,7 +154,8 @@ type UserProfile struct {
 
 // ForgotPasswordRequest initiates the password reset flow.
 type ForgotPasswordRequest struct {
-	Email string `json:"email" validate:"required,email"`
+	Email  string `json:"email" validate:"required,email"`
+	Locale string `json:"locale,omitempty"`
 }
 
 // ResetPasswordRequest sets a new password after OTP verification.
@@ -167,6 +199,8 @@ func (u *User) ToProfile() *UserProfile {
 		ConsentToRecording: u.ConsentToRecording,
 		ArtistEmail:        u.ArtistEmail,
 		ArtistPhone:        u.ArtistPhone,
+		ArtistTypes:        u.ArtistTypes,
+		ArtistGenres:       u.ArtistGenres,
 		ProfileVerified:    u.ProfileVerified,
 		RegistrationStatus: u.RegistrationStatus,
 		FollowersCount:     u.FollowersCount,
@@ -177,6 +211,7 @@ func (u *User) ToProfile() *UserProfile {
 	if u.RepresentativeID != nil {
 		p.RepresentativeID = u.RepresentativeID
 	}
+	p.IsManagedAccount = u.IsManagedAccount
 	return p
 }
 

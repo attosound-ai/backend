@@ -216,6 +216,64 @@ func (h *AuthHandler) CheckPhone(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{Success: true})
 }
 
+// CheckUsername handles GET /auth/check-username?username=foo
+// Returns 200 if available, 409 if already taken.
+func (h *AuthHandler) CheckUsername(c *fiber.Ctx) error {
+	username := c.Query("username")
+	if username == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "username is required",
+		})
+	}
+
+	available, err := h.authService.CheckUsernameAvailability(username)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	if !available {
+		return c.Status(fiber.StatusConflict).JSON(models.APIResponse{
+			Success: false,
+			Error:   "username already taken",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{Success: true})
+}
+
+// CheckEmail handles GET /auth/check-email?email=foo@bar.com
+// Returns 200 if available, 409 if already registered.
+func (h *AuthHandler) CheckEmail(c *fiber.Ctx) error {
+	email := c.Query("email")
+	if email == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "email is required",
+		})
+	}
+
+	available, err := h.authService.CheckEmailAvailability(email)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	if !available {
+		return c.Status(fiber.StatusConflict).JSON(models.APIResponse{
+			Success: false,
+			Error:   "email already registered",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{Success: true})
+}
+
 // PreRegister handles POST /auth/pre-register
 func (h *AuthHandler) PreRegister(c *fiber.Ctx) error {
 	var req models.PreRegisterRequest
@@ -312,6 +370,66 @@ func (h *AuthHandler) CompleteRegistration(c *fiber.Ctx) error {
 	})
 }
 
+// SwitchAccount handles POST /auth/switch-account (requires JWT)
+// Generates fresh tokens for a linked account without requiring a password.
+func (h *AuthHandler) SwitchAccount(c *fiber.Ctx) error {
+	claims, ok := c.Locals("claims").(*middleware.JWTClaims)
+	if !ok || claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+			Success: false,
+			Error:   "unauthorized",
+		})
+	}
+
+	var req struct {
+		TargetUserID uint64 `json:"targetUserId"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.TargetUserID == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "targetUserId is required",
+		})
+	}
+
+	result, err := h.authService.SwitchAccount(c.Context(), claims.UserID, req.TargetUserID)
+	if err != nil {
+		status := fiber.StatusInternalServerError
+		msg := err.Error()
+		if msg == "forbidden: accounts are not linked" {
+			status = fiber.StatusForbidden
+		} else if msg == "target user not found" || msg == "user not found" {
+			status = fiber.StatusNotFound
+		}
+		return c.Status(status).JSON(models.APIResponse{Success: false, Error: msg})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{Success: true, Data: result})
+}
+
+// GetLinkedAccounts handles GET /users/me/linked-accounts (requires JWT)
+func (h *AuthHandler) GetLinkedAccounts(c *fiber.Ctx) error {
+	claims, ok := c.Locals("claims").(*middleware.JWTClaims)
+	if !ok || claims == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+			Success: false,
+			Error:   "unauthorized",
+		})
+	}
+
+	accounts, err := h.authService.GetLinkedAccounts(c.Context(), claims.UserID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   "failed to get linked accounts",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    fiber.Map{"accounts": accounts},
+	})
+}
+
 // ForgotPassword handles POST /auth/forgot-password
 func (h *AuthHandler) ForgotPassword(c *fiber.Ctx) error {
 	var req models.ForgotPasswordRequest
@@ -334,7 +452,7 @@ func (h *AuthHandler) ForgotPassword(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
 		Data: map[string]string{
-			"message": "if this email is registered, a code has been sent to the associated phone number",
+			"message": "if this email is registered, a verification code has been sent",
 		},
 	})
 }

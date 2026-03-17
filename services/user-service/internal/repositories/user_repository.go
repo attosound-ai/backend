@@ -2,7 +2,10 @@ package repositories
 
 import (
 	"errors"
+	"fmt"
+	"math/rand"
 	"regexp"
+	"strings"
 
 	"github.com/atto-sound/user-service/internal/models"
 	"gorm.io/gorm"
@@ -195,6 +198,109 @@ func (r *UserRepository) UpdateCredentials2FA(userID uint64, enabled bool, metho
 			"two_factor_enabled": enabled,
 			"two_factor_method":  method,
 		}).Error
+}
+
+// slugifyArtistName converts an artist name to a lowercase alphanumeric slug (max 20 chars).
+func slugifyArtistName(name string) string {
+	re := regexp.MustCompile(`[^a-z0-9]+`)
+	slug := re.ReplaceAllString(strings.ToLower(name), "_")
+	slug = strings.Trim(slug, "_")
+	if len(slug) > 20 {
+		slug = slug[:20]
+	}
+	if slug == "" {
+		slug = "artista"
+	}
+	return slug
+}
+
+// CreateManagedArtist creates a managed artist account linked to the given representative.
+// When artistFields is provided, creates a full account with real email, password, and credentials.
+// When artistFields is nil, falls back to auto-generated email/username (legacy behavior).
+func (r *UserRepository) CreateManagedArtist(
+	repUser *models.User,
+	artistFields *models.ManagedArtistFields,
+	passwordHash string,
+	inmateNumber, inmateState string,
+	consentToRecording bool,
+) (*models.User, error) {
+	repID := repUser.ID
+
+	var email, username, displayName string
+	var phoneCountryCode, phoneNumber, avatar *string
+	var artistTypes, artistGenres []string
+
+	if artistFields != nil {
+		email = strings.ToLower(artistFields.Email)
+		username = strings.ToLower(artistFields.Username)
+		displayName = artistFields.DisplayName
+		phoneCountryCode = artistFields.PhoneCountryCode
+		phoneNumber = artistFields.PhoneNumber
+		avatar = artistFields.Avatar
+		artistTypes = artistFields.ArtistTypes
+		artistGenres = artistFields.ArtistGenres
+	} else {
+		// Legacy fallback: auto-generate
+		email = fmt.Sprintf("artist_%s_%d@managed.atto", inmateNumber, repUser.ID)
+		slug := slugifyArtistName(displayName)
+		username = fmt.Sprintf("artist_%s_%04d", slug, rand.Intn(10000))
+		displayName = inmateNumber // best-effort fallback
+	}
+
+	artist := &models.User{
+		Email:              email,
+		Username:           username,
+		DisplayName:        displayName,
+		Role:               models.RoleArtist,
+		IsManagedAccount:   true,
+		RepresentativeID:   &repID,
+		PhoneCountryCode:   phoneCountryCode,
+		PhoneNumber:        phoneNumber,
+		Avatar:             avatar,
+		InmateNumber:       &inmateNumber,
+		InmateState:        &inmateState,
+		ConsentToRecording: &consentToRecording,
+		ArtistTypes:        artistTypes,
+		ArtistGenres:       artistGenres,
+		RegistrationStatus: "completed",
+	}
+
+	// If we have a real password, create user + credentials in a transaction
+	if passwordHash != "" {
+		creds := &models.UserCredentials{PasswordHash: passwordHash}
+		if err := r.CreateUserWithCredentials(artist, creds); err != nil {
+			return nil, fmt.Errorf("failed to create managed artist with credentials: %w", err)
+		}
+		return artist, nil
+	}
+
+	// Legacy: no credentials
+	if err := r.db.Create(artist).Error; err != nil {
+		return nil, fmt.Errorf("failed to create managed artist: %w", err)
+	}
+	return artist, nil
+}
+
+// GetLinkedAccounts returns accounts linked to the caller.
+// If isManagedAccount is true, returns the representative via representativeID.
+// Otherwise returns all managed artists where representative_id = callerID.
+func (r *UserRepository) GetLinkedAccounts(callerID uint64, isManagedAccount bool, representativeID *uint64) ([]*models.User, error) {
+	var users []*models.User
+	if isManagedAccount && representativeID != nil {
+		var rep models.User
+		if err := r.db.First(&rep, *representativeID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return users, nil
+			}
+			return nil, err
+		}
+		users = append(users, &rep)
+	} else {
+		if err := r.db.Where("representative_id = ? AND is_managed_account = true", callerID).Find(&users).Error; err != nil {
+			return nil, err
+		}
+	}
+	return users, nil
 }
 
 // CreateUserWithCredentials creates a user and their credentials in a single transaction.
