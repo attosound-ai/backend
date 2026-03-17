@@ -159,6 +159,7 @@ export class ProjectsController {
         const allowed = [
           "audio/wav",
           "audio/x-wav",
+          "audio/vnd.wave",
           "audio/mpeg",
           "audio/mp3",
           "audio/mp4",
