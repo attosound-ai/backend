@@ -254,6 +254,19 @@ services:
     networks:
       - atto-network
 
+  # Mailpit (dev email testing — UI at http://localhost:8025)
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: atto-mailpit
+    ports:
+      - "1025:1025"    # SMTP
+      - "8025:8025"    # Web UI
+    environment:
+      MP_MAX_MESSAGES: 500
+    networks:
+      - atto-network
+    restart: unless-stopped
+
   # ════════════════════════════════════════════
   # API GATEWAY
   # ════════════════════════════════════════════
@@ -458,6 +471,7 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-noreply@attosound.com}
+      EMAIL_SERVICE_URL: http://email-service:3005
     networks:
       - atto-network
     profiles:
@@ -539,6 +553,42 @@ services:
       S3_SECRET_KEY: atto_minio_dev
       S3_BUCKET: atto-audio-segments
       S3_REGION: us-east-1
+    networks:
+      - atto-network
+    profiles:
+      - services
+
+  # Email Service (NestJS + React Email + BullMQ)
+  email-service:
+    build:
+      context: ../services/email-service
+      dockerfile: Dockerfile
+    container_name: atto-email-service
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    ports:
+      - "3005:3005"
+    environment:
+      PORT: 3005
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-mailpit}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      MAILPIT_HOST: mailpit
+      MAILPIT_PORT: 1025
+      EMAIL_FROM: ${EMAIL_FROM:-dev@atto.local}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Atto Dev}
+      EMAIL_FROM_AUTH: ${EMAIL_FROM_AUTH:-auth@atto.local}
+      EMAIL_FROM_WELCOME: ${EMAIL_FROM_WELCOME:-welcome@atto.local}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: atto_dev
+      KAFKA_BROKERS: kafka:29092
+      APP_DEEPLINK: atto://
+      APP_URL: http://localhost:8000
     networks:
       - atto-network
     profiles:
