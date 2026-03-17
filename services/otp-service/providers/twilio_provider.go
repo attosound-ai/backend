@@ -27,7 +27,7 @@ func NewTwilioSMSProvider(accountSID, authToken, fromPhone string) *TwilioSMSPro
 }
 
 // Send sends an SMS message to the given phone number via Twilio.
-func (p *TwilioSMSProvider) Send(destination, message string) error {
+func (p *TwilioSMSProvider) Send(destination, message, locale, emailTemplate string) error {
 	params := &openapi.CreateMessageParams{}
 	params.SetTo(destination)
 	params.SetFrom(p.fromPhone)

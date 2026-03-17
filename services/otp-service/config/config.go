@@ -30,12 +30,15 @@ type Config struct {
 	BlockDuration     time.Duration
 	MaxConsecFailures int
 
-	// SMTP for email OTP delivery
+	// SMTP for email OTP delivery (legacy, fallback)
 	SMTPHost     string
 	SMTPPort     string
 	SMTPUser     string
 	SMTPPassword string
 	SMTPFrom     string
+
+	// Email service (preferred over SMTP)
+	EmailServiceURL string
 
 	// Dev-only: accept "000000" as valid OTP
 	BypassOTP bool
@@ -67,6 +70,8 @@ func Load() *Config {
 		SMTPUser:     getEnv("SMTP_USER", ""),
 		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
 		SMTPFrom:     getEnv("SMTP_FROM", "noreply@attosound.com"),
+
+		EmailServiceURL: getEnv("EMAIL_SERVICE_URL", "http://email-service:3005"),
 
 		BypassOTP: getEnv("BYPASS_OTP", "false") == "true",
 	}

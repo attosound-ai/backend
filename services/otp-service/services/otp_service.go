@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"time"
 
 	"github.com/atto-sound/otp-service/config"
 	"github.com/atto-sound/otp-service/providers"
@@ -17,17 +18,53 @@ import (
 type OTPService struct {
 	cfg           *config.Config
 	repo          *repository.RedisRepository
-	delivery      providers.DeliveryProvider // SMS
-	emailDelivery providers.DeliveryProvider // Email
+	smsDelivery   providers.DeliveryProvider // SMS (Twilio or console)
+	emailDelivery providers.DeliveryProvider // Email (email-service HTTP or console)
+	dispatcher    *MultiChannelDispatcher
 }
 
 // NewOTPService creates a new OTPService.
+// The internal MultiChannelDispatcher is created with a 5-second timeout per send.
 func NewOTPService(cfg *config.Config, repo *repository.RedisRepository, delivery providers.DeliveryProvider, emailDelivery providers.DeliveryProvider) *OTPService {
 	return &OTPService{
 		cfg:           cfg,
 		repo:          repo,
-		delivery:      delivery,
+		smsDelivery:   delivery,
 		emailDelivery: emailDelivery,
+		dispatcher:    NewMultiChannelDispatcher(5 * time.Second),
+	}
+}
+
+// resolveTarget builds the OTPTarget from validated handler inputs.
+// phone must be E.164 or empty; email must be trimmed or empty.
+// When both are present, email is the primary identifier (Redis key owner).
+func (s *OTPService) resolveTarget(phone, email string) OTPTarget {
+	hasSMS   := phone != ""
+	hasEmail := email != ""
+
+	switch {
+	case hasSMS && hasEmail:
+		return OTPTarget{
+			PrimaryIdentifier: email,
+			Targets: []DeliveryTarget{
+				{ChannelName: "email", Provider: s.emailDelivery, Destination: email},
+				{ChannelName: "sms", Provider: s.smsDelivery, Destination: phone},
+			},
+		}
+	case hasEmail:
+		return OTPTarget{
+			PrimaryIdentifier: email,
+			Targets: []DeliveryTarget{
+				{ChannelName: "email", Provider: s.emailDelivery, Destination: email},
+			},
+		}
+	default: // SMS only
+		return OTPTarget{
+			PrimaryIdentifier: phone,
+			Targets: []DeliveryTarget{
+				{ChannelName: "sms", Provider: s.smsDelivery, Destination: phone},
+			},
+		}
 	}
 }
 
@@ -111,11 +148,13 @@ func (s *OTPService) checkSendLimits(ctx context.Context, phone, clientIP string
 	return nil
 }
 
-// SendOTP generates an OTP, hashes it, stores it in Redis, and sends it via the given channel.
-// Channel can be "sms" (default) or "email". Identifier is the phone (E.164) or email address.
-func (s *OTPService) SendOTP(ctx context.Context, identifier, clientIP, channel string) error {
+// SendOTP generates an OTP and delivers it to all available channels concurrently.
+// phone is E.164 or empty; email is address or empty; at least one must be non-empty.
+func (s *OTPService) SendOTP(ctx context.Context, phone, email, locale, emailTemplate, clientIP string) error {
+	target := s.resolveTarget(phone, email)
+
 	if !s.cfg.BypassOTP {
-		if err := s.checkSendLimits(ctx, identifier, clientIP); err != nil {
+		if err := s.checkSendLimits(ctx, target.PrimaryIdentifier, clientIP); err != nil {
 			return err
 		}
 	}
@@ -132,42 +171,33 @@ func (s *OTPService) SendOTP(ctx context.Context, identifier, clientIP, channel 
 		return err
 	}
 
-	// Store hashed OTP in Redis with TTL
-	if err := s.repo.StoreOTP(ctx, identifier, hashedCode, s.cfg.OTPExpiry); err != nil {
+	// Store hashed OTP in Redis under the primary identifier
+	if err := s.repo.StoreOTP(ctx, target.PrimaryIdentifier, hashedCode, s.cfg.OTPExpiry); err != nil {
 		return fmt.Errorf("failed to store OTP: %w", err)
 	}
 
-	// Set rate limit cooldown
-	if err := s.repo.SetRateLimit(ctx, identifier, s.cfg.RateLimitSeconds); err != nil {
-		log.Printf("[OTP] Warning: failed to set rate limit for %s: %v", identifier, err)
+	// Set rate limit cooldown and increment counters (once, on primary identifier)
+	if err := s.repo.SetRateLimit(ctx, target.PrimaryIdentifier, s.cfg.RateLimitSeconds); err != nil {
+		log.Printf("[OTP] Warning: failed to set rate limit for %s: %v", target.PrimaryIdentifier, err)
 	}
-
-	// Increment counters
-	_ = s.repo.IncrementHourly(ctx, identifier)
-	_ = s.repo.IncrementDaily(ctx, identifier)
+	_ = s.repo.IncrementHourly(ctx, target.PrimaryIdentifier)
+	_ = s.repo.IncrementDaily(ctx, target.PrimaryIdentifier)
 	if clientIP != "" {
 		_ = s.repo.IncrementIPHourly(ctx, clientIP)
 	}
 
-	// Send via appropriate channel
 	message := fmt.Sprintf(
 		"Your Atto Sound code is: %s. Expires in %d min.",
 		code,
 		int(s.cfg.OTPExpiry.Minutes()),
 	)
 
-	var sendErr error
-	if channel == "email" {
-		sendErr = s.emailDelivery.Send(identifier, message)
-	} else {
-		sendErr = s.delivery.Send(identifier, message)
-	}
-	if sendErr != nil {
-		_ = s.repo.DeleteOTP(ctx, identifier)
-		return fmt.Errorf("failed to send OTP: %w", sendErr)
+	if err := s.dispatcher.Send(ctx, target.Targets, message, locale, emailTemplate); err != nil {
+		_ = s.repo.DeleteOTP(ctx, target.PrimaryIdentifier)
+		return fmt.Errorf("failed to send OTP: %w", err)
 	}
 
-	log.Printf("[OTP] Code sent to %s via %s", identifier, channel)
+	log.Printf("[OTP] Code sent to %s via %d channel(s)", target.PrimaryIdentifier, len(target.Targets))
 	return nil
 }
 

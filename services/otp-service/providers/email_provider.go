@@ -27,7 +27,7 @@ func NewEmailProvider(host, port, user, password, from string) *EmailProvider {
 }
 
 // Send sends an email message to the given address via SMTP.
-func (p *EmailProvider) Send(destination, message string) error {
+func (p *EmailProvider) Send(destination, message, locale, emailTemplate string) error {
 	auth := smtp.PlainAuth("", p.user, p.password, p.host)
 	subject := "Your Atto Sound Verification Code"
 	body := fmt.Sprintf(

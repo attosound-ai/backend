@@ -8,7 +8,7 @@ import (
 
 // DeliveryProvider sends OTP codes to a destination (phone number or console).
 type DeliveryProvider interface {
-	Send(destination, message string) error
+	Send(destination, message, locale, emailTemplate string) error
 }
 
 // ── Console Provider (Development) ──
@@ -23,7 +23,7 @@ func NewConsoleProvider() *ConsoleProvider {
 }
 
 // Send logs the SMS details to the console.
-func (p *ConsoleProvider) Send(destination, message string) error {
+func (p *ConsoleProvider) Send(destination, message, locale, emailTemplate string) error {
 	log.Printf("[SMS-CONSOLE] To: %s", destination)
 	log.Printf("[SMS-CONSOLE] Message:\n%s", message)
 	return nil

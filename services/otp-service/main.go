@@ -50,8 +50,11 @@ func main() {
 	delivery := providers.NewDeliveryProvider(cfg)
 
 	var emailDelivery providers.DeliveryProvider
-	if cfg.SMTPHost != "" {
-		log.Println("[DELIVERY] Using SMTP email provider")
+	if cfg.EmailServiceURL != "" {
+		log.Printf("[DELIVERY] Using email-service HTTP provider (%s)", cfg.EmailServiceURL)
+		emailDelivery = providers.NewHttpEmailProvider(cfg.EmailServiceURL)
+	} else if cfg.SMTPHost != "" {
+		log.Println("[DELIVERY] Using SMTP email provider (legacy)")
 		emailDelivery = providers.NewEmailProvider(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFrom)
 	} else {
 		log.Println("[DELIVERY] Using console provider for email (development mode)")
