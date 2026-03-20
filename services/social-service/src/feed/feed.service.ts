@@ -466,7 +466,7 @@ export class FeedService {
     limit: number,
   ): Promise<{
     posts: FeedPostDto[];
-    meta: { nextCursor: string | null; hasMore: boolean };
+    meta: { nextCursor: string | null; hasMore: boolean; total?: number };
   }> {
     // Fetch content authored by the target user
     const { contents, meta } = await this.grpcClients.getContentByAuthor(
