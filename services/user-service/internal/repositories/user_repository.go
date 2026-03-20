@@ -226,12 +226,15 @@ func (r *UserRepository) CreateManagedArtist(
 ) (*models.User, error) {
 	repID := repUser.ID
 
-	var email, username, displayName string
-	var phoneCountryCode, phoneNumber, avatar *string
+	var username, displayName string
+	var emailPtr, phoneCountryCode, phoneNumber, avatar *string
 	var artistTypes, artistGenres []string
 
 	if artistFields != nil {
-		email = strings.ToLower(artistFields.Email)
+		trimmedEmail := strings.ToLower(strings.TrimSpace(artistFields.Email))
+		if trimmedEmail != "" {
+			emailPtr = &trimmedEmail
+		}
 		username = strings.ToLower(artistFields.Username)
 		displayName = artistFields.DisplayName
 		phoneCountryCode = artistFields.PhoneCountryCode
@@ -241,14 +244,15 @@ func (r *UserRepository) CreateManagedArtist(
 		artistGenres = artistFields.ArtistGenres
 	} else {
 		// Legacy fallback: auto-generate
-		email = fmt.Sprintf("artist_%s_%d@managed.atto", inmateNumber, repUser.ID)
+		legacyEmail := fmt.Sprintf("artist_%s_%d@managed.atto", inmateNumber, repUser.ID)
+		emailPtr = &legacyEmail
 		slug := slugifyArtistName(displayName)
 		username = fmt.Sprintf("artist_%s_%04d", slug, rand.Intn(10000))
 		displayName = inmateNumber // best-effort fallback
 	}
 
 	artist := &models.User{
-		Email:              &email,
+		Email:              emailPtr,
 		Username:           username,
 		DisplayName:        displayName,
 		Role:               models.RoleArtist,
