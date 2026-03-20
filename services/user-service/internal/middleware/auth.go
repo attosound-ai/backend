@@ -11,6 +11,13 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // JWTClaims holds the custom claims stored in JWT tokens.
 type JWTClaims struct {
 	UserID   string `json:"sub"`
@@ -46,7 +53,7 @@ func (m *JWTManager) GenerateTokenPair(user *models.User) (*models.TokenPair, er
 	accessClaims := JWTClaims{
 		UserID:   userIDStr,
 		Username: user.Username,
-		Email:    user.Email,
+		Email:    derefStr(user.Email),
 		Role:     string(user.Role),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userIDStr,

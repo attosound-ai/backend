@@ -17,8 +17,22 @@ import (
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
 	"github.com/atto-sound/user-service/internal/repositories"
+	"github.com/atto-sound/user-service/internal/validation"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// strVal safely dereferences a string pointer, returning "" if nil.
+func strVal(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// strPtr returns a pointer to the given string.
+func strPtr(s string) *string {
+	return &s
+}
 
 // AuthService encapsulates authentication business logic.
 type AuthService struct {
@@ -43,13 +57,15 @@ func NewAuthService(repo *repositories.UserRepository, jwtMgr *middleware.JWTMan
 // Register creates a new user account, hashes the password, stores both
 // the user and credentials, publishes a user.created event, and returns tokens.
 func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest) (*models.AuthResponse, error) {
-	// Check if email is already taken
-	existingEmail, err := s.repo.FindByEmail(strings.ToLower(req.Email))
-	if err != nil {
-		return nil, errors.New("internal error checking email")
-	}
-	if existingEmail != nil {
-		return nil, errors.New("email already registered")
+	// Check if email is already taken (only if provided)
+	if req.Email != nil && *req.Email != "" {
+		existingEmail, err := s.repo.FindByEmail(strings.ToLower(*req.Email))
+		if err != nil {
+			return nil, errors.New("internal error checking email")
+		}
+		if existingEmail != nil {
+			return nil, errors.New("email already registered")
+		}
 	}
 
 	// Check if username is already taken
@@ -72,9 +88,14 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		n := normalizePhone(*req.PhoneNumber)
 		normalizedPhone = &n
 	}
+	var emailPtr *string
+	if req.Email != nil && *req.Email != "" {
+		lower := strings.ToLower(*req.Email)
+		emailPtr = &lower
+	}
 	user := &models.User{
 		Username:         req.Username,
-		Email:            strings.ToLower(req.Email),
+		Email:            emailPtr,
 		PhoneCountryCode: req.PhoneCountryCode,
 		PhoneNumber:      normalizedPhone,
 		DisplayName:      req.DisplayName,
@@ -97,7 +118,7 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		eventData := map[string]interface{}{
 			"id":          userIDStr,
 			"username":    user.Username,
-			"email":       user.Email,
+			"email":       strVal(user.Email),
 			"displayName": user.DisplayName,
 			"role":        string(user.Role),
 		}
@@ -242,7 +263,10 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest) (inte
 		// Send OTP to user's chosen channel
 		var target string
 		if creds.TwoFactorMethod == "email" {
-			target = user.Email
+			if user.Email == nil || *user.Email == "" {
+				return nil, errors.New("no email on file for 2FA")
+			}
+			target = *user.Email
 		} else {
 			if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
 				return nil, errors.New("no phone number on file for 2FA")
@@ -295,7 +319,10 @@ func (s *AuthService) Login2FA(ctx context.Context, req *models.Login2FARequest)
 	// Determine OTP identifier
 	var otpIdentifier string
 	if creds.TwoFactorMethod == "email" {
-		otpIdentifier = user.Email
+		if user.Email == nil || *user.Email == "" {
+			return nil, errors.New("no email on file for 2FA")
+		}
+		otpIdentifier = *user.Email
 	} else {
 		if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
 			return nil, errors.New("no phone on file")
@@ -333,7 +360,10 @@ func (s *AuthService) Enable2FAInit(ctx context.Context, userID string, req *mod
 
 	var target string
 	if req.Method == "email" {
-		target = user.Email
+		if user.Email == nil || *user.Email == "" {
+			return "", errors.New("no email on file — add an email first")
+		}
+		target = *user.Email
 	} else {
 		if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
 			return "", errors.New("no phone number on file — add a phone number first")
@@ -359,7 +389,10 @@ func (s *AuthService) Enable2FAConfirm(ctx context.Context, userID string, req *
 
 	var otpIdentifier string
 	if req.Method == "email" {
-		otpIdentifier = user.Email
+		if user.Email == nil || *user.Email == "" {
+			return errors.New("no email on file")
+		}
+		otpIdentifier = *user.Email
 	} else {
 		if user.PhoneCountryCode == nil || user.PhoneNumber == nil {
 			return errors.New("no phone number on file")
@@ -518,10 +551,19 @@ func (s *AuthService) CheckEmailAvailability(email string) (bool, error) {
 // The user is created with role "listener" and registration_status "pending".
 // If an email already exists with status "pending", returns the existing tokens (idempotent).
 func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRequest) (*models.AuthResponse, error) {
-	// Check if email already exists
-	existing, err := s.repo.FindByEmail(strings.ToLower(req.Email))
-	if err != nil {
-		return nil, errors.New("internal error checking email")
+	// Idempotent lookup: find existing pending user by email or phone
+	var existing *models.User
+	var err error
+	if req.Email != nil && *req.Email != "" {
+		existing, err = s.repo.FindByEmail(strings.ToLower(*req.Email))
+		if err != nil {
+			return nil, errors.New("internal error checking email")
+		}
+	} else if req.PhoneCountryCode != nil && req.PhoneNumber != nil && *req.PhoneNumber != "" {
+		existing, err = s.repo.FindByPhone(*req.PhoneCountryCode, *req.PhoneNumber)
+		if err != nil {
+			return nil, errors.New("internal error checking phone")
+		}
 	}
 
 	// Idempotent: if user exists with pending status, return existing tokens
@@ -536,7 +578,10 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 				Tokens: tokens,
 			}, nil
 		}
-		return nil, errors.New("email already registered")
+		if req.Email != nil && *req.Email != "" {
+			return nil, errors.New("email already registered")
+		}
+		return nil, errors.New("phone number already registered")
 	}
 
 	// Check if username is already taken
@@ -548,7 +593,7 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 		return nil, errors.New("username already taken")
 	}
 
-	// Check if phone number is already registered
+	// Cross-check: if registering with email, also check phone (if provided) and vice versa
 	if req.PhoneCountryCode != nil && req.PhoneNumber != nil && *req.PhoneCountryCode != "" && *req.PhoneNumber != "" {
 		existingPhone, err := s.repo.FindByPhone(*req.PhoneCountryCode, *req.PhoneNumber)
 		if err != nil {
@@ -556,6 +601,15 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 		}
 		if existingPhone != nil {
 			return nil, errors.New("phone number already registered")
+		}
+	}
+	if req.Email != nil && *req.Email != "" && existing == nil {
+		existingEmail, err := s.repo.FindByEmail(strings.ToLower(*req.Email))
+		if err != nil {
+			return nil, errors.New("internal error checking email")
+		}
+		if existingEmail != nil {
+			return nil, errors.New("email already registered")
 		}
 	}
 
@@ -570,14 +624,26 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 		n := normalizePhone(*req.PhoneNumber)
 		normalizedPrePhone = &n
 	}
+	var emailPtr *string
+	if req.Email != nil && *req.Email != "" {
+		lower := strings.ToLower(*req.Email)
+		emailPtr = &lower
+	}
 	user := &models.User{
 		Username:           req.Username,
-		Email:              strings.ToLower(req.Email),
+		Email:              emailPtr,
 		PhoneCountryCode:   req.PhoneCountryCode,
 		PhoneNumber:        normalizedPrePhone,
 		DisplayName:        req.DisplayName,
 		Role:               models.RoleListener,
 		RegistrationStatus: "pending",
+	}
+
+	if req.DateOfBirth != nil {
+		dob, err := validation.ParseAndValidateDOB(*req.DateOfBirth)
+		if err == nil {
+			user.DateOfBirth = &dob
+		}
 	}
 
 	creds := &models.UserCredentials{
@@ -595,7 +661,7 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 		eventData := map[string]interface{}{
 			"id":          preRegIDStr,
 			"username":    user.Username,
-			"email":       user.Email,
+			"email":       strVal(user.Email),
 			"displayName": user.DisplayName,
 		}
 		if err := s.producer.Publish(context.Background(), "user.pre_registered", preRegIDStr, eventData); err != nil {
@@ -671,7 +737,7 @@ func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, r
 		eventData := map[string]interface{}{
 			"id":          completeIDStr,
 			"username":    user.Username,
-			"email":       user.Email,
+			"email":       strVal(user.Email),
 			"displayName": user.DisplayName,
 			"role":        string(user.Role),
 		}
@@ -733,7 +799,7 @@ func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, r
 				eventData := map[string]interface{}{
 					"id":          artistIDStr,
 					"username":    managedArtist.Username,
-					"email":       managedArtist.Email,
+					"email":       strVal(managedArtist.Email),
 					"displayName": managedArtist.DisplayName,
 					"role":        "artist",
 				}
@@ -824,7 +890,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPass
 	}
 
 	otpBody, _ := json.Marshal(map[string]string{
-		"email":          user.Email,
+		"email":          strVal(user.Email),
 		"locale":         req.Locale,
 		"email_template": "password-reset",
 	})
@@ -852,7 +918,7 @@ func (s *AuthService) ResetPassword(ctx context.Context, req *models.ResetPasswo
 	// Verify OTP via OTP service (email channel)
 	otpBody, _ := json.Marshal(map[string]string{
 		"channel": "email",
-		"email":   user.Email,
+		"email":   strVal(user.Email),
 		"code":    req.OTP,
 	})
 	otpURL := fmt.Sprintf("%s/otp/verify", s.otpServiceURL)

@@ -11,7 +11,7 @@ type RepresentativeFields struct {
 // RegisterRequest is the DTO for user registration.
 type RegisterRequest struct {
 	Username             string                `json:"username" validate:"required,min=3,max=50"`
-	Email                string                `json:"email" validate:"required,email"`
+	Email                *string               `json:"email,omitempty" validate:"omitempty,email"`
 	Password             string                `json:"password" validate:"required,min=8"`
 	DisplayName          string                `json:"displayName" validate:"required,min=1,max=100"`
 	Role                 string                `json:"role" validate:"required,oneof=artist representative listener"`
@@ -23,12 +23,13 @@ type RegisterRequest struct {
 
 // PreRegisterRequest is the DTO for early user creation (after OTP verification).
 type PreRegisterRequest struct {
-	Email       string  `json:"email" validate:"required,email"`
-	Password    string  `json:"password" validate:"required,min=8"`
-	DisplayName string  `json:"displayName" validate:"required,min=1,max=100"`
+	Email            *string `json:"email,omitempty" validate:"omitempty,email"`
+	Password         string  `json:"password" validate:"required,min=8"`
+	DisplayName      string  `json:"displayName" validate:"required,min=1,max=100"`
 	Username         string  `json:"username" validate:"required,min=3,max=50"`
 	PhoneCountryCode *string `json:"phoneCountryCode,omitempty"`
 	PhoneNumber      *string `json:"phoneNumber,omitempty"`
+	DateOfBirth      *string `json:"dateOfBirth,omitempty"`
 }
 
 // ManagedArtistFields holds the account details for creating a real artist account.
@@ -140,6 +141,7 @@ type UserProfile struct {
 	ArtistPhone        *string  `json:"artistPhone,omitempty"`
 	ArtistTypes        []string `json:"artistTypes,omitempty"`
 	ArtistGenres       []string `json:"artistGenres,omitempty"`
+	DateOfBirth        *string  `json:"dateOfBirth,omitempty"`
 	ProfileVerified    bool     `json:"profileVerified"`
 	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
 	TwoFactorMethod    string `json:"twoFactorMethod"`
@@ -180,15 +182,35 @@ type InmateLookupResponse struct {
 	EstReleaseDate  string `json:"estReleaseDate"`
 }
 
+// strVal safely dereferences a string pointer, returning "" if nil.
+func strVal(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// effectiveDisplayName returns the best available display name for a user.
+// Falls back: DisplayName → ArtistName → Username.
+func (u *User) effectiveDisplayName() string {
+	if u.DisplayName != "" {
+		return u.DisplayName
+	}
+	if u.ArtistName != nil && *u.ArtistName != "" {
+		return *u.ArtistName
+	}
+	return u.Username
+}
+
 // ToProfile converts a User model to a UserProfile DTO.
 func (u *User) ToProfile() *UserProfile {
 	p := &UserProfile{
 		ID:                 u.ID,
 		Username:           u.Username,
-		Email:              u.Email,
+		Email:              strVal(u.Email),
 		PhoneCountryCode:   u.PhoneCountryCode,
 		PhoneNumber:        u.PhoneNumber,
-		DisplayName:        u.DisplayName,
+		DisplayName:        u.effectiveDisplayName(),
 		Avatar:             u.Avatar,
 		Bio:                u.Bio,
 		Role:               string(u.Role),
@@ -207,6 +229,10 @@ func (u *User) ToProfile() *UserProfile {
 		FollowingCount:     u.FollowingCount,
 		PostsCount:         u.PostsCount,
 		CreatedAt:          u.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+	if u.DateOfBirth != nil {
+		formatted := u.DateOfBirth.Format("2006-01-02")
+		p.DateOfBirth = &formatted
 	}
 	if u.RepresentativeID != nil {
 		p.RepresentativeID = u.RepresentativeID

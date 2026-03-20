@@ -248,7 +248,7 @@ func (r *UserRepository) CreateManagedArtist(
 	}
 
 	artist := &models.User{
-		Email:              email,
+		Email:              &email,
 		Username:           username,
 		DisplayName:        displayName,
 		Role:               models.RoleArtist,

@@ -4,6 +4,7 @@ import (
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
 	"github.com/atto-sound/user-service/internal/services"
+	"github.com/atto-sound/user-service/internal/validation"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -28,10 +29,18 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 	}
 
 	// Basic validation
-	if req.Username == "" || req.Email == "" || req.Password == "" || req.DisplayName == "" || req.Role == "" {
+	hasEmail := req.Email != nil && *req.Email != ""
+	hasPhone := req.PhoneNumber != nil && *req.PhoneNumber != ""
+	if req.Username == "" || req.Password == "" || req.DisplayName == "" || req.Role == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
-			Error:   "username, email, password, displayName, and role are required",
+			Error:   "username, password, displayName, and role are required",
+		})
+	}
+	if !hasEmail && !hasPhone {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "email or phone number is required",
 		})
 	}
 	if len(req.Username) < 3 || len(req.Username) > 50 {
@@ -284,10 +293,18 @@ func (h *AuthHandler) PreRegister(c *fiber.Ctx) error {
 		})
 	}
 
-	if req.Email == "" || req.Password == "" || req.DisplayName == "" || req.Username == "" {
+	hasEmail := req.Email != nil && *req.Email != ""
+	hasPhone := req.PhoneNumber != nil && *req.PhoneNumber != ""
+	if req.Password == "" || req.DisplayName == "" || req.Username == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
-			Error:   "email, password, displayName, and username are required",
+			Error:   "password, displayName, and username are required",
+		})
+	}
+	if !hasEmail && !hasPhone {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "email or phone number is required",
 		})
 	}
 	if len(req.Username) < 3 || len(req.Username) > 50 {
@@ -301,6 +318,15 @@ func (h *AuthHandler) PreRegister(c *fiber.Ctx) error {
 			Success: false,
 			Error:   "password must be at least 8 characters",
 		})
+	}
+
+	if req.DateOfBirth != nil {
+		if _, err := validation.ParseAndValidateDOB(*req.DateOfBirth); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+		}
 	}
 
 	result, err := h.authService.PreRegister(c.Context(), &req)

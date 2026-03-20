@@ -21,7 +21,7 @@ const (
 type User struct {
 	ID                 uint64         `gorm:"primaryKey;autoIncrement" json:"id"`
 	Username           string         `gorm:"uniqueIndex;size:50;not null" json:"username"`
-	Email              string         `gorm:"uniqueIndex;size:255;not null" json:"email"`
+	Email              *string        `gorm:"uniqueIndex;size:255" json:"email,omitempty"`
 	PhoneCountryCode   *string        `gorm:"size:5;uniqueIndex:idx_phone_unique" json:"phoneCountryCode,omitempty"`
 	PhoneNumber        *string        `gorm:"size:15;uniqueIndex:idx_phone_unique" json:"phoneNumber,omitempty"`
 	DisplayName        string         `gorm:"size:100;not null" json:"displayName"`
@@ -41,6 +41,7 @@ type User struct {
 	IsManagedAccount   bool           `gorm:"default:false" json:"isManagedAccount"`
 	ArtistTypes        pq.StringArray `gorm:"type:text[];column:artist_types" json:"artistTypes,omitempty"`
 	ArtistGenres       pq.StringArray `gorm:"type:text[];column:artist_genres" json:"artistGenres,omitempty"`
+	DateOfBirth        *time.Time     `gorm:"type:date" json:"dateOfBirth,omitempty"`
 	FollowersCount     int64          `gorm:"default:0" json:"followersCount"`
 	FollowingCount     int64          `gorm:"default:0" json:"followingCount"`
 	PostsCount         int64          `gorm:"default:0" json:"postsCount"`
