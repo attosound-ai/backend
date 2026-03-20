@@ -34,26 +34,11 @@ export class FeedService {
     posts: FeedPostDto[];
     meta: { nextCursor: number | null; hasMore: boolean };
   }> {
-    // Step 1: Try to get feed from Redis sorted set cache (best-effort)
-    let contentIds: string[] = [];
-    let nextCursor: number | null = null;
-    try {
-      const cachedFeed = await this.redis.getFeedContentIds(userId, cursor, limit);
-      contentIds = cachedFeed.contentIds;
-      nextCursor = cachedFeed.nextCursor;
-    } catch (err) {
-      this.logger.warn(`Redis feed read failed, falling back to DB: ${(err as Error).message}`);
-    }
-
-    // If Redis cache is empty (or Redis is down), build feed from following list
-    if (contentIds.length === 0 && cursor === 0) {
-      this.logger.debug(
-        `Feed cache empty for user ${userId}, building from following list`,
-      );
-      const result = await this.buildFeedFromFollowing(userId, cursor, limit);
-      contentIds = result.contentIds;
-      nextCursor = result.nextCursor;
-    }
+    // Step 1: Always rebuild from following + recent posts.
+    // This ensures new posts from non-followed users always appear.
+    const result = await this.buildFeedFromFollowing(userId, cursor, limit);
+    const contentIds = result.contentIds;
+    const nextCursor = result.nextCursor;
 
     if (contentIds.length === 0) {
       return {
@@ -100,6 +85,13 @@ export class FeedService {
         this.computeEdgeRankScore(b, followingSet.has(b.authorId)) -
         this.computeEdgeRankScore(a, followingSet.has(a.authorId)),
     );
+
+    // Tag each post with whether the viewer follows the author
+    // followingIds may be numbers while authorId is a string — normalize both
+    const followingStrSet = new Set(followingIds.map(String));
+    for (const post of posts) {
+      post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(userId);
+    }
 
     return {
       posts,
@@ -201,6 +193,12 @@ export class FeedService {
         this.computeReelScore(a, followingSet.has(a.authorId)),
     );
 
+    // Tag each post with whether the viewer follows the author
+    const followingStrSet = new Set(followingIds.map(String));
+    for (const post of posts) {
+      post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(userId);
+    }
+
     const page = posts.slice(0, limit);
     const hasMore = posts.length > limit;
     const lastTs = page.length > 0 ? new Date(page[page.length - 1].createdAt).getTime() : null;
@@ -283,6 +281,13 @@ export class FeedService {
     );
 
     posts.sort((a, b) => this.computeReelScore(b) - this.computeReelScore(a));
+
+    // Tag each post with whether the viewer follows the author
+    const followingIds = await this.followsService.getFollowingIds(userId);
+    const followingStrSet = new Set(followingIds.map(String));
+    for (const post of posts) {
+      post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(userId);
+    }
 
     const page = posts.slice(0, limit);
     const hasMore = posts.length > limit;
@@ -493,11 +498,19 @@ export class FeedService {
       }),
     );
 
+    // Tag each post with whether the viewer follows the author
+    const followingIds = await this.followsService.getFollowingIds(currentUserId);
+    const followingStrSet = new Set(followingIds.map(String));
+    for (const post of posts) {
+      post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(currentUserId);
+    }
+
     return {
       posts,
       meta: {
         nextCursor: meta.has_more ? meta.next_cursor : null,
         hasMore: meta.has_more,
+        total: meta.total ?? posts.length,
       },
     };
   }
@@ -520,7 +533,14 @@ export class FeedService {
       this.interactionsService.isReposted(currentUserId, postId),
     ]);
 
-    return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
+    const post = this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
+
+    // Tag with whether the viewer follows the author
+    const followingIds = await this.followsService.getFollowingIds(currentUserId);
+    const followingStrSet = new Set(followingIds.map(String));
+    post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(currentUserId);
+
+    return post;
   }
 
   /**

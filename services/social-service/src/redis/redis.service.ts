@@ -157,11 +157,19 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   async incrementCount(type: string, id: string): Promise<void> {
-    await this.client.incr(this.countKey(type, id));
+    const key = this.countKey(type, id);
+    const pipeline = this.client.pipeline();
+    pipeline.incr(key);
+    pipeline.persist(key);
+    await pipeline.exec();
   }
 
   async decrementCount(type: string, id: string): Promise<void> {
-    await this.client.decr(this.countKey(type, id));
+    const key = this.countKey(type, id);
+    const pipeline = this.client.pipeline();
+    pipeline.decr(key);
+    pipeline.persist(key);
+    await pipeline.exec();
   }
 
   async getCount(type: string, id: string): Promise<number> {

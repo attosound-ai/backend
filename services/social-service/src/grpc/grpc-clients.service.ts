@@ -289,7 +289,7 @@ export class GrpcClientsService implements OnModuleInit {
           metadata: request.metadata,
           tags: request.tags,
         },
-        { deadline: this.deadline() },
+        { deadline: this.longDeadline() },
         (err: any, response: ContentResponse) => {
           if (err) {
             this.logger.error(`CreateContent failed: ${err.message}`);
@@ -342,5 +342,9 @@ export class GrpcClientsService implements OnModuleInit {
 
   private deadline(): Date {
     return new Date(Date.now() + 5000); // 5 second deadline
+  }
+
+  private longDeadline(): Date {
+    return new Date(Date.now() + 30000); // 30 second deadline for uploads
   }
 }

@@ -88,6 +88,13 @@ export class InteractionsService {
     });
 
     await this.redis.decrementCount('likes', contentId);
+
+    await this.kafkaProducer.send('interaction.removed', {
+      user_id: userId,
+      content_id: contentId,
+      type: 'like',
+    });
+
     this.logger.log(`User ${userId} unliked content ${contentId}`);
   }
 
@@ -349,6 +356,13 @@ export class InteractionsService {
       where: { userId_contentId: { userId, contentId } },
     });
     await this.redis.decrementCount('reposts', contentId);
+
+    await this.kafkaProducer.send('interaction.removed', {
+      user_id: userId,
+      content_id: contentId,
+      type: 'repost',
+    });
+
     this.logger.log(`User ${userId} unreposted content ${contentId}`);
   }
 
@@ -357,6 +371,48 @@ export class InteractionsService {
       where: { userId_contentId: { userId, contentId } },
     });
     return !!repost;
+  }
+
+  // ── Shares ──
+
+  async share(userId: string, contentId: string): Promise<void> {
+    await this.prisma.interaction.upsert({
+      where: {
+        userId_contentId_type: { userId, contentId, type: 'SHARE' },
+      },
+      update: {},
+      create: { userId, contentId, type: 'SHARE' },
+    });
+
+    await this.redis.incrementCount('shares', contentId);
+
+    const content = await this.grpcClients.getContent(contentId);
+    if (content && content.author_id !== userId) {
+      await this.prisma.notification.create({
+        data: {
+          recipientId: content.author_id,
+          type: 'share',
+          actorId: userId,
+          referenceId: contentId,
+        },
+      });
+
+      await this.kafkaProducer.send('notification.trigger', {
+        type: 'share',
+        recipient_id: content.author_id,
+        actor_id: userId,
+        reference_id: contentId,
+      });
+    }
+
+    await this.kafkaProducer.send('interaction.created', {
+      user_id: userId,
+      content_id: contentId,
+      type: 'share',
+      created_at: new Date().toISOString(),
+    });
+
+    this.logger.log(`User ${userId} shared content ${contentId}`);
   }
 
   // ── Counts ──

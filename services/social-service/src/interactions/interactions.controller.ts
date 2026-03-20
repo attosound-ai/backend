@@ -138,6 +138,22 @@ export class InteractionsController {
     };
   }
 
+  // ── Shares ──
+
+  @Post(':id/share')
+  @HttpCode(HttpStatus.OK)
+  async share(
+    @Param('id') contentId: string,
+    @CurrentUserId() userId: string,
+  ) {
+    await this.interactionsService.share(userId, contentId);
+    return {
+      success: true,
+      data: { message: 'Share tracked successfully' },
+      error: null,
+    };
+  }
+
   // ── Reposts ──
 
   @Post(':id/repost')

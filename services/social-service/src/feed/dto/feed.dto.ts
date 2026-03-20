@@ -74,6 +74,8 @@ export class FeedPostDto {
     isBookmarked: boolean;
     isReposted: boolean;
   };
+  /** true if the viewer follows the post author, false if suggested */
+  isFollowingAuthor?: boolean;
 }
 
 export class UserPostsQueryDto {
