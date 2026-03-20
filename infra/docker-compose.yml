@@ -284,8 +284,8 @@ services:
     volumes:
       - ../gateway/kong.yml:/kong/kong.yml:ro
     ports:
-      - "8000:8000"   # Proxy — frontend talks here
-      - "8001:8001"   # Admin API
+      - "8080:8000"   # Proxy — frontend talks here (host 8080, 8000 used by Docker Desktop)
+      - "8083:8001"   # Admin API (8081 reserved for Metro bundler)
     networks:
       - atto-network
     profiles:
