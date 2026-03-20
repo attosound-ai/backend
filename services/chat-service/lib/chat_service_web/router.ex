@@ -18,6 +18,7 @@ defmodule ChatServiceWeb.Router do
     get "/messages/conversations", ConversationController, :index
     post "/messages/conversations", ConversationController, :create
     get "/messages/:chat_id", MessageController, :index
+    post "/messages/:chat_id/read", MessageController, :mark_read
     post "/messages", MessageController, :create
   end
 

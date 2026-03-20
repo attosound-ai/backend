@@ -84,6 +84,28 @@ defmodule ChatServiceWeb.MessageController do
     end
   end
 
+  @doc """
+  POST /api/v1/messages/:chat_id/read
+  Mark all messages in a conversation as read for the current user.
+  """
+  def mark_read(conn, %{"chat_id" => chat_id}) do
+    user_id = conn.assigns.user_id
+
+    case MessageService.mark_as_read(chat_id, user_id) do
+      {:ok, :marked} ->
+        conn
+        |> put_status(200)
+        |> json(%{success: true, data: %{status: "marked"}})
+
+      {:error, reason} ->
+        Logger.error("Failed to mark as read for #{chat_id}: #{inspect(reason)}")
+
+        conn
+        |> put_status(500)
+        |> json(%{success: false, data: nil, error: "Failed to mark as read"})
+    end
+  end
+
   defp maybe_add_before(opts, %{"before" => before}) when is_binary(before) and before != "" do
     Keyword.put(opts, :before, before)
   end

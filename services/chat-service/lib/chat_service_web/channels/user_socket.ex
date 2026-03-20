@@ -5,6 +5,7 @@ defmodule ChatServiceWeb.UserSocket do
 
   channel "chat:*", ChatServiceWeb.ChatChannel
   channel "user:*", ChatServiceWeb.UserChannel
+  channel "post:*", ChatServiceWeb.PostChannel
 
   @doc """
   Authenticate the WebSocket connection via a token parameter.

@@ -25,6 +25,7 @@ defmodule ChatService.Application do
        pool_size: 10,
        keyspace: cassandra_keyspace},
       {ChatService.KafkaProducer, brokers: kafka_brokers},
+      {ChatService.KafkaConsumer, brokers: kafka_brokers},
       ChatServiceWeb.Endpoint
     ]
 
