@@ -192,15 +192,20 @@ async def confirm_payment(
 @router.get("/bridge-number", response_model=ApiResponse, status_code=200)
 async def get_bridge_number(
     user_id: str = Depends(get_current_user_id),
+    for_user_id: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Return the user's assigned bridge phone number.
+
+    Accepts optional `for_user_id` query param to check a linked artist's
+    bridge number (used by representatives).
 
     Returns status='provisioning' while pending, 'assigned' when ready,
     or 'failed' if Twilio provisioning failed.
     """
     svc = PaymentService(session)
-    bridge_number, status = await svc.get_bridge_number(user_id)
+    target = for_user_id if for_user_id else user_id
+    bridge_number, status = await svc.get_bridge_number(target)
     return ApiResponse(
         success=True,
         data=BridgeNumberResponse(
