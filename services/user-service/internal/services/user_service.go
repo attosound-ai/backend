@@ -250,3 +250,8 @@ func (s *UserService) GetContentPermissions(ctx context.Context, userID string) 
 		return false, []string{}, 0, nil
 	}
 }
+
+// GetActivePushTokens returns active push tokens for a user.
+func (s *UserService) GetActivePushTokens(userID uint64) ([]models.PushToken, error) {
+	return s.repo.GetActivePushTokens(userID)
+}

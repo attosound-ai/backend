@@ -2,8 +2,9 @@ defmodule ChatService.KafkaConsumer do
   @moduledoc """
   GenServer-based Kafka consumer using brod.
 
-  Subscribes to `interaction.created` and `interaction.removed` topics,
-  then broadcasts events via Phoenix PubSub to `post:<content_id>` channels.
+  Subscribes to `interaction.created`, `interaction.removed`, and
+  `notification.trigger` topics, then broadcasts events via Phoenix PubSub
+  to `post:<content_id>` and `user:<recipient_id>` channels.
   """
 
   use GenServer
@@ -12,7 +13,7 @@ defmodule ChatService.KafkaConsumer do
 
   @client_id :chat_service_kafka_consumer
   @group_id "chat-social-broadcast"
-  @topics ["interaction.created", "interaction.removed"]
+  @topics ["interaction.created", "interaction.removed", "notification.trigger"]
 
   # Public API
 
@@ -125,26 +126,37 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
 
     case Jason.decode(value) do
       {:ok, payload} ->
-        action =
-          case topic do
-            "interaction.created" -> "created"
-            "interaction.removed" -> "removed"
-            _ -> nil
-          end
+        case topic do
+          t when t in ["interaction.created", "interaction.removed"] ->
+            action = if t == "interaction.created", do: "created", else: "removed"
+            content_id = payload["content_id"]
+            type = payload["type"]
+            user_id = payload["user_id"]
 
-        if action do
-          content_id = payload["content_id"]
-          type = payload["type"]
-          user_id = payload["user_id"]
+            if content_id do
+              ChatServiceWeb.Endpoint.broadcast("post:#{content_id}", "interaction_update", %{
+                "type" => type,
+                "action" => action,
+                "user_id" => user_id,
+                "content_id" => content_id
+              })
+            end
 
-          if content_id do
-            ChatServiceWeb.Endpoint.broadcast("post:#{content_id}", "interaction_update", %{
-              "type" => type,
-              "action" => action,
-              "user_id" => user_id,
-              "content_id" => content_id
-            })
-          end
+          "notification.trigger" ->
+            recipient_id = payload["recipient_id"]
+            type = payload["type"]
+            actor_id = payload["actor_id"]
+
+            if recipient_id do
+              ChatServiceWeb.Endpoint.broadcast(
+                "user:#{recipient_id}",
+                "new_notification",
+                %{"type" => type, "actor_id" => actor_id}
+              )
+            end
+
+          _ ->
+            nil
         end
 
       {:error, reason} ->

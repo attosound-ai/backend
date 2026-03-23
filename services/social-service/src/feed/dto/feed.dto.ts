@@ -64,6 +64,7 @@ export class FeedPostDto {
     username: string;
     displayName: string;
     avatar: string | null;
+    role: string | null;
   };
   interactions: {
     likesCount: number;

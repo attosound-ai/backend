@@ -4,12 +4,13 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-} from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { RedisService } from '../redis/redis.service';
-import { GrpcClientsService } from '../grpc/grpc-clients.service';
-import { KafkaProducer } from '../kafka/kafka.producer';
-import { UserSummaryDto } from './dto/follow.dto';
+} from "@nestjs/common";
+import { PrismaService } from "../prisma/prisma.service";
+import { RedisService } from "../redis/redis.service";
+import { GrpcClientsService } from "../grpc/grpc-clients.service";
+import { KafkaProducer } from "../kafka/kafka.producer";
+import { PushService } from "../push/push.service";
+import { UserSummaryDto } from "./dto/follow.dto";
 
 @Injectable()
 export class FollowsService {
@@ -20,11 +21,12 @@ export class FollowsService {
     private readonly redis: RedisService,
     private readonly grpcClients: GrpcClientsService,
     private readonly kafkaProducer: KafkaProducer,
+    private readonly pushService: PushService,
   ) {}
 
   async follow(followerId: string, followingId: string): Promise<void> {
     if (followerId === followingId) {
-      throw new BadRequestException('Cannot follow yourself');
+      throw new BadRequestException("Cannot follow yourself");
     }
 
     // Check if already following
@@ -38,7 +40,7 @@ export class FollowsService {
     });
 
     if (existing) {
-      throw new ConflictException('Already following this user');
+      throw new ConflictException("Already following this user");
     }
 
     // Create follow in DB
@@ -52,24 +54,26 @@ export class FollowsService {
     // Update Redis cache (best-effort — DB is source of truth)
     try {
       await this.redis.addFollow(followerId, followingId);
-      await this.redis.incrementCount('followers', followingId);
-      await this.redis.incrementCount('following', followerId);
+      await this.redis.incrementCount("followers", followingId);
+      await this.redis.incrementCount("following", followerId);
     } catch (err) {
-      this.logger.warn(`Redis follow cache update failed: ${(err as Error).message}`);
+      this.logger.warn(
+        `Redis follow cache update failed: ${(err as Error).message}`,
+      );
     }
 
     // Create notification for the followed user
     await this.prisma.notification.create({
       data: {
         recipientId: followingId,
-        type: 'follow',
+        type: "follow",
         actorId: followerId,
         referenceId: follow.id,
       },
     });
 
     // Produce Kafka event
-    await this.kafkaProducer.send('follow.created', {
+    await this.kafkaProducer.send("follow.created", {
       id: follow.id,
       follower_id: followerId,
       following_id: followingId,
@@ -77,11 +81,24 @@ export class FollowsService {
     });
 
     // Produce notification trigger
-    await this.kafkaProducer.send('notification.trigger', {
-      type: 'follow',
+    await this.kafkaProducer.send("notification.trigger", {
+      type: "follow",
       recipient_id: followingId,
       actor_id: followerId,
       reference_id: follow.id,
+    });
+
+    // Send push notification (fire-and-forget)
+    this.grpcClients.getUser(followerId).then((actor) => {
+      this.pushService
+        .sendPush(
+          followingId,
+          "follow",
+          followerId,
+          actor?.display_name || "Someone",
+          follow.id,
+        )
+        .catch((err) => this.logger.error(`Push failed: ${err.message}`));
     });
 
     this.logger.log(`User ${followerId} followed ${followingId}`);
@@ -89,7 +106,7 @@ export class FollowsService {
 
   async unfollow(followerId: string, followingId: string): Promise<void> {
     if (followerId === followingId) {
-      throw new BadRequestException('Cannot unfollow yourself');
+      throw new BadRequestException("Cannot unfollow yourself");
     }
 
     const existing = await this.prisma.follow.findUnique({
@@ -102,7 +119,7 @@ export class FollowsService {
     });
 
     if (!existing) {
-      throw new NotFoundException('Not following this user');
+      throw new NotFoundException("Not following this user");
     }
 
     await this.prisma.follow.delete({
@@ -117,10 +134,12 @@ export class FollowsService {
     // Update Redis cache (best-effort — DB is source of truth)
     try {
       await this.redis.removeFollow(followerId, followingId);
-      await this.redis.decrementCount('followers', followingId);
-      await this.redis.decrementCount('following', followerId);
+      await this.redis.decrementCount("followers", followingId);
+      await this.redis.decrementCount("following", followerId);
     } catch (err) {
-      this.logger.warn(`Redis unfollow cache update failed: ${(err as Error).message}`);
+      this.logger.warn(
+        `Redis unfollow cache update failed: ${(err as Error).message}`,
+      );
     }
 
     this.logger.log(`User ${followerId} unfollowed ${followingId}`);
@@ -140,7 +159,7 @@ export class FollowsService {
     const [follows, total] = await Promise.all([
       this.prisma.follow.findMany({
         where: { followingId: userId },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         skip,
         take: limit,
         select: { followerId: true },
@@ -180,7 +199,7 @@ export class FollowsService {
     const [follows, total] = await Promise.all([
       this.prisma.follow.findMany({
         where: { followerId: userId },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         skip,
         take: limit,
         select: { followingId: true },
@@ -263,8 +282,8 @@ export class FollowsService {
       // Fallback if gRPC failed
       return {
         id,
-        username: 'unknown',
-        displayName: 'Unknown User',
+        username: "unknown",
+        displayName: "Unknown User",
         avatar: null,
         bio: null,
         isFollowing: currentUserId ? followingSet.has(id) : undefined,

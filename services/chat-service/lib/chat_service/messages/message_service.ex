@@ -25,7 +25,7 @@ defmodule ChatService.Messages.MessageService do
   4. Broadcast the message via Phoenix PubSub (for Channels)
   5. Publish a Kafka event
   """
-  def send_message(sender_id, conversation_id, content, content_type \\ "text") do
+  def send_message(sender_id, conversation_id, content, content_type \\ "text", opts \\ []) do
     now = DateTime.utc_now()
     message_id = UUID.uuid1()
 
@@ -59,7 +59,8 @@ defmodule ChatService.Messages.MessageService do
         ConversationService.update_last_message(conversation_id, sender_id, content, now)
 
         broadcast_message(conversation_id, message)
-        publish_kafka_event(message)
+        recipient_id = Keyword.get(opts, :recipient_id)
+        publish_kafka_event(message, recipient_id)
 
         {:ok, message}
 
@@ -184,17 +185,23 @@ defmodule ChatService.Messages.MessageService do
     )
   end
 
-  defp publish_kafka_event(%Message{} = message) do
-    event = %{
-      event: "message.sent",
-      data: %{
+  defp publish_kafka_event(%Message{} = message, recipient_id \\ nil) do
+    data =
+      %{
         conversation_id: message.conversation_id,
         message_id: message.message_id,
         sender_id: message.sender_id,
         content: message.content,
         content_type: message.content_type,
         created_at: format_datetime(message.created_at)
-      },
+      }
+      |> then(fn d ->
+        if recipient_id, do: Map.put(d, :recipient_id, recipient_id), else: d
+      end)
+
+    event = %{
+      event: "message.sent",
+      data: data,
       timestamp: DateTime.to_iso8601(DateTime.utc_now())
     }
 

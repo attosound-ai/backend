@@ -68,6 +68,11 @@ type PermissionRequest struct {
 	UserId string `json:"user_id"`
 }
 
+// GetPushTokensRequest is the request for GetPushTokens RPC.
+type GetPushTokensRequest struct {
+	UserId string `json:"user_id"`
+}
+
 // ── Response messages ──
 
 // UserResponse mirrors the proto UserResponse.
@@ -112,6 +117,17 @@ type PermissionResponse struct {
 	MaxFileSizeBytes    int64    `json:"max_file_size_bytes"`
 }
 
+// PushTokenEntry is a single push token in the GetPushTokens response.
+type PushTokenEntry struct {
+	Token    string `json:"token"`
+	Platform string `json:"platform"`
+}
+
+// GetPushTokensResponse is the response for GetPushTokens RPC.
+type GetPushTokensResponse struct {
+	Tokens []PushTokenEntry `json:"tokens"`
+}
+
 // ── Service interface and registration ──
 
 // UserServiceServer is the server API for UserService.
@@ -121,6 +137,7 @@ type UserServiceServer interface {
 	ValidateToken(context.Context, *ValidateTokenRequest) (*ValidateTokenResponse, error)
 	VerifyUserForContentUpload(context.Context, *VerificationRequest) (*VerificationResponse, error)
 	GetUserContentPermissions(context.Context, *PermissionRequest) (*PermissionResponse, error)
+	GetPushTokens(context.Context, *GetPushTokensRequest) (*GetPushTokensResponse, error)
 }
 
 // UnimplementedUserServiceServer provides default implementations returning unimplemented errors.
@@ -140,6 +157,9 @@ func (UnimplementedUserServiceServer) VerifyUserForContentUpload(context.Context
 }
 func (UnimplementedUserServiceServer) GetUserContentPermissions(context.Context, *PermissionRequest) (*PermissionResponse, error) {
 	return nil, fmt.Errorf("rpc GetUserContentPermissions not implemented")
+}
+func (UnimplementedUserServiceServer) GetPushTokens(context.Context, *GetPushTokensRequest) (*GetPushTokensResponse, error) {
+	return nil, fmt.Errorf("rpc GetPushTokens not implemented")
 }
 
 // serviceDesc is the gRPC ServiceDesc for UserService.
@@ -166,6 +186,10 @@ var serviceDesc = grpclib.ServiceDesc{
 		{
 			MethodName: "GetUserContentPermissions",
 			Handler:    getUserContentPermissionsHandler,
+		},
+		{
+			MethodName: "GetPushTokens",
+			Handler:    getPushTokensHandler,
 		},
 	},
 	Streams: []grpclib.StreamDesc{},
@@ -249,6 +273,21 @@ func getUserContentPermissionsHandler(srv interface{}, ctx context.Context, dec 
 	info := &grpclib.UnaryServerInfo{Server: srv, FullMethod: "/atto.user.UserService/GetUserContentPermissions"}
 	handler := func(ctx context.Context, r interface{}) (interface{}, error) {
 		return srv.(UserServiceServer).GetUserContentPermissions(ctx, r.(*PermissionRequest))
+	}
+	return interceptor(ctx, req, info, handler)
+}
+
+func getPushTokensHandler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpclib.UnaryServerInterceptor) (interface{}, error) {
+	req := &GetPushTokensRequest{}
+	if err := dec(req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UserServiceServer).GetPushTokens(ctx, req)
+	}
+	info := &grpclib.UnaryServerInfo{Server: srv, FullMethod: "/atto.user.UserService/GetPushTokens"}
+	handler := func(ctx context.Context, r interface{}) (interface{}, error) {
+		return srv.(UserServiceServer).GetPushTokens(ctx, r.(*GetPushTokensRequest))
 	}
 	return interceptor(ctx, req, info, handler)
 }

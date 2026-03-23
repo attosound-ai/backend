@@ -320,3 +320,38 @@ func (r *UserRepository) CreateUserWithCredentials(user *models.User, creds *mod
 		return nil
 	})
 }
+
+// ── Push Token methods ──
+// Multi-account: same token can map to multiple users (one row per user-token pair).
+
+// UpsertPushToken creates or updates a push token for a specific user.
+// Does NOT affect other users' mappings for the same token.
+func (r *UserRepository) UpsertPushToken(userID uint64, token, deviceID, platform string) error {
+	pt := models.PushToken{
+		UserID:   userID,
+		Token:    token,
+		DeviceID: deviceID,
+		Platform: platform,
+		IsActive: true,
+	}
+	return r.db.Where("user_id = ? AND token = ?", userID, token).Assign(pt).FirstOrCreate(&pt).Error
+}
+
+// DeletePushToken removes a push token for a specific user only.
+// Other users' mappings for the same token are preserved.
+func (r *UserRepository) DeletePushToken(userID uint64, token string) error {
+	return r.db.Where("user_id = ? AND token = ?", userID, token).Delete(&models.PushToken{}).Error
+}
+
+// DeactivateAllForToken marks ALL user mappings for a token as inactive
+// (e.g. DeviceNotRegistered — the device no longer exists).
+func (r *UserRepository) DeactivateAllForToken(token string) error {
+	return r.db.Model(&models.PushToken{}).Where("token = ?", token).Update("is_active", false).Error
+}
+
+// GetActivePushTokens returns all active push tokens for a user.
+func (r *UserRepository) GetActivePushTokens(userID uint64) ([]models.PushToken, error) {
+	var tokens []models.PushToken
+	err := r.db.Where("user_id = ? AND is_active = ?", userID, true).Find(&tokens).Error
+	return tokens, err
+}

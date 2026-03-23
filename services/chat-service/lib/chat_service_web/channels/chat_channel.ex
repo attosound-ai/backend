@@ -71,7 +71,7 @@ defmodule ChatServiceWeb.ChatChannel do
     content_type = Map.get(payload, "content_type", "text")
 
     with {:ok, conversation} <- ConversationService.find_conversation(user_id, conversation_id),
-         {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type) do
+         {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type, recipient_id: conversation.participant_id) do
       message_map = Message.to_map(message)
       broadcast!(socket, "new_message", message_map)
 
@@ -84,6 +84,15 @@ defmodule ChatServiceWeb.ChatChannel do
 
       ChatServiceWeb.Endpoint.broadcast("user:#{user_id}", "conversation_updated", notify_payload)
       ChatServiceWeb.Endpoint.broadcast("user:#{conversation.participant_id}", "conversation_updated", notify_payload)
+
+      # Notify recipient about new notification (for badge + list refresh)
+      if user_id != conversation.participant_id do
+        ChatServiceWeb.Endpoint.broadcast(
+          "user:#{conversation.participant_id}",
+          "new_notification",
+          %{type: "message", actor_id: user_id}
+        )
+      end
 
       {:reply, {:ok, message_map}, socket}
     else

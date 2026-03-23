@@ -165,3 +165,30 @@ func profileToGRPC(p *models.UserProfile) *UserResponse {
 	}
 	return resp
 }
+
+// GetPushTokens implements the GetPushTokens RPC.
+func (s *UserGRPCServer) GetPushTokens(ctx context.Context, req *GetPushTokensRequest) (*GetPushTokensResponse, error) {
+	if req.UserId == "" {
+		return nil, status.Error(codes.InvalidArgument, errUserIDRequired)
+	}
+
+	uid, err := strconv.ParseUint(req.UserId, 10, 64)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid user_id")
+	}
+
+	tokens, err := s.userService.GetActivePushTokens(uid)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	entries := make([]PushTokenEntry, 0, len(tokens))
+	for _, t := range tokens {
+		entries = append(entries, PushTokenEntry{
+			Token:    t.Token,
+			Platform: t.Platform,
+		})
+	}
+
+	return &GetPushTokensResponse{Tokens: entries}, nil
+}

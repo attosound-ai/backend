@@ -7,18 +7,16 @@ import {
   Patch,
   Query,
   UseGuards,
-} from '@nestjs/common';
-import { AuthGuard } from '../common/guards/auth.guard';
-import { CurrentUserId } from '../common/decorators/current-user.decorator';
-import { NotificationsService } from './notifications.service';
-import { NotificationPaginationDto } from './dto/notification.dto';
+} from "@nestjs/common";
+import { AuthGuard } from "../common/guards/auth.guard";
+import { CurrentUserId } from "../common/decorators/current-user.decorator";
+import { NotificationsService } from "./notifications.service";
+import { NotificationPaginationDto } from "./dto/notification.dto";
 
-@Controller('api/v1/notifications')
+@Controller("api/v1/notifications")
 @UseGuards(AuthGuard)
 export class NotificationsController {
-  constructor(
-    private readonly notificationsService: NotificationsService,
-  ) {}
+  constructor(private readonly notificationsService: NotificationsService) {}
 
   @Get()
   async getNotifications(
@@ -38,21 +36,32 @@ export class NotificationsController {
     };
   }
 
-  @Patch(':id/read')
+  @Patch("read-all")
+  @HttpCode(HttpStatus.OK)
+  async markAllRead(@CurrentUserId() userId: string) {
+    const count = await this.notificationsService.markAllRead(userId);
+    return {
+      success: true,
+      data: { message: `${count} notifications marked as read` },
+      error: null,
+    };
+  }
+
+  @Patch(":id/read")
   @HttpCode(HttpStatus.OK)
   async markAsRead(
-    @Param('id') notificationId: string,
+    @Param("id") notificationId: string,
     @CurrentUserId() userId: string,
   ) {
     await this.notificationsService.markAsRead(notificationId, userId);
     return {
       success: true,
-      data: { message: 'Notification marked as read' },
+      data: { message: "Notification marked as read" },
       error: null,
     };
   }
 
-  @Get('unread-count')
+  @Get("unread-count")
   async getUnreadCount(@CurrentUserId() userId: string) {
     const count = await this.notificationsService.getUnreadCount(userId);
     return {

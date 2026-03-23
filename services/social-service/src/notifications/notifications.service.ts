@@ -3,10 +3,10 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-} from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { GrpcClientsService } from '../grpc/grpc-clients.service';
-import { NotificationResponseDto } from './dto/notification.dto';
+} from "@nestjs/common";
+import { PrismaService } from "../prisma/prisma.service";
+import { GrpcClientsService } from "../grpc/grpc-clients.service";
+import { NotificationResponseDto } from "./dto/notification.dto";
 
 @Injectable()
 export class NotificationsService {
@@ -30,7 +30,7 @@ export class NotificationsService {
     const [notifications, total] = await Promise.all([
       this.prisma.notification.findMany({
         where: { recipientId: userId },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         skip,
         take: limit,
       }),
@@ -42,17 +42,15 @@ export class NotificationsService {
     // Fetch actor details via gRPC
     const actorIds = [
       ...new Set(
-        notifications
-          .map((n) => n.actorId)
-          .filter((id) => id !== 'system'),
+        notifications.map((n) => n.actorId).filter((id) => id !== "system"),
       ),
     ];
 
     const actors = await this.grpcClients.getUsersBatch(actorIds);
     const actorMap = new Map(actors.map((a) => [a.id, a]));
 
-    const enrichedNotifications: NotificationResponseDto[] =
-      notifications.map((notification) => {
+    const enrichedNotifications: NotificationResponseDto[] = notifications.map(
+      (notification) => {
         const actor = actorMap.get(notification.actorId);
         return {
           id: notification.id,
@@ -63,12 +61,13 @@ export class NotificationsService {
           isRead: notification.isRead,
           createdAt: notification.createdAt.toISOString(),
           actor:
-            notification.actorId === 'system'
+            notification.actorId === "system"
               ? {
-                  id: 'system',
-                  username: 'system',
-                  displayName: 'Atto Sound',
+                  id: "system",
+                  username: "system",
+                  displayName: "ATTO SOUND",
                   avatar: null,
+                  role: null,
                 }
               : actor
                 ? {
@@ -76,15 +75,18 @@ export class NotificationsService {
                     username: actor.username,
                     displayName: actor.display_name || actor.username,
                     avatar: actor.avatar || null,
+                    role: actor.role || null,
                   }
                 : {
                     id: notification.actorId,
-                    username: 'unknown',
-                    displayName: 'Unknown User',
+                    username: "unknown",
+                    displayName: "Unknown User",
                     avatar: null,
+                    role: null,
                   },
         };
-      });
+      },
+    );
 
     return {
       notifications: enrichedNotifications,
@@ -103,12 +105,12 @@ export class NotificationsService {
     });
 
     if (!notification) {
-      throw new NotFoundException('Notification not found');
+      throw new NotFoundException("Notification not found");
     }
 
     if (notification.recipientId !== userId) {
       throw new ForbiddenException(
-        'Cannot mark another user\'s notification as read',
+        "Cannot mark another user's notification as read",
       );
     }
 
@@ -118,6 +120,17 @@ export class NotificationsService {
     });
 
     this.logger.debug(`Notification ${notificationId} marked as read`);
+  }
+
+  async markAllRead(userId: string): Promise<number> {
+    const result = await this.prisma.notification.updateMany({
+      where: { recipientId: userId, isRead: false },
+      data: { isRead: true },
+    });
+    this.logger.debug(
+      `Marked ${result.count} notifications as read for user ${userId}`,
+    );
+    return result.count;
   }
 
   async getUnreadCount(userId: string): Promise<number> {

@@ -46,7 +46,7 @@ defmodule ChatService.Conversations.ConversationService do
   """
   def get_or_create_conversation(user_id, participant_id, participant_name \\ nil) do
     query = """
-    SELECT conversation_id, updated_at FROM conversations
+    SELECT conversation_id, participant_id, updated_at FROM conversations
     WHERE user_id = ?
     """
 

@@ -1,8 +1,8 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import * as grpc from '@grpc/grpc-js';
-import * as protoLoader from '@grpc/proto-loader';
-import * as path from 'path';
-import * as fs from 'fs';
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
+import * as path from "path";
+import * as fs from "fs";
 
 interface UserResponse {
   id: string;
@@ -51,28 +51,29 @@ export class GrpcClientsService implements OnModuleInit {
 
   private resolveProtoPath(filename: string): string {
     // Docker volume mount path (production/docker)
-    const dockerPath = path.resolve('/proto', filename);
+    const dockerPath = path.resolve("/proto", filename);
     if (fs.existsSync(dockerPath)) return dockerPath;
 
     // Relative path for local development
-    return path.resolve(process.cwd(), '..', '..', 'proto', filename);
+    return path.resolve(process.cwd(), "..", "..", "proto", filename);
   }
 
   private getProtoDir(): string {
-    const dockerDir = '/proto';
+    const dockerDir = "/proto";
     if (fs.existsSync(dockerDir)) return dockerDir;
-    return path.resolve(process.cwd(), '..', '..', 'proto');
+    return path.resolve(process.cwd(), "..", "..", "proto");
   }
 
   private initUserClient(): void {
     // The Go user-service uses a JSON codec (not protobuf).
     // We must build the client with JSON serialize/deserialize.
-    const jsonSerialize = (obj: any): Buffer => Buffer.from(JSON.stringify(obj));
+    const jsonSerialize = (obj: any): Buffer =>
+      Buffer.from(JSON.stringify(obj));
     const jsonDeserialize = (buf: Buffer): any => JSON.parse(buf.toString());
 
     const serviceDef: grpc.ServiceDefinition = {
       GetUser: {
-        path: '/atto.user.UserService/GetUser',
+        path: "/atto.user.UserService/GetUser",
         requestStream: false,
         responseStream: false,
         requestSerialize: jsonSerialize,
@@ -81,7 +82,7 @@ export class GrpcClientsService implements OnModuleInit {
         responseDeserialize: jsonDeserialize,
       },
       GetUsersBatch: {
-        path: '/atto.user.UserService/GetUsersBatch',
+        path: "/atto.user.UserService/GetUsersBatch",
         requestStream: false,
         responseStream: false,
         requestSerialize: jsonSerialize,
@@ -90,7 +91,16 @@ export class GrpcClientsService implements OnModuleInit {
         responseDeserialize: jsonDeserialize,
       },
       ValidateToken: {
-        path: '/atto.user.UserService/ValidateToken',
+        path: "/atto.user.UserService/ValidateToken",
+        requestStream: false,
+        responseStream: false,
+        requestSerialize: jsonSerialize,
+        requestDeserialize: jsonDeserialize,
+        responseSerialize: jsonSerialize,
+        responseDeserialize: jsonDeserialize,
+      },
+      GetPushTokens: {
+        path: "/atto.user.UserService/GetPushTokens",
         requestStream: false,
         responseStream: false,
         requestSerialize: jsonSerialize,
@@ -100,14 +110,20 @@ export class GrpcClientsService implements OnModuleInit {
       },
     };
 
-    const address = process.env.USER_SERVICE_GRPC || 'localhost:50051';
-    const ClientCtor = grpc.makeGenericClientConstructor(serviceDef, 'UserService');
-    this.userClient = new ClientCtor(address, grpc.credentials.createInsecure());
+    const address = process.env.USER_SERVICE_GRPC || "localhost:50051";
+    const ClientCtor = grpc.makeGenericClientConstructor(
+      serviceDef,
+      "UserService",
+    );
+    this.userClient = new ClientCtor(
+      address,
+      grpc.credentials.createInsecure(),
+    );
     this.logger.log(`User gRPC client connected to ${address} (JSON codec)`);
   }
 
   private initContentClient(): void {
-    const protoPath = this.resolveProtoPath('content.proto');
+    const protoPath = this.resolveProtoPath("content.proto");
     const packageDefinition = protoLoader.loadSync(protoPath, {
       keepCase: true,
       longs: Number,
@@ -117,8 +133,7 @@ export class GrpcClientsService implements OnModuleInit {
       includeDirs: [this.getProtoDir()],
     });
     const proto = grpc.loadPackageDefinition(packageDefinition) as any;
-    const address =
-      process.env.CONTENT_SERVICE_GRPC || 'localhost:50052';
+    const address = process.env.CONTENT_SERVICE_GRPC || "localhost:50052";
 
     this.contentClient = new proto.atto.content.ContentService(
       address,
@@ -220,14 +235,24 @@ export class GrpcClientsService implements OnModuleInit {
       this.contentClient.GetContentBatch(
         { content_ids: [], pagination: { cursor, limit } },
         { deadline: this.deadline() },
-        (err: any, response: { contents: ContentResponse[]; meta: PaginatedMeta }) => {
+        (
+          err: any,
+          response: { contents: ContentResponse[]; meta: PaginatedMeta },
+        ) => {
           if (err) {
             this.logger.error(`listRecentContent failed: ${err.message}`);
-            resolve({ contents: [], meta: { next_cursor: '', has_more: false, total: 0 } });
+            resolve({
+              contents: [],
+              meta: { next_cursor: "", has_more: false, total: 0 },
+            });
           } else {
             resolve({
               contents: response.contents || [],
-              meta: response.meta || { next_cursor: '', has_more: false, total: 0 },
+              meta: response.meta || {
+                next_cursor: "",
+                has_more: false,
+                total: 0,
+              },
             });
           }
         },
@@ -240,11 +265,17 @@ export class GrpcClientsService implements OnModuleInit {
     pagination?: { cursor: string; limit: number },
   ): Promise<{ contents: ContentResponse[]; meta: PaginatedMeta }> {
     if (contentIds.length === 0) {
-      return { contents: [], meta: { next_cursor: '', has_more: false, total: 0 } };
+      return {
+        contents: [],
+        meta: { next_cursor: "", has_more: false, total: 0 },
+      };
     }
     return new Promise((resolve) => {
       this.contentClient.GetContentBatch(
-        { content_ids: contentIds, pagination: pagination || { cursor: '', limit: 20 } },
+        {
+          content_ids: contentIds,
+          pagination: pagination || { cursor: "", limit: 20 },
+        },
         { deadline: this.deadline() },
         (
           err: any,
@@ -254,13 +285,13 @@ export class GrpcClientsService implements OnModuleInit {
             this.logger.error(`GetContentBatch failed: ${err.message}`);
             resolve({
               contents: [],
-              meta: { next_cursor: '', has_more: false, total: 0 },
+              meta: { next_cursor: "", has_more: false, total: 0 },
             });
           } else {
             resolve({
               contents: response.contents || [],
               meta: response.meta || {
-                next_cursor: '',
+                next_cursor: "",
                 has_more: false,
                 total: 0,
               },
@@ -310,7 +341,7 @@ export class GrpcClientsService implements OnModuleInit {
       this.contentClient.GetContentByAuthor(
         {
           author_id: authorId,
-          pagination: pagination || { cursor: '', limit: 20 },
+          pagination: pagination || { cursor: "", limit: 20 },
         },
         { deadline: this.deadline() },
         (
@@ -323,17 +354,41 @@ export class GrpcClientsService implements OnModuleInit {
             );
             resolve({
               contents: [],
-              meta: { next_cursor: '', has_more: false, total: 0 },
+              meta: { next_cursor: "", has_more: false, total: 0 },
             });
           } else {
             resolve({
               contents: response.contents || [],
               meta: response.meta || {
-                next_cursor: '',
+                next_cursor: "",
                 has_more: false,
                 total: 0,
               },
             });
+          }
+        },
+      );
+    });
+  }
+
+  async getPushTokens(
+    userId: string,
+  ): Promise<{ token: string; platform: string }[]> {
+    return new Promise((resolve) => {
+      this.userClient.GetPushTokens(
+        { user_id: userId },
+        { deadline: this.deadline() },
+        (
+          err: any,
+          response: { tokens: { token: string; platform: string }[] },
+        ) => {
+          if (err) {
+            this.logger.error(
+              `GetPushTokens failed for ${userId}: ${err.message}`,
+            );
+            resolve([]);
+          } else {
+            resolve(response.tokens || []);
           }
         },
       );

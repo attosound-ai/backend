@@ -530,12 +530,20 @@ func (s *AuthService) CheckPhoneAvailability(phone string) (bool, error) {
 }
 
 // CheckUsernameAvailability returns true if the username is not taken.
-func (s *AuthService) CheckUsernameAvailability(username string) (bool, error) {
+// If excludeUserID is non-empty, that user's own username is not considered taken.
+func (s *AuthService) CheckUsernameAvailability(username string, excludeUserID string) (bool, error) {
 	existing, err := s.repo.FindByUsername(strings.ToLower(username))
 	if err != nil {
 		return false, errors.New("internal error")
 	}
-	return existing == nil, nil
+	if existing == nil {
+		return true, nil
+	}
+	// If the found user is the caller themselves, treat as available
+	if excludeUserID != "" && strconv.FormatUint(existing.ID, 10) == excludeUserID {
+		return true, nil
+	}
+	return false, nil
 }
 
 // CheckEmailAvailability returns true if the email is not yet registered.

@@ -1,7 +1,14 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Kafka, Consumer, EachMessagePayload } from 'kafkajs';
-import { RedisService } from '../redis/redis.service';
-import { PrismaService } from '../prisma/prisma.service';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from "@nestjs/common";
+import { Kafka, Consumer, EachMessagePayload } from "kafkajs";
+import { RedisService } from "../redis/redis.service";
+import { PrismaService } from "../prisma/prisma.service";
+import { PushService } from "../push/push.service";
+import { GrpcClientsService } from "../grpc/grpc-clients.service";
 
 @Injectable()
 export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
@@ -12,13 +19,15 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly redis: RedisService,
     private readonly prisma: PrismaService,
+    private readonly pushService: PushService,
+    private readonly grpcClients: GrpcClientsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
-    const brokers = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
-    const useTls = process.env.KAFKA_USE_TLS === 'true';
+    const brokers = (process.env.KAFKA_BROKERS || "localhost:9092").split(",");
+    const useTls = process.env.KAFKA_USE_TLS === "true";
     this.kafka = new Kafka({
-      clientId: 'social-service',
+      clientId: "social-service",
       brokers,
       retry: {
         initialRetryTime: 300,
@@ -27,15 +36,15 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       ...(useTls && {
         ssl: true,
         sasl: {
-          mechanism: 'scram-sha-256' as const,
-          username: process.env.KAFKA_SASL_USERNAME || '',
-          password: process.env.KAFKA_SASL_PASSWORD || '',
+          mechanism: "scram-sha-256" as const,
+          username: process.env.KAFKA_SASL_USERNAME || "",
+          password: process.env.KAFKA_SASL_PASSWORD || "",
         },
       }),
     });
 
     this.consumer = this.kafka.consumer({
-      groupId: 'social-service-group',
+      groupId: "social-service-group",
     });
 
     await this.connect();
@@ -44,10 +53,10 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   private async connect(): Promise<void> {
     try {
       await this.consumer.connect();
-      this.logger.log('Kafka consumer connected');
+      this.logger.log("Kafka consumer connected");
 
       await this.consumer.subscribe({
-        topics: ['user.created', 'content.published', 'message.sent'],
+        topics: ["user.created", "content.published", "message.sent"],
         fromBeginning: false,
       });
 
@@ -58,7 +67,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       });
 
       this.logger.log(
-        'Kafka consumer subscribed to: user.created, content.published, message.sent',
+        "Kafka consumer subscribed to: user.created, content.published, message.sent",
       );
     } catch (error) {
       this.logger.error(`Failed to connect Kafka consumer: ${error.message}`);
@@ -68,7 +77,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy(): Promise<void> {
     if (this.consumer) {
       await this.consumer.disconnect();
-      this.logger.log('Kafka consumer disconnected');
+      this.logger.log("Kafka consumer disconnected");
     }
   }
 
@@ -78,17 +87,19 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     if (!message.value) return;
 
     try {
-      const data = JSON.parse(message.value.toString());
+      const raw = JSON.parse(message.value.toString());
+      // Events may be wrapped as { event, data, timestamp } or flat
+      const data = raw.data ?? raw;
       this.logger.debug(`Received message on topic ${topic}`);
 
       switch (topic) {
-        case 'user.created':
+        case "user.created":
           await this.handleUserCreated(data);
           break;
-        case 'content.published':
+        case "content.published":
           await this.handleContentPublished(data);
           break;
-        case 'message.sent':
+        case "message.sent":
           await this.handleMessageSent(data);
           break;
         default:
@@ -112,7 +123,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   }): Promise<void> {
     const userId = data.id ?? data.user_id;
     if (!userId) {
-      this.logger.error('user.created event missing user id, skipping');
+      this.logger.error("user.created event missing user id, skipping");
       return;
     }
     this.logger.log(`Processing user.created for user ${userId}`);
@@ -120,8 +131,8 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     await this.prisma.notification.create({
       data: {
         recipientId: userId,
-        type: 'welcome',
-        actorId: 'system',
+        type: "welcome",
+        actorId: "system",
         referenceId: null,
         isRead: false,
       },
@@ -179,9 +190,21 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
    */
   private async handleMessageSent(data: {
     sender_id: string;
-    recipient_id: string;
+    recipient_id?: string;
+    conversation_id?: string;
     message_id: string;
+    content?: string;
   }): Promise<void> {
+    if (!data.recipient_id) {
+      this.logger.warn(
+        `message.sent missing recipient_id (conversation: ${data.conversation_id}), skipping notification`,
+      );
+      return;
+    }
+
+    // Don't notify users about their own messages
+    if (data.sender_id === data.recipient_id) return;
+
     this.logger.log(
       `Processing message.sent from ${data.sender_id} to ${data.recipient_id}`,
     );
@@ -189,9 +212,9 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     await this.prisma.notification.create({
       data: {
         recipientId: data.recipient_id,
-        type: 'message',
+        type: "message",
         actorId: data.sender_id,
-        referenceId: data.message_id,
+        referenceId: data.conversation_id || data.message_id,
         isRead: false,
       },
     });
@@ -199,5 +222,30 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `Message notification created for user ${data.recipient_id}`,
     );
+
+    // Send push notification (fire-and-forget)
+    this.grpcClients
+      .getUser(data.sender_id)
+      .then((actor) => {
+        const senderName = actor?.display_name || "Someone";
+        const messagePreview = data.content
+          ? data.content.length > 100
+            ? data.content.slice(0, 100) + "…"
+            : data.content
+          : undefined;
+        this.pushService
+          .sendPush(
+            data.recipient_id!,
+            "message",
+            data.sender_id,
+            senderName,
+            data.conversation_id,
+            messagePreview ? `${senderName}: ${messagePreview}` : undefined,
+          )
+          .catch((err) => this.logger.error(`Push failed: ${err.message}`));
+      })
+      .catch((err) =>
+        this.logger.error(`GetUser for push failed: ${err.message}`),
+      );
   }
 }

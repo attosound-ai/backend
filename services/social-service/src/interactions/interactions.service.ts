@@ -3,12 +3,13 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-} from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { RedisService } from '../redis/redis.service';
-import { GrpcClientsService } from '../grpc/grpc-clients.service';
-import { KafkaProducer } from '../kafka/kafka.producer';
-import { CommentResponseDto } from './dto/interaction.dto';
+} from "@nestjs/common";
+import { PrismaService } from "../prisma/prisma.service";
+import { RedisService } from "../redis/redis.service";
+import { GrpcClientsService } from "../grpc/grpc-clients.service";
+import { KafkaProducer } from "../kafka/kafka.producer";
+import { PushService } from "../push/push.service";
+import { CommentResponseDto } from "./dto/interaction.dto";
 
 @Injectable()
 export class InteractionsService {
@@ -19,51 +20,73 @@ export class InteractionsService {
     private readonly redis: RedisService,
     private readonly grpcClients: GrpcClientsService,
     private readonly kafkaProducer: KafkaProducer,
+    private readonly pushService: PushService,
   ) {}
+
+  /** Fire-and-forget push notification after creating a notification in DB. */
+  private firePush(
+    recipientId: string,
+    type: string,
+    actorId: string,
+    referenceId: string,
+  ): void {
+    this.grpcClients.getUser(actorId).then((actor) => {
+      this.pushService
+        .sendPush(
+          recipientId,
+          type,
+          actorId,
+          actor?.display_name || "Someone",
+          referenceId,
+        )
+        .catch((err) => this.logger.error(`Push failed: ${err.message}`));
+    });
+  }
 
   // ── Likes ──
 
   async like(userId: string, contentId: string): Promise<void> {
     const existing = await this.prisma.interaction.findUnique({
       where: {
-        userId_contentId_type: { userId, contentId, type: 'LIKE' },
+        userId_contentId_type: { userId, contentId, type: "LIKE" },
       },
     });
 
     if (existing) {
-      throw new ConflictException('Already liked this content');
+      throw new ConflictException("Already liked this content");
     }
 
     const interaction = await this.prisma.interaction.create({
-      data: { userId, contentId, type: 'LIKE' },
+      data: { userId, contentId, type: "LIKE" },
     });
 
-    await this.redis.incrementCount('likes', contentId);
+    await this.redis.incrementCount("likes", contentId);
 
     const content = await this.grpcClients.getContent(contentId);
     if (content && content.author_id !== userId) {
       await this.prisma.notification.create({
         data: {
           recipientId: content.author_id,
-          type: 'like',
+          type: "like",
           actorId: userId,
           referenceId: contentId,
         },
       });
 
-      await this.kafkaProducer.send('notification.trigger', {
-        type: 'like',
+      await this.kafkaProducer.send("notification.trigger", {
+        type: "like",
         recipient_id: content.author_id,
         actor_id: userId,
         reference_id: contentId,
       });
+      this.firePush(content.author_id, "like", userId, contentId);
     }
 
-    await this.kafkaProducer.send('interaction.created', {
+    await this.kafkaProducer.send("interaction.created", {
       id: interaction.id,
       user_id: userId,
       content_id: contentId,
-      type: 'like',
+      type: "like",
       created_at: interaction.createdAt.toISOString(),
     });
 
@@ -73,26 +96,26 @@ export class InteractionsService {
   async unlike(userId: string, contentId: string): Promise<void> {
     const existing = await this.prisma.interaction.findUnique({
       where: {
-        userId_contentId_type: { userId, contentId, type: 'LIKE' },
+        userId_contentId_type: { userId, contentId, type: "LIKE" },
       },
     });
 
     if (!existing) {
-      throw new NotFoundException('Like not found');
+      throw new NotFoundException("Like not found");
     }
 
     await this.prisma.interaction.delete({
       where: {
-        userId_contentId_type: { userId, contentId, type: 'LIKE' },
+        userId_contentId_type: { userId, contentId, type: "LIKE" },
       },
     });
 
-    await this.redis.decrementCount('likes', contentId);
+    await this.redis.decrementCount("likes", contentId);
 
-    await this.kafkaProducer.send('interaction.removed', {
+    await this.kafkaProducer.send("interaction.removed", {
       user_id: userId,
       content_id: contentId,
-      type: 'like',
+      type: "like",
     });
 
     this.logger.log(`User ${userId} unliked content ${contentId}`);
@@ -101,7 +124,7 @@ export class InteractionsService {
   async isLiked(userId: string, contentId: string): Promise<boolean> {
     const interaction = await this.prisma.interaction.findUnique({
       where: {
-        userId_contentId_type: { userId, contentId, type: 'LIKE' },
+        userId_contentId_type: { userId, contentId, type: "LIKE" },
       },
     });
     return !!interaction;
@@ -120,7 +143,7 @@ export class InteractionsService {
         where: { id: parentId },
       });
       if (!parent || parent.contentId !== contentId) {
-        throw new NotFoundException('Parent comment not found');
+        throw new NotFoundException("Parent comment not found");
       }
     }
 
@@ -133,32 +156,33 @@ export class InteractionsService {
       },
     });
 
-    await this.redis.incrementCount('comments', contentId);
+    await this.redis.incrementCount("comments", contentId);
 
     const content = await this.grpcClients.getContent(contentId);
     if (content && content.author_id !== userId) {
       await this.prisma.notification.create({
         data: {
           recipientId: content.author_id,
-          type: 'comment',
+          type: "comment",
           actorId: userId,
           referenceId: contentId,
         },
       });
 
-      await this.kafkaProducer.send('notification.trigger', {
-        type: 'comment',
+      await this.kafkaProducer.send("notification.trigger", {
+        type: "comment",
         recipient_id: content.author_id,
         actor_id: userId,
         reference_id: contentId,
       });
+      this.firePush(content.author_id, "comment", userId, contentId);
     }
 
-    await this.kafkaProducer.send('interaction.created', {
+    await this.kafkaProducer.send("interaction.created", {
       id: comment.id,
       user_id: userId,
       content_id: contentId,
-      type: 'comment',
+      type: "comment",
       comment: text,
       created_at: comment.createdAt.toISOString(),
     });
@@ -198,12 +222,12 @@ export class InteractionsService {
     const [comments, total] = await Promise.all([
       this.prisma.comment.findMany({
         where: { contentId, parentId: null },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         skip,
         take: limit,
         include: {
           replies: {
-            orderBy: { createdAt: 'asc' },
+            orderBy: { createdAt: "asc" },
             take: 3,
           },
         },
@@ -233,7 +257,12 @@ export class InteractionsService {
             displayName: user.display_name || user.username,
             avatar: user.avatar || null,
           }
-        : { id: uid, username: 'unknown', displayName: 'Unknown User', avatar: null };
+        : {
+            id: uid,
+            username: "unknown",
+            displayName: "Unknown User",
+            avatar: null,
+          };
     };
 
     const result: CommentResponseDto[] = comments.map((c) => ({
@@ -267,7 +296,7 @@ export class InteractionsService {
     const existing = await this.prisma.bookmark.findUnique({
       where: { userId_contentId: { userId, contentId } },
     });
-    if (existing) throw new ConflictException('Already bookmarked');
+    if (existing) throw new ConflictException("Already bookmarked");
 
     await this.prisma.bookmark.create({ data: { userId, contentId } });
     this.logger.log(`User ${userId} bookmarked content ${contentId}`);
@@ -277,7 +306,7 @@ export class InteractionsService {
     const existing = await this.prisma.bookmark.findUnique({
       where: { userId_contentId: { userId, contentId } },
     });
-    if (!existing) throw new NotFoundException('Bookmark not found');
+    if (!existing) throw new NotFoundException("Bookmark not found");
 
     await this.prisma.bookmark.delete({
       where: { userId_contentId: { userId, contentId } },
@@ -296,12 +325,15 @@ export class InteractionsService {
     userId: string,
     page: number,
     limit: number,
-  ): Promise<{ contentIds: string[]; meta: { page: number; total: number; totalPages: number } }> {
+  ): Promise<{
+    contentIds: string[];
+    meta: { page: number; total: number; totalPages: number };
+  }> {
     const skip = (page - 1) * limit;
     const [bookmarks, total] = await Promise.all([
       this.prisma.bookmark.findMany({
         where: { userId },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         skip,
         take: limit,
         select: { contentId: true },
@@ -320,27 +352,28 @@ export class InteractionsService {
     const existing = await this.prisma.repost.findUnique({
       where: { userId_contentId: { userId, contentId } },
     });
-    if (existing) throw new ConflictException('Already reposted');
+    if (existing) throw new ConflictException("Already reposted");
 
     await this.prisma.repost.create({ data: { userId, contentId } });
-    await this.redis.incrementCount('reposts', contentId);
+    await this.redis.incrementCount("reposts", contentId);
 
     const content = await this.grpcClients.getContent(contentId);
     if (content && content.author_id !== userId) {
       await this.prisma.notification.create({
         data: {
           recipientId: content.author_id,
-          type: 'repost',
+          type: "repost",
           actorId: userId,
           referenceId: contentId,
         },
       });
-      await this.kafkaProducer.send('notification.trigger', {
-        type: 'repost',
+      await this.kafkaProducer.send("notification.trigger", {
+        type: "repost",
         recipient_id: content.author_id,
         actor_id: userId,
         reference_id: contentId,
       });
+      this.firePush(content.author_id, "repost", userId, contentId);
     }
 
     this.logger.log(`User ${userId} reposted content ${contentId}`);
@@ -350,17 +383,17 @@ export class InteractionsService {
     const existing = await this.prisma.repost.findUnique({
       where: { userId_contentId: { userId, contentId } },
     });
-    if (!existing) throw new NotFoundException('Repost not found');
+    if (!existing) throw new NotFoundException("Repost not found");
 
     await this.prisma.repost.delete({
       where: { userId_contentId: { userId, contentId } },
     });
-    await this.redis.decrementCount('reposts', contentId);
+    await this.redis.decrementCount("reposts", contentId);
 
-    await this.kafkaProducer.send('interaction.removed', {
+    await this.kafkaProducer.send("interaction.removed", {
       user_id: userId,
       content_id: contentId,
-      type: 'repost',
+      type: "repost",
     });
 
     this.logger.log(`User ${userId} unreposted content ${contentId}`);
@@ -378,37 +411,38 @@ export class InteractionsService {
   async share(userId: string, contentId: string): Promise<void> {
     await this.prisma.interaction.upsert({
       where: {
-        userId_contentId_type: { userId, contentId, type: 'SHARE' },
+        userId_contentId_type: { userId, contentId, type: "SHARE" },
       },
       update: {},
-      create: { userId, contentId, type: 'SHARE' },
+      create: { userId, contentId, type: "SHARE" },
     });
 
-    await this.redis.incrementCount('shares', contentId);
+    await this.redis.incrementCount("shares", contentId);
 
     const content = await this.grpcClients.getContent(contentId);
     if (content && content.author_id !== userId) {
       await this.prisma.notification.create({
         data: {
           recipientId: content.author_id,
-          type: 'share',
+          type: "share",
           actorId: userId,
           referenceId: contentId,
         },
       });
 
-      await this.kafkaProducer.send('notification.trigger', {
-        type: 'share',
+      await this.kafkaProducer.send("notification.trigger", {
+        type: "share",
         recipient_id: content.author_id,
         actor_id: userId,
         reference_id: contentId,
       });
+      this.firePush(content.author_id, "share", userId, contentId);
     }
 
-    await this.kafkaProducer.send('interaction.created', {
+    await this.kafkaProducer.send("interaction.created", {
       user_id: userId,
       content_id: contentId,
-      type: 'share',
+      type: "share",
       created_at: new Date().toISOString(),
     });
 
@@ -419,12 +453,17 @@ export class InteractionsService {
 
   async getInteractionCounts(
     contentId: string,
-  ): Promise<{ likesCount: number; commentsCount: number; sharesCount: number; repostsCount: number }> {
+  ): Promise<{
+    likesCount: number;
+    commentsCount: number;
+    sharesCount: number;
+    repostsCount: number;
+  }> {
     const [likes, comments, shares, reposts] = await Promise.all([
-      this.redis.getCount('likes', contentId),
-      this.redis.getCount('comments', contentId),
-      this.redis.getCount('shares', contentId),
-      this.redis.getCount('reposts', contentId),
+      this.redis.getCount("likes", contentId),
+      this.redis.getCount("comments", contentId),
+      this.redis.getCount("shares", contentId),
+      this.redis.getCount("reposts", contentId),
     ]);
 
     if (likes > 0 || comments > 0 || shares > 0 || reposts > 0) {
@@ -438,17 +477,17 @@ export class InteractionsService {
 
     const [likesCount, commentsCount, sharesCount, repostsCount] =
       await Promise.all([
-        this.prisma.interaction.count({ where: { contentId, type: 'LIKE' } }),
+        this.prisma.interaction.count({ where: { contentId, type: "LIKE" } }),
         this.prisma.comment.count({ where: { contentId } }),
-        this.prisma.interaction.count({ where: { contentId, type: 'SHARE' } }),
+        this.prisma.interaction.count({ where: { contentId, type: "SHARE" } }),
         this.prisma.repost.count({ where: { contentId } }),
       ]);
 
     await Promise.all([
-      this.redis.setCount('likes', contentId, likesCount),
-      this.redis.setCount('comments', contentId, commentsCount),
-      this.redis.setCount('shares', contentId, sharesCount),
-      this.redis.setCount('reposts', contentId, repostsCount),
+      this.redis.setCount("likes", contentId, likesCount),
+      this.redis.setCount("comments", contentId, commentsCount),
+      this.redis.setCount("shares", contentId, sharesCount),
+      this.redis.setCount("reposts", contentId, repostsCount),
     ]);
 
     return { likesCount, commentsCount, sharesCount, repostsCount };

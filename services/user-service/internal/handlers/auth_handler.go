@@ -227,6 +227,7 @@ func (h *AuthHandler) CheckPhone(c *fiber.Ctx) error {
 
 // CheckUsername handles GET /auth/check-username?username=foo
 // Returns 200 if available, 409 if already taken.
+// If the request has a valid JWT, the current user's own username is excluded.
 func (h *AuthHandler) CheckUsername(c *fiber.Ctx) error {
 	username := c.Query("username")
 	if username == "" {
@@ -236,7 +237,7 @@ func (h *AuthHandler) CheckUsername(c *fiber.Ctx) error {
 		})
 	}
 
-	available, err := h.authService.CheckUsernameAvailability(username)
+	available, err := h.authService.CheckUsernameAvailability(username, "")
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,

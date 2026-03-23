@@ -593,12 +593,14 @@ export class FeedService {
             username: author.username,
             displayName: author.display_name || author.username,
             avatar: author.avatar || null,
+            role: author.role || null,
           }
         : {
             id: content.author_id,
             username: 'unknown',
             displayName: 'Unknown User',
             avatar: null,
+            role: null,
           },
       interactions: {
         likesCount: counts.likesCount,

@@ -38,7 +38,7 @@ func main() {
 	log.Println("[STARTUP] Connected to PostgreSQL")
 
 	// ── Auto-migrate GORM models ──
-	if err := db.AutoMigrate(&models.User{}, &models.UserCredentials{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.UserCredentials{}, &models.PushToken{}); err != nil {
 		log.Fatalf("[STARTUP] Failed to auto-migrate models: %v", err)
 	}
 	log.Println("[STARTUP] Database migration completed")
@@ -58,6 +58,7 @@ func main() {
 	userHandler := handlers.NewUserHandler(userService)
 	verificationHandler := handlers.NewVerificationHandler(userService, cfg.OTPServiceURL)
 	inmateHandler := handlers.NewInmateHandler(inmateService)
+	pushTokenHandler := handlers.NewPushTokenHandler(repo)
 	healthHandler := handlers.NewHealthHandler()
 
 	// ── Fiber HTTP server ──
@@ -115,6 +116,8 @@ func main() {
 	users.Get("/me/linked-accounts", middleware.RequireAuth(jwtMgr), authHandler.GetLinkedAccounts)
 	users.Post("/me/verification/send-otp", middleware.RequireAuth(jwtMgr), verificationHandler.SendVerificationOTP)
 	users.Post("/me/verification/verify", middleware.RequireAuth(jwtMgr), verificationHandler.VerifyOTP)
+	users.Post("/me/push-token", middleware.RequireAuth(jwtMgr), pushTokenHandler.RegisterToken)
+	users.Delete("/me/push-token", middleware.RequireAuth(jwtMgr), pushTokenHandler.UnregisterToken)
 
 	// Inmate lookup (public)
 	users.Get("/inmates/lookup", inmateHandler.LookupInmate)
