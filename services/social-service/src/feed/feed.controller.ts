@@ -47,7 +47,7 @@ export class FeedController {
     @Body() dto: CreatePostDto,
   ) {
     const post = await this.feedService.createPost(userId, {
-      textContent: dto.textContent,
+      textContent: dto.textContent || '',
       contentType: dto.contentType || 'post',
       filePaths: dto.filePaths || [],
       metadata: dto.metadata || {},
