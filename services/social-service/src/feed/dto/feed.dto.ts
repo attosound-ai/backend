@@ -26,10 +26,10 @@ export class FeedQueryDto {
 }
 
 export class CreatePostDto {
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   @MaxLength(5000)
-  textContent: string;
+  textContent?: string = '';
 
   @IsOptional()
   @IsString()
