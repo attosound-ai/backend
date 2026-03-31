@@ -385,7 +385,7 @@ defmodule ChatService.Conversations.ConversationService do
 
     case Repo.execute_prepared(query, params) do
       {:ok, result} ->
-        rows = result["rows"] || []
+        rows = if is_list(result), do: result, else: Enum.to_list(result)
 
         for row <- rows do
           conv_id = row["conversation_id"]
