@@ -690,7 +690,7 @@ func (s *AuthService) PreRegister(ctx context.Context, req *models.PreRegisterRe
 
 // CompleteRegistration finalizes a pending registration by setting the role
 // and optional representative fields, then returns updated tokens.
-// When role is "representative", also atomically creates a linked managed artist account.
+// When role is "representative", also atomically creates a linked managed creator account.
 func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, req *models.CompleteRegistrationRequest) (*models.CompleteRegistrationResponse, error) {
 	uid, err := strconv.ParseUint(userID, 10, 64)
 	if err != nil {
@@ -720,7 +720,7 @@ func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, r
 	}
 
 	if req.RepresentativeFields != nil {
-		updates["artist_name"] = req.RepresentativeFields.ArtistName
+		updates["creator_name"] = req.RepresentativeFields.CreatorName
 		updates["inmate_state"] = req.RepresentativeFields.InmateState
 		updates["relationship"] = req.RepresentativeFields.Relationship
 		updates["consent_to_recording"] = req.RepresentativeFields.ConsentToRecording
@@ -765,54 +765,54 @@ func (s *AuthService) CompleteRegistration(ctx context.Context, userID string, r
 		Tokens: tokens,
 	}
 
-	// If registering as a representative, create the linked managed artist account.
+	// If registering as a representative, create the linked managed creator account.
 	if req.Role == "representative" && req.RepresentativeFields != nil && req.InmateNumber != nil {
-		// Hash artist password if real account fields are provided
-		var artistPasswordHash string
-		if req.ManagedArtistFields != nil && req.ManagedArtistFields.Password != "" {
-			hash, hashErr := bcrypt.GenerateFromPassword([]byte(req.ManagedArtistFields.Password), bcrypt.DefaultCost)
+		// Hash creator password if real account fields are provided
+		var creatorPasswordHash string
+		if req.ManagedCreatorFields != nil && req.ManagedCreatorFields.Password != "" {
+			hash, hashErr := bcrypt.GenerateFromPassword([]byte(req.ManagedCreatorFields.Password), bcrypt.DefaultCost)
 			if hashErr != nil {
-				log.Printf("[AUTH] Warning: failed to hash artist password for rep %s: %v", userID, hashErr)
+				log.Printf("[AUTH] Warning: failed to hash creator password for rep %s: %v", userID, hashErr)
 			} else {
-				artistPasswordHash = string(hash)
+				creatorPasswordHash = string(hash)
 			}
 		}
 
-		managedArtist, createErr := s.repo.CreateManagedArtist(
+		managedCreator, createErr := s.repo.CreateManagedCreator(
 			user,
-			req.ManagedArtistFields,
-			artistPasswordHash,
+			req.ManagedCreatorFields,
+			creatorPasswordHash,
 			*req.InmateNumber,
 			req.RepresentativeFields.InmateState,
 			req.RepresentativeFields.ConsentToRecording,
 		)
 		if createErr != nil {
-			log.Printf("[AUTH] Warning: failed to create managed artist for rep %s: %v", userID, createErr)
-			// Non-fatal: rep registration succeeded, artist creation is best-effort
+			log.Printf("[AUTH] Warning: failed to create managed creator for rep %s: %v", userID, createErr)
+			// Non-fatal: rep registration succeeded, creator creation is best-effort
 		} else {
-			artistTokens, tokenErr := s.jwtMgr.GenerateTokenPair(managedArtist)
+			creatorTokens, tokenErr := s.jwtMgr.GenerateTokenPair(managedCreator)
 			if tokenErr != nil {
-				log.Printf("[AUTH] Warning: failed to generate artist tokens for rep %s: %v", userID, tokenErr)
+				log.Printf("[AUTH] Warning: failed to generate creator tokens for rep %s: %v", userID, tokenErr)
 			} else {
 				resp.LinkedAccount = &models.LinkedAccountPayload{
-					User:   managedArtist.ToProfile(),
-					Tokens: artistTokens,
+					User:   managedCreator.ToProfile(),
+					Tokens: creatorTokens,
 				}
-				log.Printf("[AUTH] Created managed artist account %d for rep %s", managedArtist.ID, userID)
+				log.Printf("[AUTH] Created managed creator account %d for rep %s", managedCreator.ID, userID)
 			}
 
-			// Publish user.created event for the managed artist (triggers welcome email)
+			// Publish user.created event for the managed creator (triggers welcome email)
 			go func() {
-				artistIDStr := strconv.FormatUint(managedArtist.ID, 10)
+				creatorIDStr := strconv.FormatUint(managedCreator.ID, 10)
 				eventData := map[string]interface{}{
-					"id":          artistIDStr,
-					"username":    managedArtist.Username,
-					"email":       strVal(managedArtist.Email),
-					"displayName": managedArtist.DisplayName,
-					"role":        "artist",
+					"id":          creatorIDStr,
+					"username":    managedCreator.Username,
+					"email":       strVal(managedCreator.Email),
+					"displayName": managedCreator.DisplayName,
+					"role":        "creator",
 				}
-				if err := s.producer.Publish(context.Background(), "user.created", artistIDStr, eventData); err != nil {
-					log.Printf("[AUTH] Failed to publish user.created event for artist %s: %v", artistIDStr, err)
+				if err := s.producer.Publish(context.Background(), "user.created", creatorIDStr, eventData); err != nil {
+					log.Printf("[AUTH] Failed to publish user.created event for creator %s: %v", creatorIDStr, err)
 				}
 			}()
 		}
@@ -842,10 +842,10 @@ func (s *AuthService) SwitchAccount(ctx context.Context, callerID string, target
 	// Authorization: accounts must be linked
 	authorized := false
 	if target.RepresentativeID != nil && *target.RepresentativeID == uid {
-		authorized = true // rep → their managed artist
+		authorized = true // rep → their managed creator
 	}
 	if caller.RepresentativeID != nil && *caller.RepresentativeID == target.ID {
-		authorized = true // managed artist → their rep
+		authorized = true // managed creator → their rep
 	}
 	if !authorized {
 		return nil, errors.New("forbidden: accounts are not linked")

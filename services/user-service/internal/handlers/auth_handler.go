@@ -55,10 +55,10 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 			Error:   "password must be at least 8 characters",
 		})
 	}
-	if req.Role != "artist" && req.Role != "representative" && req.Role != "listener" {
+	if req.Role != "creator" && req.Role != "representative" && req.Role != "listener" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
-			Error:   "role must be one of: artist, representative, listener",
+			Error:   "role must be one of: creator, representative, listener",
 		})
 	}
 
@@ -372,10 +372,10 @@ func (h *AuthHandler) CompleteRegistration(c *fiber.Ctx) error {
 			Error:   "role is required",
 		})
 	}
-	if req.Role != "artist" && req.Role != "representative" && req.Role != "listener" {
+	if req.Role != "creator" && req.Role != "representative" && req.Role != "listener" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
-			Error:   "role must be one of: artist, representative, listener",
+			Error:   "role must be one of: creator, representative, listener",
 		})
 	}
 

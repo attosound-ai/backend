@@ -25,7 +25,7 @@ async def create_subscription(
     user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """Create or upgrade a subscription. Representatives can pay for their artist."""
+    """Create or upgrade a subscription. Representatives can pay for their creator."""
     target_user = body.for_user_id or user_id
     svc = PaymentService(session)
     sub = await svc.create_subscription(

@@ -14,6 +14,10 @@ export class SendOtpDto {
   @IsString()
   @IsOptional()
   locale?: string;
+
+  @IsString()
+  @IsOptional()
+  purpose?: string;
 }
 
 export class SendPasswordResetDto {

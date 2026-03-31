@@ -357,9 +357,16 @@ class PaymentService:
         or ``(None, 'failed')`` when Twilio provisioning failed.
         """
         sub = await self.repo.get_active_subscription(user_id)
+        logger.info(
+            "get_bridge_number user=%s sub=%s plan=%s bridge=%s",
+            user_id,
+            sub.id if sub else None,
+            sub.plan if sub else None,
+            sub.bridge_number if sub else None,
+        )
         if sub and sub.bridge_number:
             if sub.bridge_number.startswith("FAILED:"):
-                return None, "failed"
+                return None, "provisioning"  # Treat as retryable — telephony may retry
             return sub.bridge_number, "assigned"
         return None, "provisioning"
 

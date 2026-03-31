@@ -80,10 +80,11 @@ export class FeedService {
     // Sort by EdgeRank score with 1.5× boost for posts from followed accounts
     const followingIds = await this.followsService.getFollowingIds(userId);
     const followingSet = new Set(followingIds);
+    const viewerId = String(userId);
     posts.sort(
       (a, b) =>
-        this.computeEdgeRankScore(b, followingSet.has(b.authorId)) -
-        this.computeEdgeRankScore(a, followingSet.has(a.authorId)),
+        this.computeEdgeRankScore(b, followingSet.has(b.authorId), String(b.authorId) === viewerId) -
+        this.computeEdgeRankScore(a, followingSet.has(a.authorId), String(a.authorId) === viewerId),
     );
 
     // Tag each post with whether the viewer follows the author
@@ -187,10 +188,11 @@ export class FeedService {
     // Score with reels formula + 1.5× boost for posts from followed accounts
     const followingIds = await this.followsService.getFollowingIds(userId);
     const followingSet = new Set(followingIds);
+    const reelsViewerId = String(userId);
     posts.sort(
       (a, b) =>
-        this.computeReelScore(b, followingSet.has(b.authorId)) -
-        this.computeReelScore(a, followingSet.has(a.authorId)),
+        this.computeReelScore(b, followingSet.has(b.authorId), String(b.authorId) === reelsViewerId) -
+        this.computeReelScore(a, followingSet.has(a.authorId), String(a.authorId) === reelsViewerId),
     );
 
     // Tag each post with whether the viewer follows the author
@@ -280,7 +282,11 @@ export class FeedService {
       }),
     );
 
-    posts.sort((a, b) => this.computeReelScore(b) - this.computeReelScore(a));
+    const trendingViewerId = String(userId);
+    posts.sort((a, b) =>
+      this.computeReelScore(b, false, String(b.authorId) === trendingViewerId) -
+      this.computeReelScore(a, false, String(a.authorId) === trendingViewerId),
+    );
 
     // Tag each post with whether the viewer follows the author
     const followingIds = await this.followsService.getFollowingIds(userId);
@@ -546,27 +552,44 @@ export class FeedService {
   /**
    * EdgeRank score for home feed.
    * score = (likes×3 + comments×5 + shares×4 + reposts×2) × exp(-0.05 × hours)
+   *
+   * Author self-boost: own posts < 5 min get a large bonus so they stay
+   * near the top of the author's feed and don't sink immediately.
    */
-  private computeEdgeRankScore(post: FeedPostDto, fromFollowing = false): number {
+  private computeEdgeRankScore(post: FeedPostDto, fromFollowing = false, isOwnPost = false): number {
     const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
     const engagement = likesCount * 3 + commentsCount * 5 + sharesCount * 4 + repostsCount * 2;
     const ageMs = Date.now() - new Date(post.createdAt).getTime();
     const hours = ageMs / (1000 * 60 * 60);
+    const minutes = ageMs / (1000 * 60);
     const boost = fromFollowing ? 1.5 : 1.0;
-    return engagement * Math.exp(-0.05 * hours) * boost;
+    let score = engagement * Math.exp(-0.05 * hours) * boost;
+
+    if (isOwnPost && minutes < 5) {
+      score += 1000 * Math.exp(-0.5 * minutes);
+    }
+
+    return score;
   }
 
   /**
    * Reels FYP score — higher weight on shares and faster time decay.
    * score = (likes×3 + comments×4 + shares×5 + reposts×3) × exp(-0.08 × hours)
    */
-  private computeReelScore(post: FeedPostDto, fromFollowing = false): number {
+  private computeReelScore(post: FeedPostDto, fromFollowing = false, isOwnPost = false): number {
     const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
     const engagement = likesCount * 3 + commentsCount * 4 + sharesCount * 5 + repostsCount * 3;
     const ageMs = Date.now() - new Date(post.createdAt).getTime();
     const hours = ageMs / (1000 * 60 * 60);
+    const minutes = ageMs / (1000 * 60);
     const boost = fromFollowing ? 1.5 : 1.0;
-    return engagement * Math.exp(-0.08 * hours) * boost;
+    let score = engagement * Math.exp(-0.08 * hours) * boost;
+
+    if (isOwnPost && minutes < 5) {
+      score += 1000 * Math.exp(-0.5 * minutes);
+    }
+
+    return score;
   }
 
   private buildFeedPost(

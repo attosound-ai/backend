@@ -12,12 +12,16 @@ import {
 import { AuthGuard } from '../common/guards/auth.guard';
 import { CurrentUserId } from '../common/decorators/current-user.decorator';
 import { FeedService } from './feed.service';
+import { InteractionsService } from '../interactions/interactions.service';
 import { CreatePostDto, ExploreQueryDto, FeedQueryDto, ReelViewDto, ReelsQueryDto, UserPostsQueryDto } from './dto/feed.dto';
 
 @Controller('api/v1/posts')
 @UseGuards(AuthGuard)
 export class FeedController {
-  constructor(private readonly feedService: FeedService) {}
+  constructor(
+    private readonly feedService: FeedService,
+    private readonly interactionsService: InteractionsService,
+  ) {}
 
   @Get('feed')
   async getFeed(
@@ -134,6 +138,25 @@ export class FeedController {
       error: null,
       meta: { nextCursor: result.meta.nextCursor, hasMore: result.meta.hasMore },
     };
+  }
+
+  @Get(':id/interactions/:type')
+  async getInteractors(
+    @Param('id') contentId: string,
+    @Param('type') type: string,
+    @Query() query: { page?: number; limit?: number },
+  ) {
+    const validTypes = ['likes', 'reposts', 'shares'];
+    if (!validTypes.includes(type)) {
+      return { success: false, data: null, error: { code: 400, message: 'Invalid interaction type' } };
+    }
+    const result = await this.interactionsService.getInteractors(
+      contentId,
+      type as 'likes' | 'reposts' | 'shares',
+      Number(query.page) || 1,
+      Number(query.limit) || 20,
+    );
+    return { success: true, data: result.users, error: null, meta: { pagination: result.meta } };
   }
 
   @Get(':id')

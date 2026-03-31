@@ -133,6 +133,21 @@ export class NotificationsService {
     return result.count;
   }
 
+  async markReadByTypeAndActor(
+    userId: string,
+    type: string,
+    actorId: string,
+  ): Promise<number> {
+    const result = await this.prisma.notification.updateMany({
+      where: { recipientId: userId, type, actorId, isRead: false },
+      data: { isRead: true },
+    });
+    this.logger.debug(
+      `Marked ${result.count} '${type}' notifications from actor ${actorId} as read for user ${userId}`,
+    );
+    return result.count;
+  }
+
   async getUnreadCount(userId: string): Promise<number> {
     return this.prisma.notification.count({
       where: {

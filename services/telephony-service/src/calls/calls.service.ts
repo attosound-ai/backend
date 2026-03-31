@@ -246,7 +246,7 @@ export class CallsService {
   async upsertPhoneAssignment(data: {
     phoneNumber: string;
     userId: string;
-    artistName?: string;
+    creatorName?: string;
     subscriptionId?: string;
   }): Promise<PhoneNumberAssignment> {
     let assignment = await this.assignmentRepo.findOne({
@@ -255,14 +255,14 @@ export class CallsService {
 
     if (assignment) {
       assignment.userId = data.userId;
-      if (data.artistName) assignment.artistName = data.artistName;
+      if (data.creatorName) assignment.creatorName = data.creatorName;
       if (data.subscriptionId) assignment.subscriptionId = data.subscriptionId;
       assignment.status = "active";
     } else {
       assignment = this.assignmentRepo.create({
         phoneNumber: data.phoneNumber,
         userId: data.userId,
-        artistName: data.artistName || null,
+        creatorName: data.creatorName || null,
         subscriptionId: data.subscriptionId || null,
         status: "active",
       });

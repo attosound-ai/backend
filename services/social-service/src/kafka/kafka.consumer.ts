@@ -56,7 +56,12 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Kafka consumer connected");
 
       await this.consumer.subscribe({
-        topics: ["user.created", "content.published", "message.sent"],
+        topics: [
+          "user.created",
+          "content.published",
+          "message.sent",
+          "user.deleted",
+        ],
         fromBeginning: false,
       });
 
@@ -101,6 +106,9 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           break;
         case "message.sent":
           await this.handleMessageSent(data);
+          break;
+        case "user.deleted":
+          await this.handleUserDeleted(data);
           break;
         default:
           this.logger.warn(`Unhandled topic: ${topic}`);
@@ -247,5 +255,113 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       .catch((err) =>
         this.logger.error(`GetUser for push failed: ${err.message}`),
       );
+  }
+
+  /**
+   * user.deleted -> recalculate Redis counts for all posts the user interacted
+   * with, clean up follow graph, and delete feed caches.
+   *
+   * NOTE: Postgres rows are already deleted by user-service in a single
+   * transaction BEFORE this event is emitted. This handler only fixes the
+   * Redis caches that went stale because of those deletes.
+   */
+  private async handleUserDeleted(data: {
+    userIds: string[];
+  }): Promise<void> {
+    const userIds = data.userIds ?? [];
+    if (userIds.length === 0) return;
+
+    this.logger.log(`Processing user.deleted for users: ${userIds.join(", ")}`);
+
+    for (const userId of userIds) {
+      // 0. Delete all Postgres rows for this user
+      const [notifs, follows1, follows2, interactions, comments, bookmarks, reposts, reelViews] =
+        await Promise.all([
+          this.prisma.notification.deleteMany({
+            where: { OR: [{ recipientId: userId }, { actorId: userId }] },
+          }),
+          this.prisma.follow.deleteMany({ where: { followerId: userId } }),
+          this.prisma.follow.deleteMany({ where: { followingId: userId } }),
+          this.prisma.interaction.deleteMany({ where: { userId } }),
+          this.prisma.comment.deleteMany({ where: { userId } }),
+          this.prisma.bookmark.deleteMany({ where: { userId } }),
+          this.prisma.repost.deleteMany({ where: { userId } }),
+          this.prisma.reelView.deleteMany({ where: { userId } }),
+        ]);
+      this.logger.log(
+        `Deleted Postgres data for user ${userId}: ` +
+        `${notifs.count} notifs, ${follows1.count + follows2.count} follows, ` +
+        `${interactions.count} interactions, ${comments.count} comments, ` +
+        `${bookmarks.count} bookmarks, ${reposts.count} reposts, ${reelViews.count} reel views`,
+      );
+
+      // 2. Fix follow graph in Redis
+      const followingIds = await this.redis.getFollowerIds(userId);
+      const followerIds = await this.redis.getFollowingIds(userId);
+      for (const fid of followingIds) {
+        await this.redis.removeFollow(userId, fid);
+      }
+      for (const fid of followerIds) {
+        await this.redis.removeFollow(fid, userId);
+      }
+
+      // 3. Delete feed cache
+      await this.redis.del(`social:feed:${userId}`);
+      await this.redis.del(`social:count:posts:${userId}`);
+      await this.redis.del(`social:count:following:${userId}`);
+      await this.redis.del(`social:count:followers:${userId}`);
+
+      this.logger.log(`Cleaned up Redis for user ${userId}`);
+    }
+
+    // 4. Recalculate counts for ALL posts that still exist in interactions/comments
+    //    Since user rows are already deleted, the DB counts are now correct —
+    //    we just need to refresh Redis to match.
+    //    Scan all Redis count keys and recalculate from DB.
+    const client = this.redis.getClient();
+    const countTypes = ["likes", "comments", "shares", "reposts"];
+
+    for (const type of countTypes) {
+      const pattern = `social:count:${type}:*`;
+      let cursor = "0";
+
+      do {
+        const [nextCursor, keys] = await client.scan(
+          cursor,
+          "MATCH",
+          pattern,
+          "COUNT",
+          200,
+        );
+        cursor = nextCursor;
+
+        for (const key of keys) {
+          const contentId = key.replace(`social:count:${type}:`, "");
+          let dbCount: number;
+
+          if (type === "comments") {
+            dbCount = await this.prisma.comment.count({
+              where: { contentId },
+            });
+          } else {
+            const interactionType = type === "likes"
+              ? "LIKE"
+              : type === "shares"
+                ? "SHARE"
+                : "REPOST" // type guard not needed — only known types hit here
+            ;
+            dbCount = await this.prisma.interaction.count({
+              where: { contentId, type: interactionType as any },
+            });
+          }
+
+          await this.redis.setCount(type, contentId, dbCount);
+        }
+      } while (cursor !== "0");
+    }
+
+    this.logger.log(
+      `Redis counts recalculated after deleting users: ${userIds.join(", ")}`,
+    );
   }
 }

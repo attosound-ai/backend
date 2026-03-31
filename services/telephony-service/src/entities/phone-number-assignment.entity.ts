@@ -21,7 +21,7 @@ export class PhoneNumberAssignment {
   userId: string;
 
   @Column({ type: 'varchar', length: 100, nullable: true })
-  artistName: string | null;
+  creatorName: string | null;
 
   @Column({ type: 'varchar', length: 64, nullable: true })
   subscriptionId: string | null;

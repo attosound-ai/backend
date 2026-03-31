@@ -52,6 +52,9 @@ func (p *HttpEmailProvider) Send(destination, message, locale, emailTemplate str
 		"expiresMinutes": 10,
 		"locale":         locale,
 	}
+	if emailTemplate != "" && emailTemplate != "password-reset" {
+		payload["purpose"] = emailTemplate
+	}
 	jsonBody, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal email request: %w", err)

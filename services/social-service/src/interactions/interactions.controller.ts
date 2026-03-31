@@ -90,6 +90,27 @@ export class InteractionsController {
     };
   }
 
+  // ── Interactors (who liked/reposted/shared) ──
+
+  @Get(':id/interactions/:type')
+  async getInteractors(
+    @Param('id') contentId: string,
+    @Param('type') type: string,
+    @Query() query: InteractionPaginationDto,
+  ) {
+    const validTypes = ['likes', 'reposts', 'shares'];
+    if (!validTypes.includes(type)) {
+      return { success: false, data: null, error: { code: 400, message: 'Invalid interaction type' } };
+    }
+    const result = await this.interactionsService.getInteractors(
+      contentId,
+      type as 'likes' | 'reposts' | 'shares',
+      query.page || 1,
+      query.limit || 20,
+    );
+    return { success: true, data: result.users, error: null, meta: { pagination: result.meta } };
+  }
+
   // ── Bookmarks ──
 
   @Post(':id/bookmark')

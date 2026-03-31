@@ -153,12 +153,12 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID string, req *mod
 
 	// Representative identity fields — changing these revokes verification
 	repChanged := collectOptionalStringUpdates(updates, map[string]*string{
-		"artist_name":  req.ArtistName,
+		"creator_name":  req.CreatorName,
 		"inmate_number": req.InmateNumber,
-		"inmate_state": req.InmateState,
-		"relationship": req.Relationship,
-		"artist_email": req.ArtistEmail,
-		"artist_phone": req.ArtistPhone,
+		"inmate_state":  req.InmateState,
+		"relationship":  req.Relationship,
+		"creator_email": req.CreatorEmail,
+		"creator_phone": req.CreatorPhone,
 	})
 	if repChanged {
 		updates["profile_verified"] = false
@@ -237,7 +237,7 @@ func (s *UserService) GetContentPermissions(ctx context.Context, userID string) 
 
 	// Determine permissions based on role and verification
 	switch user.Role {
-	case models.RoleArtist:
+	case models.RoleCreator:
 		if user.ProfileVerified {
 			return true, []string{"audio", "image", "video"}, 500 * 1024 * 1024, nil // 500MB
 		}
@@ -254,4 +254,66 @@ func (s *UserService) GetContentPermissions(ctx context.Context, userID string) 
 // GetActivePushTokens returns active push tokens for a user.
 func (s *UserService) GetActivePushTokens(userID uint64) ([]models.PushToken, error) {
 	return s.repo.GetActivePushTokens(userID)
+}
+
+// DeleteAccount permanently removes a user and all associated data from
+// every Postgres table, then emits a Kafka event so non-Postgres stores
+// (MongoDB, Cassandra, Redis) can clean up asynchronously.
+func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool) error {
+	user, err := s.repo.FindByID(userID)
+	if err != nil || user == nil {
+		return errors.New("user not found")
+	}
+
+	userIDs := []uint64{userID}
+
+	if deleteLinked {
+		linked, err := s.repo.GetLinkedAccounts(
+			userID,
+			user.IsManagedAccount,
+			user.RepresentativeID,
+		)
+		if err != nil {
+			log.Printf("[USER] Warning: failed to fetch linked accounts for %d: %v", userID, err)
+		}
+		for _, u := range linked {
+			userIDs = append(userIDs, u.ID)
+		}
+		if len(userIDs) > 1 {
+			log.Printf("[USER] Including linked accounts in deletion: %v", userIDs)
+		}
+	}
+
+	// Single transaction: wipe all Postgres data
+	if err := s.repo.PurgeAllUserData(userIDs); err != nil {
+		log.Printf("[USER] Failed to purge data for users %v: %v", userIDs, err)
+		return errors.New("failed to delete account")
+	}
+
+	log.Printf("[USER] Purged Postgres data for users %v", userIDs)
+
+	// Emit Kafka event for async cleanup (MongoDB, Cassandra, Redis)
+	idStrs := make([]string, len(userIDs))
+	for i, id := range userIDs {
+		idStrs[i] = strconv.FormatUint(id, 10)
+	}
+	go func() {
+		eventData := map[string]interface{}{
+			"userIds": idStrs,
+		}
+		if err := s.producer.Publish(context.Background(), "user.deleted", idStrs[0], eventData); err != nil {
+			log.Printf("[USER] Failed to publish user.deleted event: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+// GetLinkedAccounts returns accounts linked to the given user.
+func (s *UserService) GetLinkedAccounts(userID uint64) ([]*models.User, error) {
+	user, err := s.repo.FindByID(userID)
+	if err != nil || user == nil {
+		return nil, nil
+	}
+	return s.repo.GetLinkedAccounts(userID, user.IsManagedAccount, user.RepresentativeID)
 }

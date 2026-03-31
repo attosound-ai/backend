@@ -13,7 +13,7 @@ defmodule ChatService.KafkaConsumer do
 
   @client_id :chat_service_kafka_consumer
   @group_id "chat-social-broadcast"
-  @topics ["interaction.created", "interaction.removed", "notification.trigger"]
+  @topics ["interaction.created", "interaction.removed", "notification.trigger", "user.deleted"]
 
   # Public API
 
@@ -153,6 +153,15 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
                 "new_notification",
                 %{"type" => type, "actor_id" => actor_id}
               )
+            end
+
+          "user.deleted" ->
+            data = payload["data"] || payload
+            user_ids = data["userIds"] || []
+            Logger.info("Deleting chat data for users: #{inspect(user_ids)}")
+
+            for uid <- user_ids do
+              ChatService.Conversations.ConversationService.delete_all_for_user(uid)
             end
 
           _ ->

@@ -99,7 +99,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     const userId = event.user_id;
     const subscriptionId = event.transaction_id || event.subscription_id;
-    const artistName = event.artist_name;
+    const creatorName = event.creator_name;
 
     if (!userId) {
       this.logger.warn("payment.completed event missing user_id");
@@ -110,7 +110,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       const phoneNumber = await this.numberProvisioning.assignNumberToUser(
         userId,
         subscriptionId || "",
-        artistName,
+        creatorName,
       );
       this.logger.log(
         "Number %s provisioned for user %s after payment",

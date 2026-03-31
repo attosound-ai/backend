@@ -7,7 +7,7 @@ interface UserCreatedEvent {
   username: string;
   email: string;
   displayName: string;
-  role: 'artist' | 'representative' | 'listener';
+  role: 'creator' | 'representative' | 'listener';
 }
 
 @Controller()

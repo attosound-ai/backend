@@ -47,6 +47,12 @@ export class FollowsController {
     };
   }
 
+  @Get(':id/stats')
+  async getStats(@Param('id') userId: string) {
+    const stats = await this.followsService.getStats(userId);
+    return { success: true, data: stats, error: null };
+  }
+
   @Get(':id/followers')
   async getFollowers(
     @Param('id') userId: string,
