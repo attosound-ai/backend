@@ -13,7 +13,7 @@ class CheckoutRequest(BaseModel):
     for_user_id: str | None = Field(
         default=None,
         alias="forUserId",
-        description="Optional: create checkout for this user (representative paying for artist)",
+        description="Optional: create checkout for this user (representative paying for creator)",
     )
 
 

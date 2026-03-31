@@ -200,8 +200,8 @@ func (r *UserRepository) UpdateCredentials2FA(userID uint64, enabled bool, metho
 		}).Error
 }
 
-// slugifyArtistName converts an artist name to a lowercase alphanumeric slug (max 20 chars).
-func slugifyArtistName(name string) string {
+// slugifyCreatorName converts a creator name to a lowercase alphanumeric slug (max 20 chars).
+func slugifyCreatorName(name string) string {
 	re := regexp.MustCompile(`[^a-z0-9]+`)
 	slug := re.ReplaceAllString(strings.ToLower(name), "_")
 	slug = strings.Trim(slug, "_")
@@ -209,17 +209,17 @@ func slugifyArtistName(name string) string {
 		slug = slug[:20]
 	}
 	if slug == "" {
-		slug = "artista"
+		slug = "creator"
 	}
 	return slug
 }
 
-// CreateManagedArtist creates a managed artist account linked to the given representative.
-// When artistFields is provided, creates a full account with real email, password, and credentials.
-// When artistFields is nil, falls back to auto-generated email/username (legacy behavior).
-func (r *UserRepository) CreateManagedArtist(
+// CreateManagedCreator creates a managed creator account linked to the given representative.
+// When creatorFields is provided, creates a full account with real email, password, and credentials.
+// When creatorFields is nil, falls back to auto-generated email/username (legacy behavior).
+func (r *UserRepository) CreateManagedCreator(
 	repUser *models.User,
-	artistFields *models.ManagedArtistFields,
+	creatorFields *models.ManagedCreatorFields,
 	passwordHash string,
 	inmateNumber, inmateState string,
 	consentToRecording bool,
@@ -228,34 +228,34 @@ func (r *UserRepository) CreateManagedArtist(
 
 	var username, displayName string
 	var emailPtr, phoneCountryCode, phoneNumber, avatar *string
-	var artistTypes, artistGenres []string
+	var creatorTypes, creatorGenres []string
 
-	if artistFields != nil {
-		trimmedEmail := strings.ToLower(strings.TrimSpace(artistFields.Email))
+	if creatorFields != nil {
+		trimmedEmail := strings.ToLower(strings.TrimSpace(creatorFields.Email))
 		if trimmedEmail != "" {
 			emailPtr = &trimmedEmail
 		}
-		username = strings.ToLower(artistFields.Username)
-		displayName = artistFields.DisplayName
-		phoneCountryCode = artistFields.PhoneCountryCode
-		phoneNumber = artistFields.PhoneNumber
-		avatar = artistFields.Avatar
-		artistTypes = artistFields.ArtistTypes
-		artistGenres = artistFields.ArtistGenres
+		username = strings.ToLower(creatorFields.Username)
+		displayName = creatorFields.DisplayName
+		phoneCountryCode = creatorFields.PhoneCountryCode
+		phoneNumber = creatorFields.PhoneNumber
+		avatar = creatorFields.Avatar
+		creatorTypes = creatorFields.CreatorTypes
+		creatorGenres = creatorFields.CreatorGenres
 	} else {
 		// Legacy fallback: auto-generate
-		legacyEmail := fmt.Sprintf("artist_%s_%d@managed.atto", inmateNumber, repUser.ID)
+		legacyEmail := fmt.Sprintf("creator_%s_%d@managed.atto", inmateNumber, repUser.ID)
 		emailPtr = &legacyEmail
-		slug := slugifyArtistName(displayName)
-		username = fmt.Sprintf("artist_%s_%04d", slug, rand.Intn(10000))
+		slug := slugifyCreatorName(displayName)
+		username = fmt.Sprintf("creator_%s_%04d", slug, rand.Intn(10000))
 		displayName = inmateNumber // best-effort fallback
 	}
 
-	artist := &models.User{
+	creator := &models.User{
 		Email:              emailPtr,
 		Username:           username,
 		DisplayName:        displayName,
-		Role:               models.RoleArtist,
+		Role:               models.RoleCreator,
 		IsManagedAccount:   true,
 		RepresentativeID:   &repID,
 		PhoneCountryCode:   phoneCountryCode,
@@ -264,30 +264,30 @@ func (r *UserRepository) CreateManagedArtist(
 		InmateNumber:       &inmateNumber,
 		InmateState:        &inmateState,
 		ConsentToRecording: &consentToRecording,
-		ArtistTypes:        artistTypes,
-		ArtistGenres:       artistGenres,
+		CreatorTypes:       creatorTypes,
+		CreatorGenres:      creatorGenres,
 		RegistrationStatus: "completed",
 	}
 
 	// If we have a real password, create user + credentials in a transaction
 	if passwordHash != "" {
 		creds := &models.UserCredentials{PasswordHash: passwordHash}
-		if err := r.CreateUserWithCredentials(artist, creds); err != nil {
-			return nil, fmt.Errorf("failed to create managed artist with credentials: %w", err)
+		if err := r.CreateUserWithCredentials(creator, creds); err != nil {
+			return nil, fmt.Errorf("failed to create managed creator with credentials: %w", err)
 		}
-		return artist, nil
+		return creator, nil
 	}
 
 	// Legacy: no credentials
-	if err := r.db.Create(artist).Error; err != nil {
-		return nil, fmt.Errorf("failed to create managed artist: %w", err)
+	if err := r.db.Create(creator).Error; err != nil {
+		return nil, fmt.Errorf("failed to create managed creator: %w", err)
 	}
-	return artist, nil
+	return creator, nil
 }
 
 // GetLinkedAccounts returns accounts linked to the caller.
 // If isManagedAccount is true, returns the representative via representativeID.
-// Otherwise returns all managed artists where representative_id = callerID.
+// Otherwise returns all managed creators where representative_id = callerID.
 func (r *UserRepository) GetLinkedAccounts(callerID uint64, isManagedAccount bool, representativeID *uint64) ([]*models.User, error) {
 	var users []*models.User
 	if isManagedAccount && representativeID != nil {
@@ -354,4 +354,108 @@ func (r *UserRepository) GetActivePushTokens(userID uint64) ([]models.PushToken,
 	var tokens []models.PushToken
 	err := r.db.Where("user_id = ? AND is_active = ?", userID, true).Find(&tokens).Error
 	return tokens, err
+}
+
+// ── Account Deletion ──
+// All methods accept a *gorm.DB (transaction) so the caller can wrap
+// everything in a single atomic commit.
+
+// DeleteUserRecord hard-deletes the user, credentials, and push tokens.
+func (r *UserRepository) DeleteUserRecord(tx *gorm.DB, userID uint64) error {
+	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.PushToken{}).Error; err != nil {
+		return fmt.Errorf("delete push_tokens: %w", err)
+	}
+	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.UserCredentials{}).Error; err != nil {
+		return fmt.Errorf("delete user_credentials: %w", err)
+	}
+	if err := tx.Unscoped().Where("id = ?", userID).Delete(&models.User{}).Error; err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+	return nil
+}
+
+// DeleteSocialData removes all social-service rows for a user (raw SQL
+// because these tables are not managed by the user-service GORM models).
+func (r *UserRepository) DeleteSocialData(tx *gorm.DB, userID string) error {
+	tables := []struct {
+		sql string
+	}{
+		{`DELETE FROM follows WHERE follower_id = ? OR following_id = ?`},
+		{`DELETE FROM interactions WHERE user_id = ?`},
+		{`DELETE FROM comments WHERE user_id = ?`},
+		{`DELETE FROM bookmarks WHERE user_id = ?`},
+		{`DELETE FROM reposts WHERE user_id = ?`},
+		{`DELETE FROM reel_views WHERE user_id = ?`},
+	}
+	for _, t := range tables {
+		if strings.Contains(t.sql, "OR") {
+			if err := tx.Exec(t.sql, userID, userID).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := tx.Exec(t.sql, userID).Error; err != nil {
+				return err
+			}
+		}
+	}
+	// Notifications reference two user columns
+	if err := tx.Exec(`DELETE FROM notifications WHERE recipient_id = ? OR actor_id = ?`, userID, userID).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeletePaymentData removes subscriptions and transactions for a user.
+func (r *UserRepository) DeletePaymentData(tx *gorm.DB, userID string) error {
+	if err := tx.Exec(`DELETE FROM subscriptions WHERE user_id = ?`, userID).Error; err != nil {
+		return fmt.Errorf("delete subscriptions: %w", err)
+	}
+	if err := tx.Exec(`DELETE FROM transactions WHERE user_id = ?`, userID).Error; err != nil {
+		return fmt.Errorf("delete transactions: %w", err)
+	}
+	return nil
+}
+
+// DeleteTelephonyData removes calls, phone assignments, projects, and related data.
+func (r *UserRepository) DeleteTelephonyData(tx *gorm.DB, userID string) error {
+	if err := tx.Exec(`DELETE FROM calls WHERE "userId" = ?`, userID).Error; err != nil {
+		return fmt.Errorf("delete calls: %w", err)
+	}
+	if err := tx.Exec(`DELETE FROM phone_number_assignments WHERE "userId" = ?`, userID).Error; err != nil {
+		return fmt.Errorf("delete phone_number_assignments: %w", err)
+	}
+	// Delete project children first, then projects
+	if err := tx.Exec(`DELETE FROM audio_segments WHERE "projectId"::text IN (SELECT id::text FROM projects WHERE "userId" = ?)`, userID).Error; err != nil {
+		return fmt.Errorf("delete audio_segments: %w", err)
+	}
+	if err := tx.Exec(`DELETE FROM timeline_clips WHERE "projectId"::text IN (SELECT id::text FROM projects WHERE "userId" = ?)`, userID).Error; err != nil {
+		return fmt.Errorf("delete timeline_clips: %w", err)
+	}
+	if err := tx.Exec(`DELETE FROM projects WHERE "userId" = ?`, userID).Error; err != nil {
+		return fmt.Errorf("delete projects: %w", err)
+	}
+	return nil
+}
+
+// PurgeAllUserData deletes all data for a list of user IDs in a single transaction.
+func (r *UserRepository) PurgeAllUserData(userIDs []uint64) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		for _, uid := range userIDs {
+			idStr := fmt.Sprintf("%d", uid)
+
+			if err := r.DeleteSocialData(tx, idStr); err != nil {
+				return fmt.Errorf("social data (user %d): %w", uid, err)
+			}
+			if err := r.DeletePaymentData(tx, idStr); err != nil {
+				return fmt.Errorf("payment data (user %d): %w", uid, err)
+			}
+			if err := r.DeleteTelephonyData(tx, idStr); err != nil {
+				return fmt.Errorf("telephony data (user %d): %w", uid, err)
+			}
+			if err := r.DeleteUserRecord(tx, uid); err != nil {
+				return fmt.Errorf("user record (user %d): %w", uid, err)
+			}
+		}
+		return nil
+	})
 }

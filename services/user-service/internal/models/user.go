@@ -12,7 +12,7 @@ import (
 type Role string
 
 const (
-	RoleArtist         Role = "artist"
+	RoleCreator        Role = "creator"
 	RoleRepresentative Role = "representative"
 	RoleListener       Role = "listener"
 )
@@ -29,18 +29,18 @@ type User struct {
 	Bio                *string        `gorm:"size:1000" json:"bio,omitempty"`
 	Role               Role           `gorm:"type:varchar(20);not null;default:'listener'" json:"role"`
 	InmateNumber       *string        `gorm:"size:50" json:"inmateNumber,omitempty"`
-	ArtistName         *string        `gorm:"size:100" json:"artistName,omitempty"`
+	CreatorName        *string        `gorm:"size:100" json:"creatorName,omitempty"`
 	InmateState        *string        `gorm:"size:50" json:"inmateState,omitempty"`
 	Relationship       *string        `gorm:"size:50" json:"relationship,omitempty"`
 	ConsentToRecording *bool          `gorm:"default:false" json:"consentToRecording,omitempty"`
-	ArtistEmail        *string        `gorm:"size:255" json:"artistEmail,omitempty"`
-	ArtistPhone        *string        `gorm:"size:20" json:"artistPhone,omitempty"`
+	CreatorEmail       *string        `gorm:"size:255" json:"creatorEmail,omitempty"`
+	CreatorPhone       *string        `gorm:"size:20" json:"creatorPhone,omitempty"`
 	ProfileVerified    bool           `gorm:"default:false" json:"profileVerified"`
 	RegistrationStatus string         `gorm:"type:varchar(20);not null;default:'completed'" json:"registrationStatus"`
 	RepresentativeID   *uint64        `json:"representativeId,omitempty"`
 	IsManagedAccount   bool           `gorm:"default:false" json:"isManagedAccount"`
-	ArtistTypes        pq.StringArray `gorm:"type:text[];column:artist_types" json:"artistTypes,omitempty"`
-	ArtistGenres       pq.StringArray `gorm:"type:text[];column:artist_genres" json:"artistGenres,omitempty"`
+	CreatorTypes       pq.StringArray `gorm:"type:text[];column:creator_types" json:"creatorTypes,omitempty"`
+	CreatorGenres      pq.StringArray `gorm:"type:text[];column:creator_genres" json:"creatorGenres,omitempty"`
 	DateOfBirth        *time.Time     `gorm:"type:date" json:"dateOfBirth,omitempty"`
 	FollowersCount     int64          `gorm:"default:0" json:"followersCount"`
 	FollowingCount     int64          `gorm:"default:0" json:"followingCount"`

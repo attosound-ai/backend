@@ -150,18 +150,28 @@ export class EmailService {
     switch (type) {
       case "otp": {
         const locale = (data.locale as string) || "en";
+        const purpose = (data.purpose as string) || undefined;
         const html = await render(
           createElement(OtpEmail, {
             code: data.code as string,
             expiresMinutes: data.expiresMinutes as number,
             locale,
+            purpose,
           }),
         );
-        const subjects: Record<string, string> = {
-          en: "Your Atto verification code",
-          es: "Tu código de verificación de Atto",
-          "pt-BR": "Seu código de verificação do Atto",
+        const subjectMap: Record<string, Record<string, string>> = {
+          default: {
+            en: "Your Atto verification code",
+            es: "Tu código de verificación de Atto",
+            "pt-BR": "Seu código de verificação do Atto",
+          },
+          delete_account: {
+            en: "Confirm account deletion",
+            es: "Confirma la eliminación de tu cuenta",
+            "pt-BR": "Confirme a exclusão da sua conta",
+          },
         };
+        const subjects = subjectMap[purpose ?? "default"] ?? subjectMap.default;
         const subject =
           subjects[locale] ??
           (locale.startsWith("pt") ? subjects["pt-BR"] : subjects.en);
@@ -171,7 +181,7 @@ export class EmailService {
         const html = await render(
           createElement(WelcomeEmail, {
             name: data.name as string,
-            role: data.role as "artist" | "representative" | "listener",
+            role: data.role as "creator" | "representative" | "listener",
             appDeeplink,
           }),
         );

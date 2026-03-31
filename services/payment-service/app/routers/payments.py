@@ -162,14 +162,17 @@ async def confirm_payment(
             detail=f"Payment not completed (status: {pi.status})",
         )
 
-    plan_id = (pi.metadata or {}).get("plan_id", "record")
-    target_user = (pi.metadata or {}).get("user_id", user_id)
+    # StripeObject doesn't support dict() — use to_dict_recursive() or bracket access
+    raw_meta = pi.metadata
+    plan_id = raw_meta["plan_id"] if raw_meta and "plan_id" in raw_meta else "record"
+    target_user = raw_meta["user_id"] if raw_meta and "user_id" in raw_meta else user_id
     amount = Decimal(pi.amount) / Decimal(100)
 
     svc = PaymentService(session)
 
-    # Check if a PAID subscription already exists (idempotent — webhook may have fired too).
-    # Skip free-tier subscriptions since we're upgrading to a paid plan.
+    # Create subscription + publish Kafka event for bridge number provisioning.
+    # If a paid subscription already exists, re-publish the event to retry provisioning
+    # (handles cases where telephony-service failed on the first attempt).
     existing = await svc.get_active_subscription(target_user)
     if not existing or existing.plan == "connect_free":
         await svc.create_subscription_from_webhook(
@@ -177,6 +180,20 @@ async def confirm_payment(
             plan_id=plan_id,
             stripe_payment_intent_id=body.payment_intent_id,
             amount=amount,
+        )
+    else:
+        # Subscription already exists — re-publish event to ensure bridge number provisioning
+        from app.kafka.producer import publish_event
+        await publish_event(
+            "payment.completed",
+            {
+                "event_type": "payment.completed",
+                "user_id": target_user,
+                "amount": str(amount),
+                "currency": "USD",
+                "type": "subscription",
+                "stripe_payment_intent_id": body.payment_intent_id,
+            },
         )
 
     bridge_number, status = await svc.get_bridge_number(target_user)
@@ -197,7 +214,7 @@ async def get_bridge_number(
 ) -> ApiResponse:
     """Return the user's assigned bridge phone number.
 
-    Accepts optional `for_user_id` query param to check a linked artist's
+    Accepts optional `for_user_id` query param to check a linked creator's
     bridge number (used by representatives).
 
     Returns status='provisioning' while pending, 'assigned' when ready,

@@ -4,12 +4,12 @@ import { Layout } from "./base/layout";
 
 interface WelcomeEmailProps {
   name: string;
-  role: "artist" | "representative" | "listener";
+  role: "creator" | "representative" | "listener";
   appDeeplink?: string;
 }
 
 const roleContent = {
-  artist: {
+  creator: {
     greeting: "¡Tu música merece ser escuchada!",
     description:
       "Ya puedes subir tu música, conectar con tu audiencia y hacer crecer tu carrera desde Atto.",

@@ -14,7 +14,7 @@ class CreateSubscriptionRequest(BaseModel):
     for_user_id: str | None = Field(
         default=None,
         alias="forUserId",
-        description="Optional: create subscription for this user (representative paying for artist)",
+        description="Optional: create subscription for this user (representative paying for creator)",
     )
 
 
@@ -30,7 +30,7 @@ class UpgradeSubscriptionRequest(BaseModel):
     for_user_id: str | None = Field(
         default=None,
         alias="forUserId",
-        description="Optional: upgrade subscription for this user (representative paying for artist)",
+        description="Optional: upgrade subscription for this user (representative paying for creator)",
     )
 
 

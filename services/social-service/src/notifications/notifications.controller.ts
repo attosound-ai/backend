@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   HttpCode,
@@ -40,6 +41,24 @@ export class NotificationsController {
   @HttpCode(HttpStatus.OK)
   async markAllRead(@CurrentUserId() userId: string) {
     const count = await this.notificationsService.markAllRead(userId);
+    return {
+      success: true,
+      data: { message: `${count} notifications marked as read` },
+      error: null,
+    };
+  }
+
+  @Patch("read-by-actor")
+  @HttpCode(HttpStatus.OK)
+  async markReadByActor(
+    @CurrentUserId() userId: string,
+    @Body() body: { type: string; actorId: string },
+  ) {
+    const count = await this.notificationsService.markReadByTypeAndActor(
+      userId,
+      body.type,
+      body.actorId,
+    );
     return {
       success: true,
       data: { message: `${count} notifications marked as read` },

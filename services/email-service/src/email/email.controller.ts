@@ -24,6 +24,7 @@ export class EmailController {
       code: dto.code,
       expiresMinutes: dto.expiresMinutes,
       locale: dto.locale || "en",
+      purpose: dto.purpose,
     });
     return { success: true };
   }

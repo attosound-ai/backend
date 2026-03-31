@@ -36,7 +36,7 @@ export class NumberProvisioningService {
   async assignNumberToUser(
     userId: string,
     subscriptionId: string,
-    artistName?: string,
+    creatorName?: string,
   ): Promise<string> {
     // Idempotency check (outside transaction — read-only, safe)
     const existing = await this.numberRepo.findOne({
@@ -100,7 +100,7 @@ export class NumberProvisioningService {
         provisioned.phoneNumber,
         userId,
         subscriptionId,
-        artistName,
+        creatorName,
       );
 
       await queryRunner.commitTransaction();
@@ -273,7 +273,7 @@ export class NumberProvisioningService {
     phoneNumber: string,
     userId: string,
     subscriptionId: string,
-    artistName?: string,
+    creatorName?: string,
   ): Promise<void> {
     let assignment = await queryRunner.manager.findOne(PhoneNumberAssignment, {
       where: { phoneNumber },
@@ -282,14 +282,14 @@ export class NumberProvisioningService {
     if (assignment) {
       assignment.userId = userId;
       assignment.subscriptionId = subscriptionId;
-      if (artistName) assignment.artistName = artistName;
+      if (creatorName) assignment.creatorName = creatorName;
       assignment.status = "active";
     } else {
       assignment = queryRunner.manager.create(PhoneNumberAssignment, {
         phoneNumber,
         userId,
         subscriptionId,
-        artistName: artistName || null,
+        creatorName: creatorName || null,
         status: "active",
       });
     }

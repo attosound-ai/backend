@@ -492,4 +492,46 @@ export class InteractionsService {
 
     return { likesCount, commentsCount, sharesCount, repostsCount };
   }
+
+  async getInteractors(
+    contentId: string,
+    type: 'likes' | 'reposts' | 'shares',
+    page: number,
+    limit: number,
+  ) {
+    const skip = (page - 1) * limit;
+    let userIds: string[];
+    let total: number;
+
+    if (type === 'reposts') {
+      [userIds, total] = await Promise.all([
+        this.prisma.repost
+          .findMany({ where: { contentId }, skip, take: limit, orderBy: { createdAt: 'desc' }, select: { userId: true } })
+          .then((rows) => rows.map((r) => r.userId)),
+        this.prisma.repost.count({ where: { contentId } }),
+      ]);
+    } else {
+      const interactionType = type === 'likes' ? 'LIKE' : 'SHARE';
+      [userIds, total] = await Promise.all([
+        this.prisma.interaction
+          .findMany({ where: { contentId, type: interactionType as any }, skip, take: limit, orderBy: { createdAt: 'desc' }, select: { userId: true } })
+          .then((rows) => rows.map((r) => r.userId)),
+        this.prisma.interaction.count({ where: { contentId, type: interactionType as any } }),
+      ]);
+    }
+
+    const users = userIds.length > 0
+      ? await this.grpcClients.getUsersBatch(userIds)
+      : [];
+
+    return {
+      users: users.map((u) => ({
+        id: u.id,
+        username: u.username,
+        displayName: u.display_name || u.username,
+        avatar: u.avatar || null,
+      })),
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  }
 }

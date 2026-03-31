@@ -55,7 +55,7 @@ func main() {
 	inmateService := services.NewInmateService()
 
 	authHandler := handlers.NewAuthHandler(authService)
-	userHandler := handlers.NewUserHandler(userService)
+	userHandler := handlers.NewUserHandler(userService, cfg.OTPServiceURL)
 	verificationHandler := handlers.NewVerificationHandler(userService, cfg.OTPServiceURL)
 	inmateHandler := handlers.NewInmateHandler(inmateService)
 	pushTokenHandler := handlers.NewPushTokenHandler(repo)
@@ -118,6 +118,7 @@ func main() {
 	users.Post("/me/verification/verify", middleware.RequireAuth(jwtMgr), verificationHandler.VerifyOTP)
 	users.Post("/me/push-token", middleware.RequireAuth(jwtMgr), pushTokenHandler.RegisterToken)
 	users.Delete("/me/push-token", middleware.RequireAuth(jwtMgr), pushTokenHandler.UnregisterToken)
+	users.Delete("/me/account", middleware.RequireAuth(jwtMgr), userHandler.DeleteAccount)
 
 	// Inmate lookup (public)
 	users.Get("/inmates/lookup", inmateHandler.LookupInmate)

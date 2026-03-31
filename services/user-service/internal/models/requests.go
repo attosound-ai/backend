@@ -1,8 +1,8 @@
 package models
 
-// RepresentativeFields holds info about the artist a representative manages.
+// RepresentativeFields holds info about the creator a representative manages.
 type RepresentativeFields struct {
-	ArtistName         string `json:"artistName"`
+	CreatorName        string `json:"creatorName"`
 	InmateState        string `json:"inmateState"`
 	Relationship       string `json:"relationship"`
 	ConsentToRecording bool   `json:"consentToRecording"`
@@ -14,7 +14,7 @@ type RegisterRequest struct {
 	Email                *string               `json:"email,omitempty" validate:"omitempty,email"`
 	Password             string                `json:"password" validate:"required,min=8"`
 	DisplayName          string                `json:"displayName" validate:"required,min=1,max=100"`
-	Role                 string                `json:"role" validate:"required,oneof=artist representative listener"`
+	Role                 string                `json:"role" validate:"required,oneof=creator representative listener"`
 	PhoneCountryCode     *string               `json:"phoneCountryCode,omitempty"`
 	PhoneNumber          *string               `json:"phoneNumber,omitempty"`
 	InmateNumber         *string               `json:"inmateNumber,omitempty"`
@@ -32,8 +32,8 @@ type PreRegisterRequest struct {
 	DateOfBirth      *string `json:"dateOfBirth,omitempty"`
 }
 
-// ManagedArtistFields holds the account details for creating a real artist account.
-type ManagedArtistFields struct {
+// ManagedCreatorFields holds the account details for creating a real creator account.
+type ManagedCreatorFields struct {
 	Email            string  `json:"email" validate:"required,email"`
 	Password         string  `json:"password" validate:"required,min=8"`
 	Username         string  `json:"username" validate:"required,min=3,max=50"`
@@ -41,16 +41,16 @@ type ManagedArtistFields struct {
 	PhoneCountryCode *string  `json:"phoneCountryCode,omitempty"`
 	PhoneNumber      *string  `json:"phoneNumber,omitempty"`
 	Avatar           *string  `json:"avatar,omitempty"`
-	ArtistTypes      []string `json:"artistTypes,omitempty"`
-	ArtistGenres     []string `json:"artistGenres,omitempty"`
+	CreatorTypes     []string `json:"creatorTypes,omitempty"`
+	CreatorGenres    []string `json:"creatorGenres,omitempty"`
 }
 
 // CompleteRegistrationRequest finalizes registration with role and optional representative fields.
 type CompleteRegistrationRequest struct {
-	Role                 string                `json:"role" validate:"required,oneof=artist representative listener"`
+	Role                 string                `json:"role" validate:"required,oneof=creator representative listener"`
 	InmateNumber         *string               `json:"inmateNumber,omitempty"`
 	RepresentativeFields *RepresentativeFields `json:"representativeFields,omitempty"`
-	ManagedArtistFields  *ManagedArtistFields  `json:"managedArtistFields,omitempty"`
+	ManagedCreatorFields *ManagedCreatorFields  `json:"managedCreatorFields,omitempty"`
 }
 
 // UpdateProfileRequest is the DTO for updating user profile fields.
@@ -59,13 +59,13 @@ type UpdateProfileRequest struct {
 	Avatar      *string `json:"avatar,omitempty"`
 	Bio         *string `json:"bio,omitempty"`
 	Username    *string `json:"username,omitempty"`
-	// Representative fields (editable from Edit Artist Contact screen)
-	ArtistName   *string `json:"artistName,omitempty"`
+	// Representative fields (editable from Edit Creator Contact screen)
+	CreatorName  *string `json:"creatorName,omitempty"`
 	InmateNumber *string `json:"inmateNumber,omitempty"`
 	InmateState  *string `json:"inmateState,omitempty"`
 	Relationship *string `json:"relationship,omitempty"`
-	ArtistEmail  *string `json:"artistEmail,omitempty"`
-	ArtistPhone  *string `json:"artistPhone,omitempty"`
+	CreatorEmail *string `json:"creatorEmail,omitempty"`
+	CreatorPhone *string `json:"creatorPhone,omitempty"`
 }
 
 // LoginRequest is the DTO for user login.
@@ -114,7 +114,7 @@ type LinkedAccountPayload struct {
 }
 
 // CompleteRegistrationResponse extends AuthResponse with an optional linked account.
-// When a representative registers, a managed artist account is also created and returned here.
+// When a representative registers, a managed creator account is also created and returned here.
 type CompleteRegistrationResponse struct {
 	User          *UserProfile          `json:"user"`
 	Tokens        *TokenPair            `json:"tokens"`
@@ -133,14 +133,14 @@ type UserProfile struct {
 	Bio                *string `json:"bio,omitempty"`
 	Role               string  `json:"role"`
 	InmateNumber       *string `json:"inmateNumber,omitempty"`
-	ArtistName         *string `json:"artistName,omitempty"`
+	CreatorName        *string `json:"creatorName,omitempty"`
 	InmateState        *string `json:"inmateState,omitempty"`
 	Relationship       *string `json:"relationship,omitempty"`
 	ConsentToRecording *bool   `json:"consentToRecording,omitempty"`
-	ArtistEmail        *string `json:"artistEmail,omitempty"`
-	ArtistPhone        *string  `json:"artistPhone,omitempty"`
-	ArtistTypes        []string `json:"artistTypes,omitempty"`
-	ArtistGenres       []string `json:"artistGenres,omitempty"`
+	CreatorEmail       *string `json:"creatorEmail,omitempty"`
+	CreatorPhone       *string  `json:"creatorPhone,omitempty"`
+	CreatorTypes       []string `json:"creatorTypes,omitempty"`
+	CreatorGenres      []string `json:"creatorGenres,omitempty"`
 	DateOfBirth        *string  `json:"dateOfBirth,omitempty"`
 	ProfileVerified    bool     `json:"profileVerified"`
 	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
@@ -191,13 +191,13 @@ func strVal(s *string) string {
 }
 
 // effectiveDisplayName returns the best available display name for a user.
-// Falls back: DisplayName → ArtistName → Username.
+// Falls back: DisplayName → CreatorName → Username.
 func (u *User) effectiveDisplayName() string {
 	if u.DisplayName != "" {
 		return u.DisplayName
 	}
-	if u.ArtistName != nil && *u.ArtistName != "" {
-		return *u.ArtistName
+	if u.CreatorName != nil && *u.CreatorName != "" {
+		return *u.CreatorName
 	}
 	return u.Username
 }
@@ -215,14 +215,14 @@ func (u *User) ToProfile() *UserProfile {
 		Bio:                u.Bio,
 		Role:               string(u.Role),
 		InmateNumber:       u.InmateNumber,
-		ArtistName:         u.ArtistName,
+		CreatorName:        u.CreatorName,
 		InmateState:        u.InmateState,
 		Relationship:       u.Relationship,
 		ConsentToRecording: u.ConsentToRecording,
-		ArtistEmail:        u.ArtistEmail,
-		ArtistPhone:        u.ArtistPhone,
-		ArtistTypes:        u.ArtistTypes,
-		ArtistGenres:       u.ArtistGenres,
+		CreatorEmail:       u.CreatorEmail,
+		CreatorPhone:       u.CreatorPhone,
+		CreatorTypes:       u.CreatorTypes,
+		CreatorGenres:      u.CreatorGenres,
 		ProfileVerified:    u.ProfileVerified,
 		RegistrationStatus: u.RegistrationStatus,
 		FollowersCount:     u.FollowersCount,

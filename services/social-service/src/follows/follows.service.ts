@@ -24,6 +24,15 @@ export class FollowsService {
     private readonly pushService: PushService,
   ) {}
 
+  async getStats(userId: string): Promise<{ followersCount: number; followingCount: number; postsCount: number }> {
+    const [followersCount, followingCount, postsCount] = await Promise.all([
+      this.prisma.follow.count({ where: { followingId: userId } }),
+      this.prisma.follow.count({ where: { followerId: userId } }),
+      this.redis.getCount('posts', userId),
+    ]);
+    return { followersCount, followingCount, postsCount };
+  }
+
   async follow(followerId: string, followingId: string): Promise<void> {
     if (followerId === followingId) {
       throw new BadRequestException("Cannot follow yourself");

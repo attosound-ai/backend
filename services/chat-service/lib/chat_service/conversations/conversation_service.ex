@@ -371,4 +371,52 @@ defmodule ChatService.Conversations.ConversationService do
 
     Repo.execute_prepared(insert_query, insert_params)
   end
+
+  @doc """
+  Delete all conversations and their messages for a user (account deletion).
+  """
+  def delete_all_for_user(user_id) do
+    # Get all conversations + participant_ids for this user
+    query = """
+    SELECT conversation_id, participant_id FROM conversations WHERE user_id = ?
+    """
+
+    params = %{"user_id" => {"text", user_id}}
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, result} ->
+        rows = result["rows"] || []
+
+        for row <- rows do
+          conv_id = row["conversation_id"]
+          participant_id = row["participant_id"]
+
+          if conv_id do
+            # Delete messages for this conversation
+            delete_msgs = "DELETE FROM messages WHERE conversation_id = ?"
+            Repo.execute_prepared(delete_msgs, %{"conversation_id" => {"uuid", conv_id}})
+
+            # Delete the other participant's copy of this conversation
+            if participant_id do
+              delete_other = "DELETE FROM conversations WHERE user_id = ? AND conversation_id = ?"
+              Repo.execute_prepared(delete_other, %{
+                "user_id" => {"text", participant_id},
+                "conversation_id" => {"uuid", conv_id}
+              })
+            end
+          end
+        end
+
+        # Delete all conversations for the deleted user
+        delete_convs = "DELETE FROM conversations WHERE user_id = ?"
+        Repo.execute_prepared(delete_convs, %{"user_id" => {"text", user_id}})
+
+        Logger.info("Deleted chat data for user #{user_id}: #{length(rows)} conversations (both sides)")
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Failed to delete chat data for user #{user_id}: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
 end
