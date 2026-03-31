@@ -27,7 +27,7 @@ services:
     routes:
       - name: user-social-routes
         paths:
-          - ~/api/v1/users/[^/]+/(follow|followers|following)
+          - ~/api/v1/users/[^/]+/(follow|followers|following|stats)
         strip_path: false
         methods:
           - GET
