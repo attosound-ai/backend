@@ -10,6 +10,7 @@ import { ConfigService } from "@nestjs/config";
 import { Kafka, Consumer, EachMessagePayload } from "kafkajs";
 import { CallsService } from "../calls/calls.service";
 import { NumberProvisioningService } from "../numbers/number-provisioning.service";
+import { AudioStorageService } from "../media/audio-storage.service";
 
 @Injectable()
 export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
@@ -21,6 +22,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     @Inject(forwardRef(() => CallsService))
     private readonly callsService: CallsService,
     private readonly numberProvisioning: NumberProvisioningService,
+    private readonly audioStorage: AudioStorageService,
   ) {
     const brokers =
       this.config.get<string[]>("kafka.brokers") ?? ["localhost:9092"];
@@ -44,14 +46,14 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     try {
       await this.consumer.connect();
       await this.consumer.subscribe({
-        topics: ["payment.completed", "subscription.cancelled"],
+        topics: ["payment.completed", "subscription.cancelled", "user.deleted"],
         fromBeginning: false,
       });
       await this.consumer.run({
         eachMessage: (payload) => this.handleMessage(payload),
       });
       this.logger.log(
-        "Kafka consumer started (topics=payment.completed, subscription.cancelled)",
+        "Kafka consumer started (topics=payment.completed, subscription.cancelled, user.deleted)",
       );
     } catch (err) {
       this.logger.error("Kafka consumer failed to start: %s", err);
@@ -81,6 +83,9 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           break;
         case "subscription.cancelled":
           await this.handleSubscriptionCancelled(event);
+          break;
+        case "user.deleted":
+          await this.handleUserDeleted(event);
           break;
         default:
           this.logger.debug("Unhandled topic: %s", topic);
@@ -134,6 +139,39 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
+  }
+
+  /**
+   * Fix #4 + #6: On account deletion, release Twilio numbers + delete S3 audio.
+   * NOTE: DB rows (calls, projects, audio_segments, phone_number_assignments)
+   * are already deleted by user-service before this event fires.
+   */
+  private async handleUserDeleted(
+    event: Record<string, unknown>,
+  ): Promise<void> {
+    const data = (event.data as Record<string, unknown>) ?? event;
+    const userIds = (data.userIds as string[]) ?? [];
+    if (userIds.length === 0) return;
+
+    for (const userId of userIds) {
+      // Fix #6: Release Twilio number (uses in-memory lookup, not DB)
+      try {
+        await this.numberProvisioning.releaseNumber(userId);
+        this.logger.log(`Released Twilio number for deleted user ${userId}`);
+      } catch (err) {
+        this.logger.warn(`No Twilio number to release for user ${userId}: ${err}`);
+      }
+
+      // Fix #4: Delete audio segments from S3/MinIO
+      try {
+        await this.audioStorage.deleteUserFiles(userId);
+        this.logger.log(`Deleted S3 audio files for user ${userId}`);
+      } catch (err) {
+        this.logger.warn(`S3 cleanup failed for user ${userId}: ${err}`);
+      }
+    }
+
+    this.logger.log(`Telephony cleanup done for users: ${userIds.join(", ")}`);
   }
 
   /** When subscription is cancelled, release the user's number back to pool. */

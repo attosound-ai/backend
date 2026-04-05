@@ -66,6 +66,17 @@ type UpdateProfileRequest struct {
 	Relationship *string `json:"relationship,omitempty"`
 	CreatorEmail *string `json:"creatorEmail,omitempty"`
 	CreatorPhone *string `json:"creatorPhone,omitempty"`
+	// Social media links + extended bio
+	SocialInstagram  *string `json:"socialInstagram,omitempty"`
+	SocialTiktok     *string `json:"socialTiktok,omitempty"`
+	SocialYoutube    *string `json:"socialYoutube,omitempty"`
+	SocialSoundcloud *string `json:"socialSoundcloud,omitempty"`
+	SocialSpotify    *string `json:"socialSpotify,omitempty"`
+	SocialTwitter    *string `json:"socialTwitter,omitempty"`
+	Website          *string `json:"website,omitempty"`
+	Location         *string `json:"location,omitempty"`
+	RecordLabel      *string `json:"recordLabel,omitempty"`
+	BookingEmail     *string `json:"bookingEmail,omitempty"`
 }
 
 // LoginRequest is the DTO for user login.
@@ -142,6 +153,17 @@ type UserProfile struct {
 	CreatorTypes       []string `json:"creatorTypes,omitempty"`
 	CreatorGenres      []string `json:"creatorGenres,omitempty"`
 	DateOfBirth        *string  `json:"dateOfBirth,omitempty"`
+	// Social media links + extended bio
+	SocialInstagram  *string `json:"socialInstagram,omitempty"`
+	SocialTiktok     *string `json:"socialTiktok,omitempty"`
+	SocialYoutube    *string `json:"socialYoutube,omitempty"`
+	SocialSoundcloud *string `json:"socialSoundcloud,omitempty"`
+	SocialSpotify    *string `json:"socialSpotify,omitempty"`
+	SocialTwitter    *string `json:"socialTwitter,omitempty"`
+	Website          *string `json:"website,omitempty"`
+	Location         *string `json:"location,omitempty"`
+	RecordLabel      *string `json:"recordLabel,omitempty"`
+	BookingEmail     *string `json:"bookingEmail,omitempty"`
 	ProfileVerified    bool     `json:"profileVerified"`
 	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
 	TwoFactorMethod    string `json:"twoFactorMethod"`
@@ -223,6 +245,16 @@ func (u *User) ToProfile() *UserProfile {
 		CreatorPhone:       u.CreatorPhone,
 		CreatorTypes:       u.CreatorTypes,
 		CreatorGenres:      u.CreatorGenres,
+		SocialInstagram:   u.SocialInstagram,
+		SocialTiktok:      u.SocialTiktok,
+		SocialYoutube:     u.SocialYoutube,
+		SocialSoundcloud:  u.SocialSoundcloud,
+		SocialSpotify:     u.SocialSpotify,
+		SocialTwitter:     u.SocialTwitter,
+		Website:           u.Website,
+		Location:          u.Location,
+		RecordLabel:       u.RecordLabel,
+		BookingEmail:      u.BookingEmail,
 		ProfileVerified:    u.ProfileVerified,
 		RegistrationStatus: u.RegistrationStatus,
 		FollowersCount:     u.FollowersCount,

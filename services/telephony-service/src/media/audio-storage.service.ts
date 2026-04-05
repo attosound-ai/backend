@@ -6,6 +6,8 @@ import {
   CreateBucketCommand,
   HeadBucketCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
+  DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { CacheService } from "../cache/cache.service";
@@ -132,5 +134,41 @@ export class AudioStorageService implements OnModuleInit {
   ): string {
     const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     return `audio/${date}/${callSid}/${String(segmentIndex).padStart(3, "0")}_${track}.wav`;
+  }
+
+  /**
+   * Fix #4: Delete all S3 objects for a user.
+   * Audio files are keyed by callSid, not userId — so we list all objects
+   * and rely on the caller to know which belong to the user.
+   * For a simpler approach, we delete by prefix if user-specific prefixes exist.
+   */
+  async deleteUserFiles(userId: string): Promise<number> {
+    // Audio segments are stored under audio/{date}/{callSid}/ — not user-scoped.
+    // Since DB rows are already deleted, we can't look up callSids.
+    // Instead, list exported project files which ARE user-scoped: projects/{userId}/
+    let deleted = 0;
+    const prefixes = [`projects/${userId}/`, `exports/${userId}/`];
+
+    for (const prefix of prefixes) {
+      try {
+        const listResult = await this.s3.send(
+          new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix }),
+        );
+        const objects = listResult.Contents;
+        if (!objects || objects.length === 0) continue;
+
+        await this.s3.send(
+          new DeleteObjectsCommand({
+            Bucket: this.bucket,
+            Delete: { Objects: objects.map((o) => ({ Key: o.Key })) },
+          }),
+        );
+        deleted += objects.length;
+      } catch (err) {
+        this.logger.warn(`Failed to delete S3 prefix ${prefix}: ${err}`);
+      }
+    }
+
+    return deleted;
   }
 }

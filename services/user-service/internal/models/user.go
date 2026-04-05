@@ -41,6 +41,19 @@ type User struct {
 	IsManagedAccount   bool           `gorm:"default:false" json:"isManagedAccount"`
 	CreatorTypes       pq.StringArray `gorm:"type:text[];column:creator_types" json:"creatorTypes,omitempty"`
 	CreatorGenres      pq.StringArray `gorm:"type:text[];column:creator_genres" json:"creatorGenres,omitempty"`
+	// Social media links
+	SocialInstagram  *string `gorm:"size:255;column:social_instagram" json:"socialInstagram,omitempty"`
+	SocialTiktok     *string `gorm:"size:255;column:social_tiktok" json:"socialTiktok,omitempty"`
+	SocialYoutube    *string `gorm:"size:255;column:social_youtube" json:"socialYoutube,omitempty"`
+	SocialSoundcloud *string `gorm:"size:255;column:social_soundcloud" json:"socialSoundcloud,omitempty"`
+	SocialSpotify    *string `gorm:"size:255;column:social_spotify" json:"socialSpotify,omitempty"`
+	SocialTwitter    *string `gorm:"size:255;column:social_twitter" json:"socialTwitter,omitempty"`
+	Website          *string `gorm:"size:500" json:"website,omitempty"`
+	// Extended bio fields
+	Location     *string `gorm:"size:100" json:"location,omitempty"`
+	RecordLabel  *string `gorm:"size:100;column:record_label" json:"recordLabel,omitempty"`
+	BookingEmail *string `gorm:"size:255;column:booking_email" json:"bookingEmail,omitempty"`
+
 	DateOfBirth        *time.Time     `gorm:"type:date" json:"dateOfBirth,omitempty"`
 	FollowersCount     int64          `gorm:"default:0" json:"followersCount"`
 	FollowingCount     int64          `gorm:"default:0" json:"followingCount"`

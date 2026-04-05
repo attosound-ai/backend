@@ -164,6 +164,20 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID string, req *mod
 		updates["profile_verified"] = false
 	}
 
+	// Social media links + extended bio
+	collectOptionalStringUpdates(updates, map[string]*string{
+		"social_instagram":  req.SocialInstagram,
+		"social_tiktok":     req.SocialTiktok,
+		"social_youtube":    req.SocialYoutube,
+		"social_soundcloud": req.SocialSoundcloud,
+		"social_spotify":    req.SocialSpotify,
+		"social_twitter":    req.SocialTwitter,
+		"website":           req.Website,
+		"location":          req.Location,
+		"record_label":      req.RecordLabel,
+		"booking_email":     req.BookingEmail,
+	})
+
 	if len(updates) == 0 {
 		user, err := s.repo.FindByID(uid)
 		if err != nil || user == nil {
