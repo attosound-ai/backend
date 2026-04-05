@@ -1,16 +1,14 @@
 FROM node:22-alpine AS builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
-RUN pnpm install --frozen-lockfile
+COPY package.json package-lock.json* ./
+RUN npm ci
 COPY . .
-RUN pnpm run build
+RUN npm run build
 
 FROM node:22-alpine
-RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
-RUN pnpm install --frozen-lockfile --prod
+COPY package.json package-lock.json* ./
+RUN npm ci --only=production
 COPY --from=builder /app/dist ./dist
 EXPOSE 3005
 CMD ["node", "dist/main.js"]
