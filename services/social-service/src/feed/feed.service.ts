@@ -36,20 +36,29 @@ export class FeedService {
   }> {
     const t0 = Date.now();
 
-    // Step 1: Try Redis feed cache first, fall back to rebuild
+    // Step 1: First page (cursor=0) always rebuilds to catch new content.
+    // Subsequent pages use Redis cache for pagination performance.
     let contentIds: string[];
     let nextCursor: number | null;
-    const cached = await this.redis.getFeedContentIds(userId, cursor, limit);
-    if (cached.contentIds.length > 0) {
-      contentIds = cached.contentIds;
-      nextCursor = cached.nextCursor;
-    } else {
+    let cacheHit = false;
+
+    if (cursor > 0) {
+      const cached = await this.redis.getFeedContentIds(userId, cursor, limit);
+      if (cached.contentIds.length > 0) {
+        contentIds = cached.contentIds;
+        nextCursor = cached.nextCursor;
+        cacheHit = true;
+      }
+    }
+
+    if (!cacheHit) {
       const result = await this.buildFeedFromFollowing(userId, cursor, limit);
       contentIds = result.contentIds;
       nextCursor = result.nextCursor;
     }
+
     const t1 = Date.now();
-    this.logger.log(`[PERF] Step 1 feed IDs: ${t1 - t0}ms (${contentIds.length} IDs, cache=${cached.contentIds.length > 0})`);
+    this.logger.log(`[PERF] Step 1 feed IDs: ${t1 - t0}ms (${contentIds.length} IDs, cache=${cacheHit})`);
 
     if (contentIds.length === 0) {
       return {
