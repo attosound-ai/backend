@@ -52,3 +52,7 @@ infra/minio*/
 infra/kafka*/
 infra/zookeeper*/
 infra/docker-compose.prod-db.yml
+
+# Claude Code auto-generated files
+.claude/
+skills-lock.json
