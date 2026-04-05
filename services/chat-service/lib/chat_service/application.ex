@@ -103,7 +103,24 @@ defmodule ChatService.Application do
         updated_at timestamp,
         PRIMARY KEY (user_id, updated_at, conversation_id)
       ) WITH CLUSTERING ORDER BY (updated_at DESC, conversation_id ASC)
+      """,
       """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.reactions (
+        message_id timeuuid,
+        conversation_id uuid,
+        user_id text,
+        emoji text,
+        created_at timestamp,
+        PRIMARY KEY (message_id, user_id)
+      )
+      """,
+      # Add new columns to messages (idempotent — Cassandra ignores if they already exist)
+      "ALTER TABLE #{keyspace}.messages ADD is_edited boolean",
+      "ALTER TABLE #{keyspace}.messages ADD edited_at timestamp",
+      "ALTER TABLE #{keyspace}.messages ADD is_deleted boolean",
+      "ALTER TABLE #{keyspace}.messages ADD reply_to_id text",
+      "ALTER TABLE #{keyspace}.messages ADD reply_to_content text",
+      "ALTER TABLE #{keyspace}.messages ADD reply_to_sender text"
     ]
 
     Enum.each(statements, fn stmt ->

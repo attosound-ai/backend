@@ -58,7 +58,10 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       await this.consumer.subscribe({
         topics: [
           "user.created",
+          "user.updated",
           "content.published",
+          "content.deleted",
+          "content.updated",
           "message.sent",
           "user.deleted",
         ],
@@ -101,8 +104,17 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         case "user.created":
           await this.handleUserCreated(data);
           break;
+        case "user.updated":
+          await this.handleUserUpdated(data);
+          break;
         case "content.published":
           await this.handleContentPublished(data);
+          break;
+        case "content.deleted":
+          await this.handleContentDeleted(data);
+          break;
+        case "content.updated":
+          await this.handleContentUpdated(data);
           break;
         case "message.sent":
           await this.handleMessageSent(data);
@@ -147,6 +159,85 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     });
 
     this.logger.log(`Welcome notification created for user ${userId}`);
+  }
+
+  /**
+   * user.updated -> invalidate cached user profile in Redis
+   */
+  private async handleUserUpdated(data: {
+    id?: string;
+    user_id?: string;
+  }): Promise<void> {
+    const userId = data.id ?? data.user_id;
+    if (!userId) return;
+    await this.grpcClients.invalidateUserCache(userId);
+    this.logger.log(`Invalidated user cache for ${userId}`);
+  }
+
+  /**
+   * content.deleted -> decrement posts count + clean up interactions/feed cache
+   */
+  private async handleContentDeleted(data: {
+    content_id: string;
+    author_id: string;
+  }): Promise<void> {
+    if (!data.content_id || !data.author_id) return;
+
+    this.logger.log(
+      `Processing content.deleted for content ${data.content_id} by ${data.author_id}`,
+    );
+
+    // Decrement post count
+    await this.redis.decrementCount("posts", data.author_id);
+
+    // Remove from author's feed cache and all followers' feeds
+    const client = this.redis.getClient();
+    const followerIds = await this.redis.getFollowerIds(data.author_id);
+    const feedKeys = [
+      `social:feed:${data.author_id}`,
+      ...followerIds.map((fid) => `social:feed:${fid}`),
+    ];
+    if (feedKeys.length > 0) {
+      const pipeline = client.pipeline();
+      for (const key of feedKeys) {
+        pipeline.zrem(key, data.content_id);
+      }
+      await pipeline.exec();
+    }
+
+    // Clean up interaction counts from Redis
+    const countTypes = ["likes", "comments", "shares", "reposts"];
+    const cleanPipeline = client.pipeline();
+    for (const type of countTypes) {
+      cleanPipeline.del(`social:count:${type}:${data.content_id}`);
+    }
+    await cleanPipeline.exec();
+
+    // Clean up DB interactions for this content
+    await Promise.all([
+      this.prisma.interaction.deleteMany({ where: { contentId: data.content_id } }),
+      this.prisma.comment.deleteMany({ where: { contentId: data.content_id } }),
+      this.prisma.bookmark.deleteMany({ where: { contentId: data.content_id } }),
+      this.prisma.repost.deleteMany({ where: { contentId: data.content_id } }),
+      this.prisma.notification.deleteMany({ where: { referenceId: data.content_id } }),
+    ]);
+
+    this.logger.log(
+      `Cleaned up content ${data.content_id}: decremented posts count, removed from feeds, deleted interactions`,
+    );
+  }
+
+  /**
+   * content.updated -> invalidate cached content (future: notify likers)
+   */
+  private async handleContentUpdated(data: {
+    content_id: string;
+    author_id: string;
+  }): Promise<void> {
+    if (!data.content_id) return;
+    this.logger.log(`Processing content.updated for content ${data.content_id}`);
+    // No cache to invalidate currently (content is fetched via gRPC, not cached in Redis)
+    // This handler exists for future extensibility (e.g. re-index search, notify)
   }
 
   /**
@@ -274,8 +365,22 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Processing user.deleted for users: ${userIds.join(", ")}`);
 
     for (const userId of userIds) {
-      // 0. Delete all Postgres rows for this user
-      const [notifs, follows1, follows2, interactions, comments, bookmarks, reposts, reelViews] =
+      // Invalidate user profile cache
+      await this.grpcClients.invalidateUserCache(userId);
+
+      // 0. Fetch content IDs BEFORE deletion (for feed cache + Cloudinary cleanup)
+      let userContentIds: string[] = [];
+      let userFilePaths: string[] = [];
+      try {
+        const { contents } = await this.grpcClients.getContentByAuthor(userId, { cursor: '', limit: 500 });
+        userContentIds = contents.map((c) => c.id);
+        userFilePaths = contents.flatMap((c) => c.file_paths || []);
+      } catch {
+        this.logger.warn(`Could not pre-fetch content for user ${userId}`);
+      }
+
+      // 1. Delete all social Postgres rows + creator logo votes (Fix #1)
+      const [notifs, follows1, follows2, interactions, comments, bookmarks, reposts, reelViews, logoVotes] =
         await Promise.all([
           this.prisma.notification.deleteMany({
             where: { OR: [{ recipientId: userId }, { actorId: userId }] },
@@ -287,15 +392,21 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           this.prisma.bookmark.deleteMany({ where: { userId } }),
           this.prisma.repost.deleteMany({ where: { userId } }),
           this.prisma.reelView.deleteMany({ where: { userId } }),
+          this.prisma.creatorLogoVote.deleteMany({ where: { userId } }),
         ]);
       this.logger.log(
-        `Deleted Postgres data for user ${userId}: ` +
+        `Deleted social DB for user ${userId}: ` +
         `${notifs.count} notifs, ${follows1.count + follows2.count} follows, ` +
         `${interactions.count} interactions, ${comments.count} comments, ` +
-        `${bookmarks.count} bookmarks, ${reposts.count} reposts, ${reelViews.count} reel views`,
+        `${bookmarks.count} bookmarks, ${reposts.count} reposts, ` +
+        `${reelViews.count} reel views, ${logoVotes.count} logo votes`,
       );
 
-      // 2. Fix follow graph in Redis
+      // 2. Delete all content (MongoDB) via gRPC
+      const deletedContent = await this.grpcClients.deleteAllContentByAuthor(userId);
+      this.logger.log(`Deleted ${deletedContent} content docs for user ${userId}`);
+
+      // 3. Fix follow graph in Redis
       const followingIds = await this.redis.getFollowerIds(userId);
       const followerIds = await this.redis.getFollowingIds(userId);
       for (const fid of followingIds) {
@@ -305,13 +416,52 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         await this.redis.removeFollow(fid, userId);
       }
 
-      // 3. Delete feed cache
+      // 4. Delete user's own caches
       await this.redis.del(`social:feed:${userId}`);
       await this.redis.del(`social:count:posts:${userId}`);
       await this.redis.del(`social:count:following:${userId}`);
       await this.redis.del(`social:count:followers:${userId}`);
 
-      this.logger.log(`Cleaned up Redis for user ${userId}`);
+      // Fix #2: Remove deleted user's content from ALL other users' feed caches
+      if (userContentIds.length > 0) {
+        const client = this.redis.getClient();
+        let feedCursor = '0';
+        let cleanedEntries = 0;
+        do {
+          const [next, feedKeys] = await client.scan(feedCursor, 'MATCH', 'social:feed:*', 'COUNT', 200);
+          feedCursor = next;
+          if (feedKeys.length > 0) {
+            const pipeline = client.pipeline();
+            for (const feedKey of feedKeys) {
+              for (const cid of userContentIds) {
+                pipeline.zrem(feedKey, cid);
+              }
+            }
+            const results = await pipeline.exec();
+            cleanedEntries += (results || []).filter(([, r]) => r && (r as number) > 0).length;
+          }
+        } while (feedCursor !== '0');
+
+        // Clean interaction count caches for deleted content
+        const countPipeline = client.pipeline();
+        for (const cid of userContentIds) {
+          countPipeline.del(`social:count:likes:${cid}`);
+          countPipeline.del(`social:count:comments:${cid}`);
+          countPipeline.del(`social:count:shares:${cid}`);
+          countPipeline.del(`social:count:reposts:${cid}`);
+        }
+        await countPipeline.exec();
+        this.logger.log(`Cleaned ${cleanedEntries} orphaned entries from other feeds + ${userContentIds.length * 4} count keys`);
+      }
+
+      // Fix #3: Delete Cloudinary media (fire-and-forget)
+      if (userFilePaths.length > 0) {
+        this.deleteCloudinaryAssets(userFilePaths).catch((err) =>
+          this.logger.warn(`Cloudinary cleanup failed for user ${userId}: ${err.message}`),
+        );
+      }
+
+      this.logger.log(`Full cleanup done for user ${userId}`);
     }
 
     // 4. Recalculate counts for ALL posts that still exist in interactions/comments
@@ -363,5 +513,42 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `Redis counts recalculated after deleting users: ${userIds.join(", ")}`,
     );
+  }
+
+  /**
+   * Fix #3: Delete Cloudinary assets by public IDs.
+   * Uses Cloudinary Admin API (requires CLOUDINARY_* env vars).
+   */
+  private async deleteCloudinaryAssets(publicIds: string[]): Promise<void> {
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const apiKey = process.env.CLOUDINARY_API_KEY;
+    const apiSecret = process.env.CLOUDINARY_API_SECRET;
+    if (!cloudName || !apiKey || !apiSecret) {
+      this.logger.warn('Cloudinary env vars not set, skipping media cleanup');
+      return;
+    }
+
+    // Cloudinary delete_resources accepts up to 100 public IDs at a time
+    const batchSize = 100;
+    for (let i = 0; i < publicIds.length; i += batchSize) {
+      const batch = publicIds.slice(i, i + batchSize);
+      try {
+        const auth = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
+        const res = await fetch(
+          `https://api.cloudinary.com/v1_1/${cloudName}/resources/image/upload`,
+          {
+            method: 'DELETE',
+            headers: {
+              Authorization: `Basic ${auth}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ public_ids: batch }),
+          },
+        );
+        this.logger.log(`Cloudinary delete batch ${i / batchSize + 1}: ${res.status} (${batch.length} assets)`);
+      } catch (err) {
+        this.logger.warn(`Cloudinary delete batch failed: ${(err as Error).message}`);
+      }
+    }
   }
 }

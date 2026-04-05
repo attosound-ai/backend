@@ -396,13 +396,28 @@ defmodule ChatService.Conversations.ConversationService do
             delete_msgs = "DELETE FROM messages WHERE conversation_id = ?"
             Repo.execute_prepared(delete_msgs, %{"conversation_id" => {"uuid", conv_id}})
 
-            # Delete the other participant's copy of this conversation
+            # Delete the other participant's copy of this conversation.
+            # Cassandra PK is (user_id, updated_at, conversation_id) — must find
+            # the exact updated_at to delete specific rows.
             if participant_id do
-              delete_other = "DELETE FROM conversations WHERE user_id = ? AND conversation_id = ?"
-              Repo.execute_prepared(delete_other, %{
-                "user_id" => {"text", participant_id},
-                "conversation_id" => {"uuid", conv_id}
-              })
+              find_other = "SELECT updated_at, conversation_id FROM conversations WHERE user_id = ?"
+              case Repo.execute_prepared(find_other, %{"user_id" => {"text", to_string(participant_id)}}) do
+                {:ok, other_rows} ->
+                  other_rows
+                  |> Enum.to_list()
+                  |> Enum.filter(fn r -> to_string(r["conversation_id"]) == to_string(conv_id) end)
+                  |> Enum.each(fn r ->
+                    Repo.execute_prepared(
+                      "DELETE FROM conversations WHERE user_id = ? AND updated_at = ? AND conversation_id = ?",
+                      %{
+                        "user_id" => {"text", to_string(participant_id)},
+                        "updated_at" => {"timestamp", r["updated_at"]},
+                        "conversation_id" => {"uuid", to_string(conv_id)}
+                      }
+                    )
+                  end)
+                _ -> :ok
+              end
             end
           end
         end

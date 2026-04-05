@@ -493,6 +493,148 @@ export class InteractionsService {
     return { likesCount, commentsCount, sharesCount, repostsCount };
   }
 
+  // ── Batch methods (feed optimization) ──
+
+  /**
+   * Batch-fetch interaction counts for multiple content IDs.
+   * Uses Redis pipeline (1 roundtrip) with Prisma fallback via GROUP BY (1 query per type).
+   * Replaces N×4 individual queries with 1 pipeline + at most 4 queries.
+   */
+  async getInteractionCountsBatch(
+    contentIds: string[],
+  ): Promise<Map<string, { likesCount: number; commentsCount: number; sharesCount: number; repostsCount: number }>> {
+    const result = new Map<string, { likesCount: number; commentsCount: number; sharesCount: number; repostsCount: number }>();
+    if (contentIds.length === 0) return result;
+
+    // Try Redis pipeline first (1 roundtrip for all counts)
+    const client = this.redis.getClient();
+    const pipeline = client.pipeline();
+    for (const id of contentIds) {
+      pipeline.get(`social:count:likes:${id}`);
+      pipeline.get(`social:count:comments:${id}`);
+      pipeline.get(`social:count:shares:${id}`);
+      pipeline.get(`social:count:reposts:${id}`);
+    }
+    const redisResults = await pipeline.exec();
+
+    const missingIds: string[] = [];
+    for (let i = 0; i < contentIds.length; i++) {
+      const likes = redisResults?.[i * 4]?.[1];
+      const comments = redisResults?.[i * 4 + 1]?.[1];
+      const shares = redisResults?.[i * 4 + 2]?.[1];
+      const reposts = redisResults?.[i * 4 + 3]?.[1];
+
+      if (likes || comments || shares || reposts) {
+        result.set(contentIds[i], {
+          likesCount: parseInt(likes as string, 10) || 0,
+          commentsCount: parseInt(comments as string, 10) || 0,
+          sharesCount: parseInt(shares as string, 10) || 0,
+          repostsCount: parseInt(reposts as string, 10) || 0,
+        });
+      } else {
+        missingIds.push(contentIds[i]);
+      }
+    }
+
+    // Fallback: batch DB queries for cache misses (GROUP BY instead of N individual COUNTs)
+    if (missingIds.length > 0) {
+      const [likeGroups, commentGroups, shareGroups, repostGroups] = await Promise.all([
+        this.prisma.interaction.groupBy({
+          by: ['contentId'],
+          where: { contentId: { in: missingIds }, type: 'LIKE' },
+          _count: { contentId: true },
+        }),
+        this.prisma.comment.groupBy({
+          by: ['contentId'],
+          where: { contentId: { in: missingIds } },
+          _count: { contentId: true },
+        }),
+        this.prisma.interaction.groupBy({
+          by: ['contentId'],
+          where: { contentId: { in: missingIds }, type: 'SHARE' },
+          _count: { contentId: true },
+        }),
+        this.prisma.repost.groupBy({
+          by: ['contentId'],
+          where: { contentId: { in: missingIds } },
+          _count: { contentId: true },
+        }),
+      ]);
+
+      const likeMap = new Map(likeGroups.map((g) => [g.contentId, g._count.contentId]));
+      const commentMap = new Map(commentGroups.map((g) => [g.contentId, g._count.contentId]));
+      const shareMap = new Map(shareGroups.map((g) => [g.contentId, g._count.contentId]));
+      const repostMap = new Map(repostGroups.map((g) => [g.contentId, g._count.contentId]));
+
+      // Cache in Redis and populate result
+      const cachePipeline = client.pipeline();
+      for (const id of missingIds) {
+        const counts = {
+          likesCount: likeMap.get(id) || 0,
+          commentsCount: commentMap.get(id) || 0,
+          sharesCount: shareMap.get(id) || 0,
+          repostsCount: repostMap.get(id) || 0,
+        };
+        result.set(id, counts);
+        cachePipeline.set(`social:count:likes:${id}`, counts.likesCount, 'EX', 3600);
+        cachePipeline.set(`social:count:comments:${id}`, counts.commentsCount, 'EX', 3600);
+        cachePipeline.set(`social:count:shares:${id}`, counts.sharesCount, 'EX', 3600);
+        cachePipeline.set(`social:count:reposts:${id}`, counts.repostsCount, 'EX', 3600);
+      }
+      await cachePipeline.exec();
+    }
+
+    // Fill any remaining IDs with zeros
+    for (const id of contentIds) {
+      if (!result.has(id)) {
+        result.set(id, { likesCount: 0, commentsCount: 0, sharesCount: 0, repostsCount: 0 });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Batch-check user interactions for multiple content IDs.
+   * 3 queries with WHERE IN instead of N×3 individual lookups.
+   */
+  async getUserInteractionsBatch(
+    userId: string,
+    contentIds: string[],
+  ): Promise<Map<string, { isLiked: boolean; isBookmarked: boolean; isReposted: boolean }>> {
+    const result = new Map<string, { isLiked: boolean; isBookmarked: boolean; isReposted: boolean }>();
+    if (contentIds.length === 0) return result;
+
+    const [likedRows, bookmarkedRows, repostedRows] = await Promise.all([
+      this.prisma.interaction.findMany({
+        where: { userId, contentId: { in: contentIds }, type: 'LIKE' },
+        select: { contentId: true },
+      }),
+      this.prisma.bookmark.findMany({
+        where: { userId, contentId: { in: contentIds } },
+        select: { contentId: true },
+      }),
+      this.prisma.repost.findMany({
+        where: { userId, contentId: { in: contentIds } },
+        select: { contentId: true },
+      }),
+    ]);
+
+    const likedSet = new Set(likedRows.map((r) => r.contentId));
+    const bookmarkedSet = new Set(bookmarkedRows.map((r) => r.contentId));
+    const repostedSet = new Set(repostedRows.map((r) => r.contentId));
+
+    for (const id of contentIds) {
+      result.set(id, {
+        isLiked: likedSet.has(id),
+        isBookmarked: bookmarkedSet.has(id),
+        isReposted: repostedSet.has(id),
+      });
+    }
+
+    return result;
+  }
+
   async getInteractors(
     contentId: string,
     type: 'likes' | 'reposts' | 'shares',

@@ -1,11 +1,11 @@
-use bson::oid::ObjectId;
+use bson::{self, oid::ObjectId};
 use chrono::Utc;
 use log::info;
 use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::kafka::KafkaProducer;
-use crate::models::{is_valid_content_type, Content, CreateContentInput};
+use crate::models::{is_valid_content_type, Content, CreateContentInput, UpdateContentInput};
 use crate::repositories::ContentRepository;
 
 #[derive(Debug, Error)]
@@ -150,6 +150,72 @@ impl ContentService {
         Ok((contents, has_more, total))
     }
 
+    pub async fn update_content(
+        &self,
+        id_str: &str,
+        author_id: &str,
+        input: UpdateContentInput,
+    ) -> Result<Content, ContentError> {
+        let oid = ObjectId::parse_str(id_str)
+            .map_err(|_| ContentError::InvalidId(id_str.to_string()))?;
+
+        let mut update_doc = bson::Document::new();
+        if let Some(text) = &input.text_content {
+            update_doc.insert("text_content", text.clone());
+        }
+        if let Some(tags) = &input.tags {
+            update_doc.insert("tags", bson::to_bson(tags).unwrap_or_default());
+        }
+        if let Some(metadata) = &input.metadata {
+            update_doc.insert("metadata", bson::to_bson(metadata).unwrap_or_default());
+        }
+        if update_doc.is_empty() {
+            return self.get_content(id_str).await;
+        }
+
+        // Fetch the original BEFORE updating so we can merge changes
+        let mut original = self.get_content(id_str).await?;
+        if original.author_id != author_id {
+            return Err(ContentError::Unauthorized);
+        }
+
+        info!("Updating content id={} author={} fields={:?}", id_str, author_id, update_doc);
+        let matched = self
+            .repo
+            .update_fields(&oid, author_id, update_doc)
+            .await
+            .map_err(|e| { log::error!("MongoDB update error: {:?}", e); ContentError::DatabaseError(e) })?;
+        if !matched {
+            return Err(ContentError::NotFound);
+        }
+
+        // Merge changes into the original to avoid re-reading (which may fail due to DateTime type mismatch)
+        if let Some(text) = &input.text_content {
+            original.text_content = Some(text.clone());
+        }
+        if let Some(tags) = &input.tags {
+            original.tags = tags.clone();
+        }
+        if let Some(metadata) = &input.metadata {
+            original.metadata = metadata.clone();
+        }
+        original.updated_at = Utc::now();
+        let updated = original;
+
+        // Publish Kafka event
+        let event = serde_json::json!({
+            "content_id": id_str,
+            "author_id": author_id,
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+        self.kafka
+            .publish("content.updated", id_str, &event.to_string())
+            .await;
+
+        info!("Updated content id={}", id_str);
+        Ok(updated)
+    }
+
     pub async fn delete_content(
         &self,
         id_str: &str,
@@ -180,6 +246,23 @@ impl ContentService {
 
         info!("Deleted content id={}", id_str);
         Ok(())
+    }
+
+    /// Delete ALL content for a given author (used on account deletion).
+    pub async fn delete_all_by_author(&self, author_id: &str) -> Result<u64, ContentError> {
+        let count = self.repo.delete_all_by_author(author_id).await?;
+        if count > 0 {
+            let event = serde_json::json!({
+                "author_id": author_id,
+                "deleted_count": count,
+                "deleted_at": Utc::now().to_rfc3339(),
+            });
+            self.kafka
+                .publish("content.author_purged", author_id, &event.to_string())
+                .await;
+            info!("Purged {} content documents for author {}", count, author_id);
+        }
+        Ok(count)
     }
 
     /// Delete content without author check (used by gRPC)

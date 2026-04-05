@@ -37,6 +37,16 @@ pub struct CreateContentInput {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateContentInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
+}
+
 /// Allowed content types
 pub const VALID_CONTENT_TYPES: &[&str] = &["audio", "image", "text", "video", "reel"];
 

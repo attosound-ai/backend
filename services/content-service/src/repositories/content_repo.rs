@@ -138,9 +138,34 @@ impl ContentRepository {
         cursor.try_collect().await
     }
 
+    pub async fn update_fields(
+        &self,
+        id: &ObjectId,
+        author_id: &str,
+        update: Document,
+    ) -> Result<bool, mongodb::error::Error> {
+        let filter = doc! { "_id": id, "author_id": author_id };
+        let result = self
+            .collection
+            .update_one(filter, doc! { "$set": update }, None)
+            .await?;
+        Ok(result.matched_count > 0)
+    }
+
     pub async fn delete_by_id(&self, id: &ObjectId) -> Result<bool, mongodb::error::Error> {
         let result = self.collection.delete_one(doc! { "_id": id }, None).await?;
         Ok(result.deleted_count > 0)
+    }
+
+    pub async fn delete_all_by_author(
+        &self,
+        author_id: &str,
+    ) -> Result<u64, mongodb::error::Error> {
+        let result = self
+            .collection
+            .delete_many(doc! { "author_id": author_id }, None)
+            .await?;
+        Ok(result.deleted_count)
     }
 
     pub async fn delete_by_id_and_author(

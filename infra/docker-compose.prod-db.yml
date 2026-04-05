@@ -1,0 +1,93 @@
+# Docker Compose override to connect local services to Railway production databases.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod-db.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.prod-db.yml --profile services up -d
+#
+# Production databases used: Postgres (main), Postgres-eE0r (social), MongoDB, Redis
+# Local infrastructure kept: Kafka, Zookeeper, Cassandra, Consul, Jaeger, Mailpit, MinIO
+
+services:
+  # ════════════════════════════════════════════
+  # APPLICATION SERVICES — production DB overrides
+  # ════════════════════════════════════════════
+
+  # User Service (Go + Fiber)
+  # Production: Postgres main (shared with payment & telephony)
+  user-service:
+    environment:
+      APP_ENV: production
+      DB_HOST: tramway.proxy.rlwy.net
+      DB_PORT: 34561
+      DB_NAME: railway
+      DB_USER: postgres
+      DB_PASSWORD: qSemijfRmUQGOAzpCpmQiXhtsDMWIbih
+      DB_SSLMODE: disable
+      DATABASE_URL: postgresql://postgres:qSemijfRmUQGOAzpCpmQiXhtsDMWIbih@tramway.proxy.rlwy.net:34561/railway
+      JWT_SECRET: d792f10b544e0c9d4bba54657521561fb514eeaf46442d0c41922d41975cb144
+
+  # Content Service (Rust + Actix-web)
+  # Production: MongoDB
+  content-service:
+    environment:
+      APP_ENV: production
+      MONGO_URI: mongodb://mongo:atto_mongo_prod@gondola.proxy.rlwy.net:24640/atto_content?authSource=admin
+      JWT_SECRET: d792f10b544e0c9d4bba54657521561fb514eeaf46442d0c41922d41975cb144
+
+  # Social Service (NestJS + Prisma)
+  # Production: Postgres-eE0r + Redis
+  social-service:
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql://postgres:dvZiWUiinsRiISxoXxClWCAQXDKcODPh@yamanote.proxy.rlwy.net:30152/railway?connection_limit=2&pool_timeout=30
+      REDIS_URL: redis://default:qUhmpHvsnBNEWbYtvRPuciQypMsHntCV@tramway.proxy.rlwy.net:17269
+      JWT_SECRET: d792f10b544e0c9d4bba54657521561fb514eeaf46442d0c41922d41975cb144
+      CLOUDINARY_CLOUD_NAME: dxzcutnlp
+      CLOUDINARY_API_KEY: "478696154944817"
+      CLOUDINARY_API_SECRET: pg7OU_Vp9hPCDeaLj6Px5GOCbxM
+
+  # Chat Service (Elixir + Phoenix)
+  # Cassandra stays local (no public TCP proxy in Railway)
+  chat-service:
+    environment:
+      APP_ENV: production
+      SECRET_KEY_BASE: d792f10b544e0c9d4bba54657521561fb514eeaf46442d0c41922d41975cb144d792f10b544e0c9d4bba54657521561fb514eeaf46442d0c41922d41975cb144
+
+  # OTP Service (Go + Fiber)
+  # Production: Redis
+  otp-service:
+    environment:
+      APP_ENV: production
+      REDIS_URL: redis://default:qUhmpHvsnBNEWbYtvRPuciQypMsHntCV@tramway.proxy.rlwy.net:17269
+
+  # Payment Service (Python + FastAPI)
+  # Production: Postgres main
+  payment-service:
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://postgres:qSemijfRmUQGOAzpCpmQiXhtsDMWIbih@tramway.proxy.rlwy.net:34561/railway
+      JWT_SECRET: d792f10b544e0c9d4bba54657521561fb514eeaf46442d0c41922d41975cb144
+      STRIPE_WEBHOOK_SECRET: whsec_vNq6O8jDwvcCcz5FVl7hP7hetkzCFlKN
+      TWILIO_BRIDGE_NUMBER: "+16822544647"
+
+  # Telephony Service (NestJS + TypeORM)
+  # Production: Postgres main + Redis + MinIO (via HTTPS)
+  telephony-service:
+    environment:
+      DATABASE_URL: postgresql://postgres:qSemijfRmUQGOAzpCpmQiXhtsDMWIbih@tramway.proxy.rlwy.net:34561/railway
+      REDIS_HOST: tramway.proxy.rlwy.net
+      REDIS_PORT: 17269
+      REDIS_PASSWORD: qUhmpHvsnBNEWbYtvRPuciQypMsHntCV
+      JWT_SECRET: d792f10b544e0c9d4bba54657521561fb514eeaf46442d0c41922d41975cb144
+      S3_ENDPOINT: https://minio-production-c481.up.railway.app
+      S3_PUBLIC_ENDPOINT: https://minio-production-c481.up.railway.app
+      S3_ACCESS_KEY: atto
+      S3_SECRET_KEY: atto_minio_prod
+      TWILIO_BRIDGE_NUMBER: "+16822544647"
+
+  # Email Service (NestJS + React Email + BullMQ)
+  # Production: Redis
+  email-service:
+    environment:
+      REDIS_HOST: tramway.proxy.rlwy.net
+      REDIS_PORT: 17269
+      REDIS_PASSWORD: qUhmpHvsnBNEWbYtvRPuciQypMsHntCV

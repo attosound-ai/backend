@@ -1,0 +1,32 @@
+# ══════════════════════════════════════════════════
+# ATTO SOUND — pnpm security configuration (backend)
+# ══════════════════════════════════════════════════
+
+allowBuilds:
+  fsevents: true
+  esbuild: true
+  '@swc/core': true
+  prisma: true
+  '@prisma/client': true
+  '@prisma/engines': true
+  bcrypt: true
+  '@nestjs/core': true
+  protobufjs: true
+  msgpackr-extract: true
+  unrs-resolver: true
+
+strictDepBuilds: true
+blockExoticSubdeps: true
+
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - '@nestjs/*'
+  - '@prisma/*'
+  - 'prisma'
+
+trustPolicy: no-downgrade
+trustPolicyExclude:
+  - 'undici-types'
+  - 'semver@6.3.1'
+  - 'chokidar@4.0.3'
+  - 'convert-source-map@2.0.0'

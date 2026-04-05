@@ -49,6 +49,18 @@ export class CreatePostDto {
   tags?: string[];
 }
 
+export class UpdatePostDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(5000)
+  textContent?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+}
+
 export class FeedPostDto {
   id: string;
   authorId: string;

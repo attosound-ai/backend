@@ -9,6 +9,7 @@ import { InteractionsModule } from "./interactions/interactions.module";
 import { FeedModule } from "./feed/feed.module";
 import { NotificationsModule } from "./notifications/notifications.module";
 import { PushModule } from "./push/push.module";
+import { CreatorLogosModule } from "./creator-logos/creator-logos.module";
 import { HttpExceptionFilter } from "./common/filters/http-exception.filter";
 import { LoggingInterceptor } from "./common/interceptors/logging.interceptor";
 import { HealthController } from "./health.controller";
@@ -24,6 +25,7 @@ import { HealthController } from "./health.controller";
     FeedModule,
     NotificationsModule,
     PushModule,
+    CreatorLogosModule,
   ],
   controllers: [HealthController],
   providers: [

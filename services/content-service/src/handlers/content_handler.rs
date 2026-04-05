@@ -1,4 +1,4 @@
-use actix_web::{delete, get, post, web, HttpRequest, HttpResponse};
+use actix_web::{delete, get, post, put, web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -197,6 +197,39 @@ pub async fn list_content(
                     "total_pages": total_pages,
                     "has_more": page < total_pages
                 },
+                "error": null
+            }))
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+#[put("/api/v1/content/{id}")]
+pub async fn update_content(
+    req: HttpRequest,
+    path: web::Path<String>,
+    body: web::Json<crate::models::UpdateContentInput>,
+    svc: web::Data<ContentService>,
+    config: web::Data<Config>,
+) -> HttpResponse {
+    let user_id = match extract_user_id(&req, &config.jwt_secret) {
+        Some(id) => id,
+        None => {
+            return HttpResponse::Unauthorized().json(json!({
+                "success": false,
+                "data": null,
+                "error": "Missing authentication"
+            }));
+        }
+    };
+
+    let id = path.into_inner();
+    match svc.update_content(&id, &user_id, body.into_inner()).await {
+        Ok(content) => {
+            let resp: ContentResponse = content.into();
+            HttpResponse::Ok().json(json!({
+                "success": true,
+                "data": resp,
                 "error": null
             }))
         }

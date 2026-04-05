@@ -64,6 +64,20 @@ services:
           - DELETE
           - OPTIONS
 
+  # CREATOR LOGOS routes → Social Service (NestJS)
+  - name: creator-logos-service
+    url: http://social-service:3000/api/v1/creator-logos
+    routes:
+      - name: creator-logos-routes
+        paths:
+          - /api/v1/creator-logos
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+
   # NOTIFICATIONS routes → Social Service (NestJS)
   - name: notification-service
     url: http://social-service:3000/api/v1/notifications
@@ -89,6 +103,8 @@ services:
         methods:
           - GET
           - POST
+          - PATCH
+          - DELETE
           - OPTIONS
 
   # WebSocket → Chat Service root (Phoenix expects /socket/websocket)

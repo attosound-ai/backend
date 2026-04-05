@@ -12,6 +12,7 @@ _consumer: AIOKafkaConsumer | None = None
 _consumer_task: asyncio.Task | None = None
 
 TOPIC_USER_CREATED = "user.created"
+TOPIC_USER_DELETED = "user.deleted"
 TOPIC_NUMBER_PROVISIONED = "number.provisioned"
 TOPIC_NUMBER_PROVISIONING_FAILED = "number.provisioning.failed"
 
@@ -89,6 +90,33 @@ async def _handle_number_provisioned(data: dict) -> None:
         )
 
 
+async def _handle_user_deleted(data: dict) -> None:
+    """Fix #5: Cancel Stripe subscriptions when a user account is deleted."""
+    raw = data.get("data", data)
+    user_ids = raw.get("userIds", [])
+    if not user_ids:
+        logger.warning("user.deleted event missing userIds: %s", data)
+        return
+
+    import stripe
+    from app.config import settings as cfg
+
+    stripe.api_key = cfg.stripe_secret_key
+
+    for user_id in user_ids:
+        try:
+            # Search for active Stripe subscriptions by metadata
+            subs = stripe.Subscription.list(limit=10)
+            for sub in subs.auto_paging_iter():
+                if sub.metadata.get("user_id") == str(user_id) and sub.status in ("active", "trialing", "past_due"):
+                    stripe.Subscription.cancel(sub.id)
+                    logger.info("Cancelled Stripe subscription %s for deleted user %s", sub.id, user_id)
+        except Exception as exc:
+            logger.error("Failed to cancel Stripe for user %s: %s", user_id, exc)
+
+    logger.info("Stripe cleanup done for users: %s", user_ids)
+
+
 async def _consume_loop() -> None:
     """Main consumer loop that reads messages and dispatches handlers."""
     global _consumer
@@ -106,6 +134,7 @@ async def _consume_loop() -> None:
 
     _consumer = AIOKafkaConsumer(
         TOPIC_USER_CREATED,
+        TOPIC_USER_DELETED,
         TOPIC_NUMBER_PROVISIONED,
         TOPIC_NUMBER_PROVISIONING_FAILED,
         bootstrap_servers=settings.kafka_brokers,
@@ -134,6 +163,8 @@ async def _consume_loop() -> None:
 
             if topic == TOPIC_USER_CREATED:
                 await _handle_user_created(data)
+            elif topic == TOPIC_USER_DELETED:
+                await _handle_user_deleted(data)
             elif topic == TOPIC_NUMBER_PROVISIONED:
                 await _handle_number_provisioned(data)
             elif topic == TOPIC_NUMBER_PROVISIONING_FAILED:
