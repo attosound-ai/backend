@@ -68,6 +68,20 @@ services:
           - DELETE
           - OPTIONS
 
+  # CREATOR LOGOS routes → Social Service (NestJS)
+  - name: creator-logos-service
+    url: ${SOCIAL_SERVICE_URL}/api/v1/creator-logos
+    routes:
+      - name: creator-logos-routes
+        paths:
+          - /api/v1/creator-logos
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - DELETE
+          - OPTIONS
+
   # NOTIFICATIONS routes → Social Service (NestJS)
   - name: notification-service
     url: ${SOCIAL_SERVICE_URL}/api/v1/notifications
