@@ -38,8 +38,8 @@ export class FeedService {
 
     // Step 1: First page (cursor=0) always rebuilds to catch new content.
     // Subsequent pages use Redis cache for pagination performance.
-    let contentIds: string[];
-    let nextCursor: number | null;
+    let contentIds: string[] = [];
+    let nextCursor: number | null = null;
     let cacheHit = false;
 
     if (cursor > 0) {
