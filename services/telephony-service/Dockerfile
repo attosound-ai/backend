@@ -1,16 +1,15 @@
 # ── Build stage ──
 FROM node:20-alpine AS builder
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
-RUN pnpm install --frozen-lockfile
+COPY package.json package-lock.json* ./
+RUN npm ci
 
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY src ./src
 
-RUN pnpm run build
+RUN npm run build
 
 # ── Production stage ──
 FROM node:20-alpine AS runtime
