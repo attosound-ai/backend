@@ -4,7 +4,7 @@ import { Layout } from "./base/layout";
 
 const translations = {
   en: {
-    preview: "Reset your Atto password",
+    preview: (code: string) => `Your password reset code: ${code}`,
     heading: "Reset Password",
     subtext:
       "We received a request to reset your Atto account password. Enter this code in the app:",
@@ -14,7 +14,7 @@ const translations = {
       "If you didn't request a password reset, ignore this email. Your account is still secure.",
   },
   es: {
-    preview: "Código para restablecer tu contraseña de Atto",
+    preview: (code: string) => `Tu código de restablecimiento: ${code}`,
     heading: "Restablecer contraseña",
     subtext:
       "Recibimos una solicitud para restablecer la contraseña de tu cuenta de Atto. Ingresa este código en la app:",
@@ -24,7 +24,7 @@ const translations = {
       "Si no solicitaste restablecer tu contraseña, ignora este correo. Tu cuenta sigue segura.",
   },
   "pt-BR": {
-    preview: "Código para redefinir sua senha do Atto",
+    preview: (code: string) => `Seu código de redefinição: ${code}`,
     heading: "Redefinir senha",
     subtext:
       "Recebemos uma solicitação para redefinir a senha da sua conta Atto. Insira este código no app:",
@@ -58,7 +58,7 @@ export const PasswordResetEmail: React.FC<PasswordResetEmailProps> = ({
   const t = getTranslations(locale);
 
   return (
-    <Layout preview={t.preview} lang={locale || "en"} variant="light">
+    <Layout preview={t.preview(code)} lang={locale || "en"} variant="light">
       <Text style={heading}>{t.heading}</Text>
       <Text style={subtext}>{t.subtext}</Text>
 
