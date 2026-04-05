@@ -384,6 +384,16 @@ export class FeedService {
   }
 
   /**
+   * GET /api/v1/posts/ads - Returns active feed ads from DB.
+   */
+  async getAds() {
+    return this.prisma.feedAd.findMany({
+      where: { active: true },
+      orderBy: { sortOrder: 'asc' },
+    });
+  }
+
+  /**
    * Create a new post via Content gRPC
    */
   async createPost(

@@ -101,6 +101,21 @@ model CreatorLogo {
   @@map("creator_logos")
 }
 
+model FeedAd {
+  id         String   @id @default(uuid())
+  videoUrl   String   @map("video_url")
+  brandName  String   @map("brand_name") @db.VarChar(100)
+  brandAvatar String? @map("brand_avatar") @db.VarChar(500)
+  caption    String   @default("")
+  linkUrl    String?  @map("link_url") @db.VarChar(500)
+  sortOrder  Int      @default(0) @map("sort_order")
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([active, sortOrder])
+  @@map("feed_ads")
+}
+
 model CreatorLogoVote {
   id        String   @id @default(uuid())
   userId    String   @map("user_id")

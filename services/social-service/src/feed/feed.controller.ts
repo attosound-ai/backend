@@ -158,6 +158,12 @@ export class FeedController {
     };
   }
 
+  @Get('ads')
+  async getAds() {
+    const ads = await this.feedService.getAds();
+    return { success: true, data: ads, error: null };
+  }
+
   @Get(':id/interactions/:type')
   async getInteractors(
     @Param('id') contentId: string,
