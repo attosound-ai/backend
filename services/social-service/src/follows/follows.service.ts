@@ -25,11 +25,26 @@ export class FollowsService {
   ) {}
 
   async getStats(userId: string): Promise<{ followersCount: number; followingCount: number; postsCount: number }> {
-    const [followersCount, followingCount, postsCount] = await Promise.all([
+    const [followersCount, followingCount, cachedPosts] = await Promise.all([
       this.prisma.follow.count({ where: { followingId: userId } }),
       this.prisma.follow.count({ where: { followerId: userId } }),
       this.redis.getCount('posts', userId),
     ]);
+
+    // If Redis counter is missing or stale, derive from content-service (source of truth)
+    let postsCount = cachedPosts;
+    if (postsCount <= 0) {
+      try {
+        const { meta } = await this.grpcClients.getContentByAuthor(userId, { cursor: '', limit: 1 });
+        postsCount = meta.total ?? 0;
+        if (postsCount > 0) {
+          await this.redis.setCount('posts', userId, postsCount);
+        }
+      } catch {
+        postsCount = 0;
+      }
+    }
+
     return { followersCount, followingCount, postsCount };
   }
 

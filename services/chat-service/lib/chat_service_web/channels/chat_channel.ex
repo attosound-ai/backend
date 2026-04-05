@@ -3,6 +3,7 @@ defmodule ChatServiceWeb.ChatChannel do
 
   alias ChatService.Messages.MessageService
   alias ChatService.Conversations.ConversationService
+  alias ChatService.Reactions.ReactionService
   alias ChatService.Messages.Message
 
   require Logger
@@ -55,6 +56,26 @@ defmodule ChatServiceWeb.ChatChannel do
     {:noreply, socket}
   end
 
+  def handle_info({:reaction_added, payload}, socket) do
+    push(socket, "reaction_added", payload)
+    {:noreply, socket}
+  end
+
+  def handle_info({:reaction_removed, payload}, socket) do
+    push(socket, "reaction_removed", payload)
+    {:noreply, socket}
+  end
+
+  def handle_info({:message_edited, payload}, socket) do
+    push(socket, "message_edited", payload)
+    {:noreply, socket}
+  end
+
+  def handle_info({:message_deleted, payload}, socket) do
+    push(socket, "message_deleted", payload)
+    {:noreply, socket}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @doc """
@@ -70,8 +91,20 @@ defmodule ChatServiceWeb.ChatChannel do
     conversation_id = socket.assigns.conversation_id
     content_type = Map.get(payload, "content_type", "text")
 
+    reply_opts =
+      if payload["reply_to_id"] do
+        [
+          reply_to_id: payload["reply_to_id"],
+          reply_to_content: payload["reply_to_content"] || "",
+          reply_to_sender: payload["reply_to_sender"] || ""
+        ]
+      else
+        []
+      end
+
     with {:ok, conversation} <- ConversationService.find_conversation(user_id, conversation_id),
-         {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type, recipient_id: conversation.participant_id) do
+         opts <- [recipient_id: conversation.participant_id] ++ reply_opts,
+         {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
       message_map = Message.to_map(message)
       broadcast!(socket, "new_message", message_map)
 
@@ -139,6 +172,92 @@ defmodule ChatServiceWeb.ChatChannel do
       {:error, reason} ->
         Logger.error("Failed to mark as read: #{inspect(reason)}")
         {:reply, {:error, %{reason: "mark_read_failed"}}, socket}
+    end
+  end
+
+  @doc """
+  Handle "add_reaction" events from the client.
+  Payload: %{"message_id" => string, "emoji" => string}
+  """
+  def handle_in("add_reaction", %{"message_id" => message_id, "emoji" => emoji}, socket) do
+    user_id = socket.assigns.user_id
+    conversation_id = socket.assigns.conversation_id
+
+    case ReactionService.add_reaction(message_id, conversation_id, user_id, emoji) do
+      {:ok, _reaction} ->
+        {:reply, {:ok, %{status: "added"}}, socket}
+
+      {:error, reason} ->
+        Logger.error("Failed to add reaction: #{inspect(reason)}")
+        {:reply, {:error, %{reason: "add_reaction_failed"}}, socket}
+    end
+  end
+
+  @doc """
+  Handle "remove_reaction" events from the client.
+  Payload: %{"message_id" => string, "emoji" => string}
+  """
+  def handle_in("remove_reaction", %{"message_id" => message_id, "emoji" => emoji}, socket) do
+    user_id = socket.assigns.user_id
+    conversation_id = socket.assigns.conversation_id
+
+    case ReactionService.remove_reaction(message_id, conversation_id, user_id, emoji) do
+      :ok ->
+        {:reply, {:ok, %{status: "removed"}}, socket}
+
+      {:error, reason} ->
+        Logger.error("Failed to remove reaction: #{inspect(reason)}")
+        {:reply, {:error, %{reason: "remove_reaction_failed"}}, socket}
+    end
+  end
+
+  @doc """
+  Handle "edit_message" events from the client.
+  Payload: %{"message_id" => string, "content" => string}
+  Only the original sender can edit.
+  """
+  def handle_in("edit_message", %{"message_id" => message_id, "content" => content}, socket) do
+    user_id = socket.assigns.user_id
+    conversation_id = socket.assigns.conversation_id
+
+    case MessageService.edit_message(message_id, conversation_id, user_id, content) do
+      {:ok, _payload} ->
+        {:reply, {:ok, %{status: "edited"}}, socket}
+
+      {:error, :forbidden} ->
+        {:reply, {:error, %{reason: "not_sender"}}, socket}
+
+      {:error, :not_found} ->
+        {:reply, {:error, %{reason: "message_not_found"}}, socket}
+
+      {:error, reason} ->
+        Logger.error("Failed to edit message: #{inspect(reason)}")
+        {:reply, {:error, %{reason: "edit_failed"}}, socket}
+    end
+  end
+
+  @doc """
+  Handle "delete_message" events from the client.
+  Payload: %{"message_id" => string}
+  Only the original sender can delete. Performs a soft delete.
+  """
+  def handle_in("delete_message", %{"message_id" => message_id}, socket) do
+    user_id = socket.assigns.user_id
+    conversation_id = socket.assigns.conversation_id
+
+    case MessageService.delete_message(message_id, conversation_id, user_id) do
+      {:ok, _payload} ->
+        {:reply, {:ok, %{status: "deleted"}}, socket}
+
+      {:error, :forbidden} ->
+        {:reply, {:error, %{reason: "not_sender"}}, socket}
+
+      {:error, :not_found} ->
+        {:reply, {:error, %{reason: "message_not_found"}}, socket}
+
+      {:error, reason} ->
+        Logger.error("Failed to delete message: #{inspect(reason)}")
+        {:reply, {:error, %{reason: "delete_failed"}}, socket}
     end
   end
 

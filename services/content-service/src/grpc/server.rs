@@ -1,6 +1,6 @@
 use tonic::{Request, Response, Status};
 
-use crate::models::CreateContentInput;
+use crate::models::{CreateContentInput, UpdateContentInput};
 use crate::services::ContentService;
 
 // Import generated protobuf types – nested so that
@@ -20,8 +20,9 @@ pub use atto_proto::content as content_proto;
 use content_proto::content_service_server::{ContentService as GrpcContentService, ContentServiceServer};
 use content_proto::{
     ContentResponse as ProtoContentResponse, CreateContentRequest, DeleteContentRequest,
+    DeleteContentByAuthorRequest, DeleteContentByAuthorResponse,
     GetContentBatchRequest, GetContentBatchResponse, GetContentByAuthorRequest,
-    GetContentRequest,
+    GetContentRequest, UpdateContentRequest,
 };
 
 pub struct ContentGrpcServer {
@@ -185,6 +186,44 @@ impl GrpcContentService for ContentGrpcServer {
             }
             Err(crate::services::ContentError::Unauthorized) => {
                 Err(Status::permission_denied("Not the author"))
+            }
+            Err(crate::services::ContentError::InvalidId(id)) => {
+                Err(Status::invalid_argument(format!("Invalid ID: {}", id)))
+            }
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    async fn delete_content_by_author(
+        &self,
+        request: Request<DeleteContentByAuthorRequest>,
+    ) -> Result<Response<DeleteContentByAuthorResponse>, Status> {
+        let req = request.into_inner();
+        if req.author_id.is_empty() {
+            return Err(Status::invalid_argument("author_id is required"));
+        }
+        match self.service.delete_all_by_author(&req.author_id).await {
+            Ok(count) => Ok(Response::new(DeleteContentByAuthorResponse {
+                deleted_count: count as i64,
+            })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    async fn update_content(
+        &self,
+        request: Request<UpdateContentRequest>,
+    ) -> Result<Response<ProtoContentResponse>, Status> {
+        let req = request.into_inner();
+        let input = UpdateContentInput {
+            text_content: req.text_content,
+            tags: if req.tags.is_empty() { None } else { Some(req.tags) },
+            metadata: if req.metadata.is_empty() { None } else { Some(req.metadata) },
+        };
+        match self.service.update_content(&req.content_id, &req.author_id, input).await {
+            Ok(content) => Ok(Response::new(content_to_proto(content))),
+            Err(crate::services::ContentError::NotFound) => {
+                Err(Status::not_found("Content not found or not author"))
             }
             Err(crate::services::ContentError::InvalidId(id)) => {
                 Err(Status::invalid_argument(format!("Invalid ID: {}", id)))

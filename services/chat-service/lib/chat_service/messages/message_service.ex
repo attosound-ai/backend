@@ -8,6 +8,7 @@ defmodule ChatService.Messages.MessageService do
 
   alias ChatService.Messages.Message
   alias ChatService.Conversations.ConversationService
+  alias ChatService.Reactions.ReactionService
   alias ChatService.KafkaProducer
   alias ChatService.Repo
 
@@ -28,10 +29,13 @@ defmodule ChatService.Messages.MessageService do
   def send_message(sender_id, conversation_id, content, content_type \\ "text", opts \\ []) do
     now = DateTime.utc_now()
     message_id = UUID.uuid1()
+    reply_to_id = Keyword.get(opts, :reply_to_id)
+    reply_to_content = Keyword.get(opts, :reply_to_content)
+    reply_to_sender = Keyword.get(opts, :reply_to_sender)
 
     query = """
-    INSERT INTO messages (conversation_id, message_id, sender_id, content, content_type, is_read, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (conversation_id, message_id, sender_id, content, content_type, is_read, created_at, reply_to_id, reply_to_content, reply_to_sender)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     params = %{
@@ -41,7 +45,10 @@ defmodule ChatService.Messages.MessageService do
       "content" => {"text", content},
       "content_type" => {"text", content_type},
       "is_read" => {"boolean", false},
-      "created_at" => {"timestamp", now}
+      "created_at" => {"timestamp", now},
+      "reply_to_id" => {"text", reply_to_id || ""},
+      "reply_to_content" => {"text", reply_to_content || ""},
+      "reply_to_sender" => {"text", reply_to_sender || ""}
     }
 
     case Repo.execute_prepared(query, params) do
@@ -53,6 +60,9 @@ defmodule ChatService.Messages.MessageService do
           content: content,
           content_type: content_type,
           is_read: false,
+          reply_to_id: reply_to_id,
+          reply_to_content: reply_to_content,
+          reply_to_sender: reply_to_sender,
           created_at: now
         }
 
@@ -85,8 +95,7 @@ defmodule ChatService.Messages.MessageService do
       if before do
         {
           """
-          SELECT conversation_id, message_id, sender_id, content, content_type, is_read, created_at
-          FROM messages
+          SELECT * FROM messages
           WHERE conversation_id = ? AND message_id < ?
           ORDER BY message_id DESC
           LIMIT ?
@@ -100,8 +109,7 @@ defmodule ChatService.Messages.MessageService do
       else
         {
           """
-          SELECT conversation_id, message_id, sender_id, content, content_type, is_read, created_at
-          FROM messages
+          SELECT * FROM messages
           WHERE conversation_id = ?
           ORDER BY message_id DESC
           LIMIT ?
@@ -129,7 +137,15 @@ defmodule ChatService.Messages.MessageService do
             nil
           end
 
-        {:ok, %{messages: messages, next_cursor: next_cursor, has_more: has_more}}
+        # Load reactions for all messages in batch
+        message_ids = Enum.map(messages, & &1.message_id)
+        reactions_map =
+          case ReactionService.get_reactions_batch(message_ids) do
+            {:ok, map} -> map
+            _ -> %{}
+          end
+
+        {:ok, %{messages: messages, reactions: reactions_map, next_cursor: next_cursor, has_more: has_more}}
 
       {:error, reason} ->
         Logger.error("Failed to get messages: #{inspect(reason)}")
@@ -175,6 +191,126 @@ defmodule ChatService.Messages.MessageService do
         Logger.error("Failed to mark messages as read: #{inspect(reason)}")
         {:error, :update_failed}
     end
+  end
+
+  @doc """
+  Edit a message's content. Only the original sender can edit.
+  """
+  def edit_message(message_id, conversation_id, sender_id, new_content) do
+    # Verify sender owns the message
+    case verify_sender(message_id, conversation_id, sender_id) do
+      :ok ->
+        now = DateTime.utc_now()
+
+        query = """
+        UPDATE messages
+        SET content = ?, is_edited = true, edited_at = ?
+        WHERE conversation_id = ? AND message_id = ?
+        """
+
+        params = %{
+          "content" => {"text", new_content},
+          "edited_at" => {"timestamp", now},
+          "conversation_id" => {"uuid", conversation_id},
+          "message_id" => {"timeuuid", message_id}
+        }
+
+        case Repo.execute_prepared(query, params) do
+          {:ok, _} ->
+            payload = %{
+              message_id: message_id,
+              conversation_id: conversation_id,
+              sender_id: sender_id,
+              content: new_content,
+              is_edited: true,
+              edited_at: DateTime.to_iso8601(now)
+            }
+
+            broadcast_event(conversation_id, :message_edited, payload)
+            {:ok, payload}
+
+          {:error, reason} ->
+            Logger.error("Failed to edit message: #{inspect(reason)}")
+            {:error, :update_failed}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Soft-delete a message. Only the original sender can delete.
+  The message content is replaced with a tombstone; the row is preserved.
+  """
+  def delete_message(message_id, conversation_id, sender_id) do
+    case verify_sender(message_id, conversation_id, sender_id) do
+      :ok ->
+        query = """
+        UPDATE messages
+        SET is_deleted = true, content = ''
+        WHERE conversation_id = ? AND message_id = ?
+        """
+
+        params = %{
+          "conversation_id" => {"uuid", conversation_id},
+          "message_id" => {"timeuuid", message_id}
+        }
+
+        case Repo.execute_prepared(query, params) do
+          {:ok, _} ->
+            payload = %{
+              message_id: message_id,
+              conversation_id: conversation_id,
+              sender_id: sender_id,
+              is_deleted: true
+            }
+
+            broadcast_event(conversation_id, :message_deleted, payload)
+            {:ok, payload}
+
+          {:error, reason} ->
+            Logger.error("Failed to delete message: #{inspect(reason)}")
+            {:error, :update_failed}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp verify_sender(message_id, conversation_id, sender_id) do
+    query = """
+    SELECT sender_id FROM messages
+    WHERE conversation_id = ? AND message_id = ?
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id}
+    }
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, result} ->
+        row = result |> Enum.to_list() |> List.first()
+
+        cond do
+          is_nil(row) -> {:error, :not_found}
+          to_string(row["sender_id"]) != sender_id -> {:error, :forbidden}
+          true -> :ok
+        end
+
+      {:error, _} ->
+        {:error, :query_failed}
+    end
+  end
+
+  defp broadcast_event(conversation_id, event, payload) do
+    Phoenix.PubSub.broadcast(
+      ChatService.PubSub,
+      "chat:#{conversation_id}",
+      {event, payload}
+    )
   end
 
   defp broadcast_message(conversation_id, %Message{} = message) do

@@ -1,8 +1,11 @@
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { RedisService } from "../redis/redis.service";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import * as path from "path";
 import * as fs from "fs";
+
+const USER_CACHE_TTL = 600; // 10 minutes
 
 interface UserResponse {
   id: string;
@@ -43,6 +46,8 @@ export class GrpcClientsService implements OnModuleInit {
   private readonly logger = new Logger(GrpcClientsService.name);
   private userClient: any;
   private contentClient: any;
+
+  constructor(private readonly redis: RedisService) {}
 
   onModuleInit(): void {
     this.initUserClient();
@@ -142,9 +147,24 @@ export class GrpcClientsService implements OnModuleInit {
     this.logger.log(`Content gRPC client connected to ${address}`);
   }
 
-  // ── User Service RPCs ──
+  // ── User Service RPCs (with Redis cache) ──
+
+  private userCacheKey(userId: string): string {
+    return `social:user:${userId}`;
+  }
+
+  /** Invalidate a user's cached profile — call on user.updated / user.deleted. */
+  async invalidateUserCache(userId: string): Promise<void> {
+    await this.redis.del(this.userCacheKey(userId));
+  }
 
   async getUser(userId: string): Promise<UserResponse | null> {
+    // Cache check
+    const cached = await this.redis.get(this.userCacheKey(userId));
+    if (cached) {
+      try { return JSON.parse(cached); } catch { /* fall through */ }
+    }
+
     return new Promise((resolve) => {
       this.userClient.GetUser(
         { user_id: userId },
@@ -154,6 +174,8 @@ export class GrpcClientsService implements OnModuleInit {
             this.logger.error(`GetUser failed for ${userId}: ${err.message}`);
             resolve(null);
           } else {
+            // Cache (fire-and-forget)
+            this.redis.set(this.userCacheKey(userId), JSON.stringify(response), USER_CACHE_TTL).catch(() => {});
             resolve(response);
           }
         },
@@ -161,11 +183,41 @@ export class GrpcClientsService implements OnModuleInit {
     });
   }
 
+  /**
+   * Batch fetch users with Redis cache layer.
+   * Reads all from cache in 1 pipeline, only calls gRPC for misses.
+   */
   async getUsersBatch(userIds: string[]): Promise<UserResponse[]> {
     if (userIds.length === 0) return [];
-    return new Promise((resolve) => {
+
+    // 1. Pipeline read from Redis
+    const client = this.redis.getClient();
+    const pipeline = client.pipeline();
+    for (const id of userIds) {
+      pipeline.get(this.userCacheKey(id));
+    }
+    const results = await pipeline.exec();
+
+    const cached: UserResponse[] = [];
+    const missingIds: string[] = [];
+
+    for (let i = 0; i < userIds.length; i++) {
+      const val = results?.[i]?.[1] as string | null;
+      if (val) {
+        try {
+          cached.push(JSON.parse(val));
+          continue;
+        } catch { /* fall through */ }
+      }
+      missingIds.push(userIds[i]);
+    }
+
+    // 2. gRPC only for cache misses
+    if (missingIds.length === 0) return cached;
+
+    const fromGrpc = await new Promise<UserResponse[]>((resolve) => {
       this.userClient.GetUsersBatch(
-        { user_ids: userIds },
+        { user_ids: missingIds },
         { deadline: this.deadline() },
         (err: any, response: { users: UserResponse[] }) => {
           if (err) {
@@ -177,6 +229,17 @@ export class GrpcClientsService implements OnModuleInit {
         },
       );
     });
+
+    // 3. Cache the gRPC results (fire-and-forget pipeline)
+    if (fromGrpc.length > 0) {
+      const cachePipeline = client.pipeline();
+      for (const user of fromGrpc) {
+        cachePipeline.set(this.userCacheKey(user.id), JSON.stringify(user), 'EX', USER_CACHE_TTL);
+      }
+      cachePipeline.exec().catch(() => {});
+    }
+
+    return [...cached, ...fromGrpc];
   }
 
   async validateToken(
@@ -302,6 +365,35 @@ export class GrpcClientsService implements OnModuleInit {
     });
   }
 
+  async updateContent(request: {
+    contentId: string;
+    authorId: string;
+    textContent?: string;
+    tags?: string[];
+    metadata?: Record<string, string>;
+  }): Promise<ContentResponse | null> {
+    return new Promise((resolve) => {
+      this.contentClient.UpdateContent(
+        {
+          content_id: request.contentId,
+          author_id: request.authorId,
+          text_content: request.textContent ?? '',
+          tags: request.tags ?? [],
+          metadata: request.metadata ?? {},
+        },
+        { deadline: this.deadline() },
+        (err: any, response: ContentResponse) => {
+          if (err) {
+            this.logger.error(`UpdateContent failed: ${err.message}`);
+            resolve(null);
+          } else {
+            resolve(response);
+          }
+        },
+      );
+    });
+  }
+
   async createContent(request: {
     authorId: string;
     contentType: string;
@@ -365,6 +457,25 @@ export class GrpcClientsService implements OnModuleInit {
                 total: 0,
               },
             });
+          }
+        },
+      );
+    });
+  }
+
+  async deleteAllContentByAuthor(authorId: string): Promise<number> {
+    return new Promise((resolve) => {
+      this.contentClient.DeleteContentByAuthor(
+        { author_id: authorId },
+        { deadline: this.longDeadline() },
+        (err: any, response: { deleted_count: number }) => {
+          if (err) {
+            this.logger.error(
+              `DeleteContentByAuthor failed for ${authorId}: ${err.message}`,
+            );
+            resolve(0);
+          } else {
+            resolve(response.deleted_count ?? 0);
           }
         },
       );

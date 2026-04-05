@@ -21,12 +21,13 @@ defmodule ChatServiceWeb.MessageController do
       |> maybe_add_limit(params)
 
     case MessageService.get_messages(chat_id, opts) do
-      {:ok, %{messages: messages, next_cursor: next_cursor, has_more: has_more}} ->
+      {:ok, %{messages: messages, reactions: reactions, next_cursor: next_cursor, has_more: has_more}} ->
         conn
         |> put_status(200)
         |> put_view(ChatServiceWeb.MessageView)
         |> render("index.json",
           messages: messages,
+          reactions: reactions,
           next_cursor: next_cursor,
           has_more: has_more
         )
@@ -103,6 +104,58 @@ defmodule ChatServiceWeb.MessageController do
         conn
         |> put_status(500)
         |> json(%{success: false, data: nil, error: "Failed to mark as read"})
+    end
+  end
+
+  @doc """
+  PATCH /api/v1/messages/:chat_id/:message_id
+  Edit a message. Only the sender can edit.
+  Body: %{"content" => string}
+  """
+  def update(conn, %{"chat_id" => chat_id, "message_id" => message_id} = params) do
+    user_id = conn.assigns.user_id
+    content = params["content"]
+
+    if is_nil(content) || content == "" do
+      conn
+      |> put_status(400)
+      |> json(%{success: false, data: nil, error: "content is required"})
+    else
+      case MessageService.edit_message(message_id, chat_id, user_id, content) do
+        {:ok, payload} ->
+          conn |> put_status(200) |> json(%{success: true, data: payload})
+
+        {:error, :forbidden} ->
+          conn |> put_status(403) |> json(%{success: false, data: nil, error: "Not the sender"})
+
+        {:error, :not_found} ->
+          conn |> put_status(404) |> json(%{success: false, data: nil, error: "Message not found"})
+
+        {:error, _reason} ->
+          conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to edit message"})
+      end
+    end
+  end
+
+  @doc """
+  DELETE /api/v1/messages/:chat_id/:message_id
+  Soft-delete a message. Only the sender can delete.
+  """
+  def delete(conn, %{"chat_id" => chat_id, "message_id" => message_id}) do
+    user_id = conn.assigns.user_id
+
+    case MessageService.delete_message(message_id, chat_id, user_id) do
+      {:ok, payload} ->
+        conn |> put_status(200) |> json(%{success: true, data: payload})
+
+      {:error, :forbidden} ->
+        conn |> put_status(403) |> json(%{success: false, data: nil, error: "Not the sender"})
+
+      {:error, :not_found} ->
+        conn |> put_status(404) |> json(%{success: false, data: nil, error: "Message not found"})
+
+      {:error, _reason} ->
+        conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to delete message"})
     end
   end
 

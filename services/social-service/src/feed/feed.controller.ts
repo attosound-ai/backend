@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -13,7 +14,7 @@ import { AuthGuard } from '../common/guards/auth.guard';
 import { CurrentUserId } from '../common/decorators/current-user.decorator';
 import { FeedService } from './feed.service';
 import { InteractionsService } from '../interactions/interactions.service';
-import { CreatePostDto, ExploreQueryDto, FeedQueryDto, ReelViewDto, ReelsQueryDto, UserPostsQueryDto } from './dto/feed.dto';
+import { CreatePostDto, ExploreQueryDto, FeedQueryDto, ReelViewDto, ReelsQueryDto, UpdatePostDto, UserPostsQueryDto } from './dto/feed.dto';
 
 @Controller('api/v1/posts')
 @UseGuards(AuthGuard)
@@ -56,6 +57,23 @@ export class FeedController {
       filePaths: dto.filePaths || [],
       metadata: dto.metadata || {},
       tags: dto.tags || [],
+    });
+    return {
+      success: true,
+      data: post,
+      error: null,
+    };
+  }
+
+  @Put(':id')
+  async updatePost(
+    @Param('id') postId: string,
+    @CurrentUserId() userId: string,
+    @Body() dto: UpdatePostDto,
+  ) {
+    const post = await this.feedService.updatePost(userId, postId, {
+      textContent: dto.textContent,
+      tags: dto.tags,
     });
     return {
       success: true,

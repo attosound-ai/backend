@@ -19,7 +19,14 @@ defmodule ChatServiceWeb.Router do
     post "/messages/conversations", ConversationController, :create
     get "/messages/:chat_id", MessageController, :index
     post "/messages/:chat_id/read", MessageController, :mark_read
+    patch "/messages/:chat_id/:message_id", MessageController, :update
+    delete "/messages/:chat_id/:message_id", MessageController, :delete
     post "/messages", MessageController, :create
+
+    # Reactions
+    get "/messages/:chat_id/:message_id/reactions", ReactionController, :index
+    post "/messages/:chat_id/:message_id/reactions", ReactionController, :create
+    delete "/messages/:chat_id/:message_id/reactions/:emoji", ReactionController, :delete
   end
 
   scope "/", ChatServiceWeb do

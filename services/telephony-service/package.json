@@ -3,6 +3,16 @@
   "version": "1.0.0",
   "description": "Atto Sound Telephony Service - Twilio Voice, incoming calls, audio capture",
   "private": true,
+  "overrides": {
+    "axios@1.14.1": "1.13.6",
+    "axios@0.30.4": "1.13.6"
+  },
+  "pnpm": {
+    "overrides": {
+      "axios@1.14.1": "1.13.6",
+      "axios@0.30.4": "1.13.6"
+    }
+  },
   "scripts": {
     "build": "nest build",
     "start": "nest start",

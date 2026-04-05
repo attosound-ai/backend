@@ -34,11 +34,22 @@ export class FeedService {
     posts: FeedPostDto[];
     meta: { nextCursor: number | null; hasMore: boolean };
   }> {
-    // Step 1: Always rebuild from following + recent posts.
-    // This ensures new posts from non-followed users always appear.
-    const result = await this.buildFeedFromFollowing(userId, cursor, limit);
-    const contentIds = result.contentIds;
-    const nextCursor = result.nextCursor;
+    const t0 = Date.now();
+
+    // Step 1: Try Redis feed cache first, fall back to rebuild
+    let contentIds: string[];
+    let nextCursor: number | null;
+    const cached = await this.redis.getFeedContentIds(userId, cursor, limit);
+    if (cached.contentIds.length > 0) {
+      contentIds = cached.contentIds;
+      nextCursor = cached.nextCursor;
+    } else {
+      const result = await this.buildFeedFromFollowing(userId, cursor, limit);
+      contentIds = result.contentIds;
+      nextCursor = result.nextCursor;
+    }
+    const t1 = Date.now();
+    this.logger.log(`[PERF] Step 1 feed IDs: ${t1 - t0}ms (${contentIds.length} IDs, cache=${cached.contentIds.length > 0})`);
 
     if (contentIds.length === 0) {
       return {
@@ -47,8 +58,10 @@ export class FeedService {
       };
     }
 
-    // Step 2: Fetch content details from Content service via gRPC
+    // Step 2+3: Fetch content + authors in parallel
     const { contents } = await this.grpcClients.getContentBatch(contentIds);
+    const t2 = Date.now();
+    this.logger.log(`[PERF] Step 2 getContentBatch gRPC: ${t2 - t1}ms (${contents.length} contents)`);
 
     if (contents.length === 0) {
       return {
@@ -57,28 +70,30 @@ export class FeedService {
       };
     }
 
-    // Step 3: Fetch author details via User service gRPC
+    const postIds = contents.map((c) => c.id);
     const authorIds = [...new Set(contents.map((c) => c.author_id))];
-    const users = await this.grpcClients.getUsersBatch(authorIds);
+
+    // Step 3+4: Fetch authors, counts, and user interactions ALL in parallel
+    const [users, countsMap, userInteractionsMap, followingIds] = await Promise.all([
+      this.grpcClients.getUsersBatch(authorIds),
+      this.interactionsService.getInteractionCountsBatch(postIds),
+      this.interactionsService.getUserInteractionsBatch(userId, postIds),
+      this.followsService.getFollowingIds(userId),
+    ]);
+    const t3 = Date.now();
+    this.logger.log(`[PERF] Step 3+4 authors+interactions+follows (parallel): ${t3 - t2}ms | TOTAL: ${t3 - t0}ms`);
+
     const userMap = new Map(users.map((u) => [u.id, u]));
 
-    // Step 4: Fetch interaction data for each content
-    const posts = await Promise.all(
-      contents.map(async (content) => {
-        const author = userMap.get(content.author_id);
-        const [counts, isLiked, isBookmarked, isReposted] = await Promise.all([
-          this.interactionsService.getInteractionCounts(content.id),
-          this.interactionsService.isLiked(userId, content.id),
-          this.interactionsService.isBookmarked(userId, content.id),
-          this.interactionsService.isReposted(userId, content.id),
-        ]);
-
-        return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
-      }),
-    );
-
-    // Sort by EdgeRank score with 1.5× boost for posts from followed accounts
-    const followingIds = await this.followsService.getFollowingIds(userId);
+    // Build posts from pre-fetched data (zero DB queries here)
+    const defaultCounts = { likesCount: 0, commentsCount: 0, sharesCount: 0, repostsCount: 0 };
+    const defaultInteractions = { isLiked: false, isBookmarked: false, isReposted: false };
+    const posts = contents.map((content) => {
+      const author = userMap.get(content.author_id);
+      const counts = countsMap.get(content.id) || defaultCounts;
+      const ui = userInteractionsMap.get(content.id) || defaultInteractions;
+      return this.buildFeedPost(content, author, counts, ui.isLiked, ui.isBookmarked, ui.isReposted);
+    });
     const followingSet = new Set(followingIds);
     const viewerId = String(userId);
     posts.sort(
@@ -167,39 +182,17 @@ export class FeedService {
       return { posts: [], meta: { nextCursor: null, hasMore: false } };
     }
 
-    // Fetch authors and interactions
-    const authorIds = [...new Set(reelContents.map((c) => c.author_id))];
-    const users = await this.grpcClients.getUsersBatch(authorIds);
-    const userMap = new Map(users.map((u) => [u.id, u]));
+    // Batch resolve authors + interactions + follows in parallel
+    const posts = await this.resolvePostsBatch(reelContents, userId);
 
-    const posts = await Promise.all(
-      reelContents.map(async (content) => {
-        const author = userMap.get(content.author_id);
-        const [counts, isLiked, isBookmarked, isReposted] = await Promise.all([
-          this.interactionsService.getInteractionCounts(content.id),
-          this.interactionsService.isLiked(userId, content.id),
-          this.interactionsService.isBookmarked(userId, content.id),
-          this.interactionsService.isReposted(userId, content.id),
-        ]);
-        return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
-      }),
-    );
-
-    // Score with reels formula + 1.5× boost for posts from followed accounts
-    const followingIds = await this.followsService.getFollowingIds(userId);
-    const followingSet = new Set(followingIds);
+    // Score with reels formula
+    const followingSet = new Set(posts.filter((p) => p.isFollowingAuthor).map((p) => p.authorId));
     const reelsViewerId = String(userId);
     posts.sort(
       (a, b) =>
         this.computeReelScore(b, followingSet.has(b.authorId), String(b.authorId) === reelsViewerId) -
         this.computeReelScore(a, followingSet.has(a.authorId), String(a.authorId) === reelsViewerId),
     );
-
-    // Tag each post with whether the viewer follows the author
-    const followingStrSet = new Set(followingIds.map(String));
-    for (const post of posts) {
-      post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(userId);
-    }
 
     const page = posts.slice(0, limit);
     const hasMore = posts.length > limit;
@@ -264,36 +257,14 @@ export class FeedService {
       return { posts: [], meta: { nextCursor: null, hasMore: false } };
     }
 
-    // Fetch authors and interactions
-    const authorIds = [...new Set(contents.map((c) => c.author_id))];
-    const users = await this.grpcClients.getUsersBatch(authorIds);
-    const userMap = new Map(users.map((u) => [u.id, u]));
-
-    const posts = await Promise.all(
-      contents.map(async (content) => {
-        const author = userMap.get(content.author_id);
-        const [counts, isLiked, isBookmarked, isReposted] = await Promise.all([
-          this.interactionsService.getInteractionCounts(content.id),
-          this.interactionsService.isLiked(userId, content.id),
-          this.interactionsService.isBookmarked(userId, content.id),
-          this.interactionsService.isReposted(userId, content.id),
-        ]);
-        return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
-      }),
-    );
+    // Batch resolve authors + interactions + follows in parallel
+    const posts = await this.resolvePostsBatch(contents, userId);
 
     const trendingViewerId = String(userId);
     posts.sort((a, b) =>
       this.computeReelScore(b, false, String(b.authorId) === trendingViewerId) -
       this.computeReelScore(a, false, String(a.authorId) === trendingViewerId),
     );
-
-    // Tag each post with whether the viewer follows the author
-    const followingIds = await this.followsService.getFollowingIds(userId);
-    const followingStrSet = new Set(followingIds.map(String));
-    for (const post of posts) {
-      post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(userId);
-    }
 
     const page = posts.slice(0, limit);
     const hasMore = posts.length > limit;
@@ -317,67 +288,60 @@ export class FeedService {
   }
 
   /**
-   * Build feed from the user's following list when Redis cache is cold
+   * Build feed from the user's following list when Redis cache is cold.
+   *
+   * Optimized: single listRecentContent call + parallel getContentByAuthor
+   * for own posts. Avoids N sequential gRPC calls per followed user.
    */
   private async buildFeedFromFollowing(
     userId: string,
     cursor: number,
     limit: number,
   ): Promise<{ contentIds: string[]; nextCursor: number | null }> {
-    // Get who the user follows
-    const followingIds = await this.followsService.getFollowingIds(userId);
+    // Fetch ALL recent content in one gRPC call + own posts in parallel
+    const [allRecent, ownContent, followingIds] = await Promise.all([
+      this.grpcClients.listRecentContent('', limit * 5),
+      this.grpcClients.getContentByAuthor(userId, { cursor: '', limit: 50 }),
+      this.followsService.getFollowingIds(userId),
+    ]);
 
+    const followingSet = new Set(followingIds.map(String));
     const allContents: { id: string; timestamp: number }[] = [];
+    const seenIds = new Set<string>();
 
-    // Batch fetch content from followed users (if any)
-    if (followingIds.length > 0) {
-      const batchSize = 10;
-      for (let i = 0; i < followingIds.length; i += batchSize) {
-        const batch = followingIds.slice(i, i + batchSize);
-        const results = await Promise.all(
-          batch.map((authorId) =>
-            this.grpcClients.getContentByAuthor(authorId, {
-              cursor: '',
-              limit: 100,
-            }),
-          ),
-        );
-
-        for (const result of results) {
-          for (const content of result.contents) {
-            const timestamp = new Date(content.created_at).getTime();
-            allContents.push({ id: content.id, timestamp });
-            try { await this.redis.addToFeed(userId, content.id, timestamp); } catch { /* ignore */ }
-          }
-        }
-      }
-    }
-
-    // Always include user's own posts
-    const ownContent = await this.grpcClients.getContentByAuthor(userId, {
-      cursor: '',
-      limit: 100,
-    });
+    // Add own posts
     for (const content of ownContent.contents) {
-      const timestamp = new Date(content.created_at).getTime();
-      allContents.push({ id: content.id, timestamp });
-      try { await this.redis.addToFeed(userId, content.id, timestamp); } catch { /* ignore */ }
+      if (!seenIds.has(content.id)) {
+        seenIds.add(content.id);
+        const timestamp = new Date(content.created_at).getTime();
+        allContents.push({ id: content.id, timestamp });
+      }
     }
 
-    // Fallback: fill with recent posts from non-followed accounts so the feed
-    // is never empty and always has content to show beyond the following list.
-    const fetchedAuthorIds = new Set([...followingIds, userId]);
-    try {
-      const exploreResult = await this.grpcClients.listRecentContent('', 100);
-      for (const content of exploreResult.contents) {
-        if (!fetchedAuthorIds.has(content.author_id)) {
-          const timestamp = new Date(content.created_at).getTime();
-          allContents.push({ id: content.id, timestamp });
-          try { await this.redis.addToFeed(userId, content.id, timestamp); } catch { /* ignore */ }
-        }
+    // Add recent content (following + explore), prioritizing followed users
+    for (const content of allRecent.contents) {
+      if (!seenIds.has(content.id)) {
+        seenIds.add(content.id);
+        const timestamp = new Date(content.created_at).getTime();
+        allContents.push({ id: content.id, timestamp });
       }
-    } catch (err) {
-      this.logger.warn('listRecentContent fallback failed during feed build', err);
+    }
+
+    // Cache in Redis for subsequent requests (fire-and-forget)
+    if (allContents.length > 0) {
+      const cacheEntries = allContents.map((c) => ({ id: c.id, timestamp: c.timestamp }));
+      Promise.resolve().then(async () => {
+        try {
+          const client = this.redis.getClient();
+          const pipeline = client.pipeline();
+          const feedKey = `social:feed:${userId}`;
+          for (const entry of cacheEntries) {
+            pipeline.zadd(feedKey, entry.timestamp, entry.id);
+          }
+          pipeline.zremrangebyrank(feedKey, 0, -501);
+          await pipeline.exec();
+        } catch { /* ignore cache errors */ }
+      });
     }
 
     if (allContents.length === 0) {
@@ -463,6 +427,29 @@ export class FeedService {
   }
 
   /**
+   * PUT /api/v1/posts/:id - Update a post (text/tags only, no media swap)
+   */
+  async updatePost(
+    userId: string,
+    postId: string,
+    data: { textContent?: string; tags?: string[] },
+  ): Promise<FeedPostDto> {
+    const updated = await this.grpcClients.updateContent({
+      contentId: postId,
+      authorId: userId,
+      textContent: data.textContent,
+      tags: data.tags,
+    });
+
+    if (!updated) {
+      throw new NotFoundException('Post not found or not the author');
+    }
+
+    const [post] = await this.resolvePostsBatch([updated], userId);
+    return post;
+  }
+
+  /**
    * GET /api/v1/posts/user/:userId - Get posts by a specific user
    */
   async getUserPosts(
@@ -487,29 +474,8 @@ export class FeedService {
       };
     }
 
-    // Fetch the author details once (all posts share the same author)
-    const author = await this.grpcClients.getUser(authorId);
-
-    // Fetch interaction data for each content
-    const posts = await Promise.all(
-      contents.map(async (content) => {
-        const [counts, isLiked, isBookmarked, isReposted] = await Promise.all([
-          this.interactionsService.getInteractionCounts(content.id),
-          this.interactionsService.isLiked(currentUserId, content.id),
-          this.interactionsService.isBookmarked(currentUserId, content.id),
-          this.interactionsService.isReposted(currentUserId, content.id),
-        ]);
-
-        return this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
-      }),
-    );
-
-    // Tag each post with whether the viewer follows the author
-    const followingIds = await this.followsService.getFollowingIds(currentUserId);
-    const followingStrSet = new Set(followingIds.map(String));
-    for (const post of posts) {
-      post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(currentUserId);
-    }
+    // Batch resolve author + interactions + follows in parallel
+    const posts = await this.resolvePostsBatch(contents, currentUserId);
 
     return {
       posts,
@@ -531,65 +497,120 @@ export class FeedService {
       throw new NotFoundException('Post not found');
     }
 
-    const [author, counts, isLiked, isBookmarked, isReposted] = await Promise.all([
-      this.grpcClients.getUser(content.author_id),
-      this.interactionsService.getInteractionCounts(postId),
-      this.interactionsService.isLiked(currentUserId, postId),
-      this.interactionsService.isBookmarked(currentUserId, postId),
-      this.interactionsService.isReposted(currentUserId, postId),
-    ]);
-
-    const post = this.buildFeedPost(content, author, counts, isLiked, isBookmarked, isReposted);
-
-    // Tag with whether the viewer follows the author
-    const followingIds = await this.followsService.getFollowingIds(currentUserId);
-    const followingStrSet = new Set(followingIds.map(String));
-    post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(currentUserId);
-
+    const [post] = await this.resolvePostsBatch([content], currentUserId);
     return post;
   }
 
   /**
-   * EdgeRank score for home feed.
-   * score = (likes×3 + comments×5 + shares×4 + reposts×2) × exp(-0.05 × hours)
+   * Three-pillar feed ranking inspired by Instagram/X/TikTok/LinkedIn.
    *
-   * Author self-boost: own posts < 5 min get a large bonus so they stay
-   * near the top of the author's feed and don't sink immediately.
+   * Score = Engagement + Recency + Relationship + SelfBoost
+   *
+   * ── Engagement (weighted like X's open-source algo) ──
+   *   shares×20 + comments×13 + reposts×10 + likes×1
+   *   Weighted by time decay: × exp(-0.05 × hours)
+   *   Shares/reposts >> likes (X, TikTok, Instagram all confirm this)
+   *
+   * ── Recency (Instagram timeliness pillar) ──
+   *   5 × exp(-0.015 × hours)
+   *   Fresh posts start at ~5, half-life ~46 hours (2 days)
+   *   Ensures new posts always surface even with 0 engagement
+   *
+   * ── Relationship (Instagram/LinkedIn relationship pillar) ──
+   *   +3.0 if viewer follows the author
+   *   Decays with time: × exp(-0.01 × hours)
+   *   Following someone means their content stays relevant longer
+   *
+   * ── Self-boost (own post visibility) ──
+   *   +50 for own posts < 10 min (see your post immediately)
+   *   Rapid decay so it sinks to natural position quickly
    */
   private computeEdgeRankScore(post: FeedPostDto, fromFollowing = false, isOwnPost = false): number {
     const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
-    const engagement = likesCount * 3 + commentsCount * 5 + sharesCount * 4 + repostsCount * 2;
     const ageMs = Date.now() - new Date(post.createdAt).getTime();
     const hours = ageMs / (1000 * 60 * 60);
     const minutes = ageMs / (1000 * 60);
-    const boost = fromFollowing ? 1.5 : 1.0;
-    let score = engagement * Math.exp(-0.05 * hours) * boost;
 
-    if (isOwnPost && minutes < 5) {
-      score += 1000 * Math.exp(-0.5 * minutes);
-    }
+    // Pillar 1: Engagement (X-style weights with time decay)
+    const rawEngagement = sharesCount * 20 + commentsCount * 13 + repostsCount * 10 + likesCount * 1;
+    const engagement = rawEngagement * Math.exp(-0.05 * hours);
 
-    return score;
+    // Pillar 2: Recency (always-on base score)
+    const recency = 5 * Math.exp(-0.015 * hours);
+
+    // Pillar 3: Relationship
+    const relationship = fromFollowing ? 3.0 * Math.exp(-0.01 * hours) : 0;
+
+    // Self-boost: own posts < 10 min
+    const selfBoost = isOwnPost && minutes < 10 ? 50 * Math.exp(-0.3 * minutes) : 0;
+
+    return engagement + recency + relationship + selfBoost;
   }
 
   /**
-   * Reels FYP score — higher weight on shares and faster time decay.
-   * score = (likes×3 + comments×4 + shares×5 + reposts×3) × exp(-0.08 × hours)
+   * Reels FYP score — shares/completion matter most (TikTok model).
+   *
+   * Same 3-pillar approach but with:
+   * - Higher share weight (shares×30, TikTok values sends above all)
+   * - Faster time decay (-0.08, reels cycle faster than feed posts)
+   * - Faster recency decay (half-life ~24h vs 48h for feed)
    */
   private computeReelScore(post: FeedPostDto, fromFollowing = false, isOwnPost = false): number {
     const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
-    const engagement = likesCount * 3 + commentsCount * 4 + sharesCount * 5 + repostsCount * 3;
     const ageMs = Date.now() - new Date(post.createdAt).getTime();
     const hours = ageMs / (1000 * 60 * 60);
     const minutes = ageMs / (1000 * 60);
-    const boost = fromFollowing ? 1.5 : 1.0;
-    let score = engagement * Math.exp(-0.08 * hours) * boost;
 
-    if (isOwnPost && minutes < 5) {
-      score += 1000 * Math.exp(-0.5 * minutes);
-    }
+    // Pillar 1: Engagement (TikTok-style — shares dominate)
+    const rawEngagement = sharesCount * 30 + commentsCount * 10 + repostsCount * 8 + likesCount * 1;
+    const engagement = rawEngagement * Math.exp(-0.08 * hours);
 
-    return score;
+    // Pillar 2: Recency (faster decay for reels)
+    const recency = 5 * Math.exp(-0.03 * hours);
+
+    // Pillar 3: Relationship
+    const relationship = fromFollowing ? 2.0 * Math.exp(-0.02 * hours) : 0;
+
+    // Self-boost
+    const selfBoost = isOwnPost && minutes < 10 ? 50 * Math.exp(-0.3 * minutes) : 0;
+
+    return engagement + recency + relationship + selfBoost;
+  }
+
+  /**
+   * Shared helper: given fetched contents and a viewer, resolves authors,
+   * interaction counts, and user interactions in batch (parallel).
+   * Eliminates the N+1 pattern across all feed endpoints.
+   */
+  private async resolvePostsBatch(
+    contents: any[],
+    viewerId: string,
+  ): Promise<FeedPostDto[]> {
+    if (contents.length === 0) return [];
+
+    const postIds = contents.map((c) => c.id);
+    const authorIds = [...new Set(contents.map((c) => c.author_id))];
+
+    const [users, countsMap, userInteractionsMap, followingIds] = await Promise.all([
+      this.grpcClients.getUsersBatch(authorIds),
+      this.interactionsService.getInteractionCountsBatch(postIds),
+      this.interactionsService.getUserInteractionsBatch(viewerId, postIds),
+      this.followsService.getFollowingIds(viewerId),
+    ]);
+
+    const userMap = new Map(users.map((u) => [u.id, u]));
+    const followingStrSet = new Set(followingIds.map(String));
+    const defaultCounts = { likesCount: 0, commentsCount: 0, sharesCount: 0, repostsCount: 0 };
+    const defaultUi = { isLiked: false, isBookmarked: false, isReposted: false };
+
+    return contents.map((content) => {
+      const author = userMap.get(content.author_id);
+      const counts = countsMap.get(content.id) || defaultCounts;
+      const ui = userInteractionsMap.get(content.id) || defaultUi;
+      const post = this.buildFeedPost(content, author, counts, ui.isLiked, ui.isBookmarked, ui.isReposted);
+      post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(viewerId);
+      return post;
+    });
   }
 
   private buildFeedPost(

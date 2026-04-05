@@ -14,6 +14,12 @@ defmodule ChatService.Messages.Message do
     :content,
     :content_type,
     :is_read,
+    :is_edited,
+    :edited_at,
+    :is_deleted,
+    :reply_to_id,
+    :reply_to_content,
+    :reply_to_sender,
     :created_at
   ]
 
@@ -24,6 +30,12 @@ defmodule ChatService.Messages.Message do
           content: String.t(),
           content_type: String.t(),
           is_read: boolean(),
+          is_edited: boolean(),
+          edited_at: DateTime.t() | nil,
+          is_deleted: boolean(),
+          reply_to_id: String.t() | nil,
+          reply_to_content: String.t() | nil,
+          reply_to_sender: String.t() | nil,
           created_at: DateTime.t() | nil
         }
 
@@ -38,6 +50,12 @@ defmodule ChatService.Messages.Message do
       content: row["content"],
       content_type: row["content_type"] || "text",
       is_read: row["is_read"] || false,
+      is_edited: row["is_edited"] || false,
+      edited_at: row["edited_at"],
+      is_deleted: row["is_deleted"] || false,
+      reply_to_id: row["reply_to_id"],
+      reply_to_content: row["reply_to_content"],
+      reply_to_sender: row["reply_to_sender"],
       created_at: row["created_at"]
     }
   end
@@ -53,6 +71,12 @@ defmodule ChatService.Messages.Message do
       content: message.content,
       content_type: message.content_type,
       is_read: message.is_read,
+      is_edited: message.is_edited || false,
+      edited_at: format_datetime(message.edited_at),
+      is_deleted: message.is_deleted || false,
+      reply_to_id: message.reply_to_id,
+      reply_to_content: message.reply_to_content,
+      reply_to_sender: message.reply_to_sender,
       created_at: format_datetime(message.created_at)
     }
   end

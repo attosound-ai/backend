@@ -90,6 +90,29 @@ model ReelView {
   @@map("reel_views")
 }
 
+model CreatorLogo {
+  id        String   @id @default(uuid())
+  imageUrl  String   @map("image_url")
+  sortOrder Int      @default(0) @map("sort_order")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([active, sortOrder])
+  @@map("creator_logos")
+}
+
+model CreatorLogoVote {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  logoId    String   @map("logo_id")
+  vote      Int      // 1 = like, -1 = dislike
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, logoId])
+  @@index([logoId])
+  @@map("creator_logo_votes")
+}
+
 model Notification {
   id          String   @id @default(uuid())
   recipientId String   @map("recipient_id")
