@@ -1,4 +1,5 @@
 use bson::oid::ObjectId;
+use bson::serde_helpers::chrono_datetime_as_bson_datetime;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,7 +19,9 @@ pub struct Content {
     pub metadata: HashMap<String, String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
 
