@@ -1,8 +1,26 @@
 use bson::oid::ObjectId;
-use bson::serde_helpers::chrono_datetime_as_bson_datetime;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+/// Deserialize a DateTime that might be stored as BSON Date or as an ISO string.
+/// MongoDB documents have mixed formats depending on how they were inserted.
+fn flexible_datetime<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FlexDate {
+        BsonDate(bson::DateTime),
+        ChronoDate(DateTime<Utc>),
+    }
+
+    match FlexDate::deserialize(deserializer)? {
+        FlexDate::BsonDate(bd) => Ok(bd.to_chrono()),
+        FlexDate::ChronoDate(cd) => Ok(cd),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Content {
@@ -19,9 +37,9 @@ pub struct Content {
     pub metadata: HashMap<String, String>,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    #[serde(deserialize_with = "flexible_datetime")]
     pub created_at: DateTime<Utc>,
-    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    #[serde(deserialize_with = "flexible_datetime")]
     pub updated_at: DateTime<Utc>,
 }
 
