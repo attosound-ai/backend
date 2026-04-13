@@ -5,15 +5,30 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   OneToMany,
+  Index,
 } from 'typeorm';
 import { AudioSegment } from './audio-segment.entity';
 
+/**
+ * A call record. Note the composite unique index on
+ * (twilioCallSid, userId): a single Twilio call SID can be referenced
+ * by multiple rows — one per participant (the caller and the
+ * recipient for a VoIP call) — so each user-side of the call has its
+ * own row, can own its own audio segments, and can be updated
+ * independently. Uniqueness on twilioCallSid alone would be wrong
+ * (only one side could exist), and no uniqueness at all allows
+ * Twilio webhook retries to insert duplicate rows for the same
+ * (call, user) pair.
+ */
 @Entity('calls')
+@Index('UQ_calls_twilioCallSid_userId', ['twilioCallSid', 'userId'], {
+  unique: true,
+})
 export class Call {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', length: 34, unique: true })
+  @Column({ type: 'varchar', length: 34 })
   twilioCallSid: string;
 
   @Column({ type: 'varchar', length: 20 })

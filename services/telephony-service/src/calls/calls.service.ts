@@ -35,17 +35,18 @@ export class CallsService {
     });
   }
 
-  /** Create a call record when an incoming call is received. */
+  /** Create a call record for an incoming or outgoing call. */
   async createCall(data: {
     twilioCallSid: string;
     fromNumber: string;
     toNumber: string;
     userId: string;
+    direction?: "inbound" | "outbound";
     metadata?: Record<string, unknown>;
   }): Promise<Call> {
     const call = this.callRepo.create({
       ...data,
-      direction: "inbound",
+      direction: data.direction ?? "inbound",
       status: "ringing",
       startedAt: new Date(),
     });
