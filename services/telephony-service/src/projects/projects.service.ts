@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
+import { QueryDeepPartialEntity } from "typeorm/query-builder/QueryPartialEntity";
 import { Project } from "../entities/project.entity";
 import { TimelineClip } from "../entities/timeline-clip.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
@@ -108,15 +109,51 @@ export class ProjectsService {
   async updateProject(
     projectId: string,
     userId: string,
-    data: { name?: string; description?: string; status?: string },
+    data: {
+      name?: string;
+      description?: string;
+      status?: string;
+      lanes?: Record<
+        string,
+        {
+          name: string;
+          color: string;
+          muted?: boolean;
+          solo?: boolean;
+          gainDb?: number;
+          pan?: number;
+        }
+      >;
+    },
   ): Promise<Project> {
-    const project = await this.projectRepo.findOne({
+    // Ownership check first.
+    const existing = await this.projectRepo.findOne({
       where: { id: projectId, userId },
     });
-    if (!project) throw new NotFoundException("Project not found");
+    if (!existing) throw new NotFoundException("Project not found");
 
-    Object.assign(project, data);
-    return this.projectRepo.save(project);
+    // Build the partial update payload. We go via `update()` (direct
+    // UPDATE SQL) instead of `save()` because TypeORM's dirty tracking
+    // for JSONB columns is unreliable — it sometimes fails to detect
+    // mutations of an existing column value even when a fresh reference
+    // is assigned. `update()` unconditionally emits the SQL.
+    const patch: QueryDeepPartialEntity<Project> = {};
+    if (data.name !== undefined) patch.name = data.name;
+    if (data.description !== undefined) patch.description = data.description;
+    if (data.status !== undefined) patch.status = data.status;
+    if (data.lanes !== undefined) {
+      patch.lanes = { ...data.lanes };
+    }
+
+    if (Object.keys(patch).length > 0) {
+      await this.projectRepo.update({ id: projectId, userId }, patch);
+    }
+
+    // Re-read to return the canonical persisted state.
+    const fresh = await this.projectRepo.findOne({
+      where: { id: projectId, userId },
+    });
+    return fresh!;
   }
 
   async deleteProject(projectId: string, userId: string): Promise<void> {
@@ -133,6 +170,7 @@ export class ProjectsService {
     segmentId: string,
     projectId: string,
     userId: string,
+    laneIndex: number = 0,
   ): Promise<AudioSegment> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
@@ -147,16 +185,39 @@ export class ProjectsService {
     segment.projectId = projectId;
     const saved = await this.segmentRepo.save(segment);
 
-    // Auto-create a timeline clip spanning the full segment
+    // Dedup guard: only auto-create a timeline clip if no clip in this
+    // project already references this segment. Without this guard,
+    // repeated calls to addSegment (e.g. from the frontend's orphan
+    // resolver after a cold start) would each append a duplicate clip,
+    // and parallel calls would all see an empty lane and stack
+    // duplicates at positionInTimeline=0.
+    const existingForSegment = await this.clipRepo.count({
+      where: { projectId, segmentId: segment.id },
+    });
+    if (existingForSegment > 0) {
+      this.logger.log(
+        "Segment %s already has a clip in project %s (count=%d); skipping auto-create",
+        segmentId,
+        projectId,
+        existingForSegment,
+      );
+      return saved;
+    }
+
+    // Auto-create a timeline clip spanning the full segment on the
+    // requested lane (default: lane 0).
     const existingClips = await this.clipRepo.find({
       where: { projectId },
       order: { order: "ASC" },
     });
-    const lastClip = existingClips[existingClips.length - 1];
-    const nextOrder = lastClip ? lastClip.order + 1 : 0;
-    const nextPosition = lastClip
-      ? lastClip.positionInTimeline +
-        (lastClip.endInSegment - lastClip.startInSegment)
+    const laneClips = existingClips.filter(
+      (c) => (c.laneIndex ?? 0) === laneIndex,
+    );
+    const lastLaneClip = laneClips[laneClips.length - 1];
+    const nextOrder = existingClips.length;
+    const nextPosition = lastLaneClip
+      ? lastLaneClip.positionInTimeline +
+        (lastLaneClip.endInSegment - lastLaneClip.startInSegment)
       : 0;
 
     const clip = this.clipRepo.create({
@@ -167,14 +228,15 @@ export class ProjectsService {
       positionInTimeline: nextPosition,
       order: nextOrder,
       volume: 1.0,
-      laneIndex: 0,
+      laneIndex,
     });
     await this.clipRepo.save(clip);
 
     this.logger.log(
-      "Auto-created timeline clip for segment %s in project %s",
+      "Auto-created timeline clip for segment %s in project %s on lane %d",
       segmentId,
       projectId,
+      laneIndex,
     );
 
     return saved;

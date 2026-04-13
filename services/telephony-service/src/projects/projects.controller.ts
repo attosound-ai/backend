@@ -89,6 +89,7 @@ export class ProjectsController {
   async addSegment(
     @Param("id") id: string,
     @Body("segmentId") segmentId: string,
+    @Body("laneIndex") laneIndex: number | undefined,
     @Headers("x-user-id") userId: string,
     @Headers("authorization") authHeader: string,
   ) {
@@ -97,6 +98,7 @@ export class ProjectsController {
       segmentId,
       id,
       uid,
+      typeof laneIndex === "number" ? laneIndex : 0,
     );
     return { success: true, data: segment };
   }
