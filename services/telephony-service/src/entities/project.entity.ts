@@ -27,7 +27,17 @@ export class Project {
   status: string; // 'active' | 'archived' | 'exported'
 
   @Column({ type: "jsonb", default: {} })
-  lanes: Record<string, { name: string; color: string }>;
+  lanes: Record<
+    string,
+    {
+      name: string;
+      color: string;
+      muted?: boolean;
+      solo?: boolean;
+      gainDb?: number;
+      pan?: number;
+    }
+  >;
 
   @CreateDateColumn({ type: "timestamptz" })
   createdAt: Date;

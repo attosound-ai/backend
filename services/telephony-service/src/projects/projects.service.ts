@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
+import { QueryDeepPartialEntity } from "typeorm/query-builder/QueryPartialEntity";
 import { Project } from "../entities/project.entity";
 import { TimelineClip } from "../entities/timeline-clip.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
@@ -108,15 +109,51 @@ export class ProjectsService {
   async updateProject(
     projectId: string,
     userId: string,
-    data: { name?: string; description?: string; status?: string },
+    data: {
+      name?: string;
+      description?: string;
+      status?: string;
+      lanes?: Record<
+        string,
+        {
+          name: string;
+          color: string;
+          muted?: boolean;
+          solo?: boolean;
+          gainDb?: number;
+          pan?: number;
+        }
+      >;
+    },
   ): Promise<Project> {
-    const project = await this.projectRepo.findOne({
+    // Ownership check first.
+    const existing = await this.projectRepo.findOne({
       where: { id: projectId, userId },
     });
-    if (!project) throw new NotFoundException("Project not found");
+    if (!existing) throw new NotFoundException("Project not found");
 
-    Object.assign(project, data);
-    return this.projectRepo.save(project);
+    // Build the partial update payload. We go via `update()` (direct
+    // UPDATE SQL) instead of `save()` because TypeORM's dirty tracking
+    // for JSONB columns is unreliable — it sometimes fails to detect
+    // mutations of an existing column value even when a fresh reference
+    // is assigned. `update()` unconditionally emits the SQL.
+    const patch: QueryDeepPartialEntity<Project> = {};
+    if (data.name !== undefined) patch.name = data.name;
+    if (data.description !== undefined) patch.description = data.description;
+    if (data.status !== undefined) patch.status = data.status;
+    if (data.lanes !== undefined) {
+      patch.lanes = { ...data.lanes };
+    }
+
+    if (Object.keys(patch).length > 0) {
+      await this.projectRepo.update({ id: projectId, userId }, patch);
+    }
+
+    // Re-read to return the canonical persisted state.
+    const fresh = await this.projectRepo.findOne({
+      where: { id: projectId, userId },
+    });
+    return fresh!;
   }
 
   async deleteProject(projectId: string, userId: string): Promise<void> {
