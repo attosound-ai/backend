@@ -96,6 +96,106 @@ export class WebhooksController {
   }
 
   /**
+   * TwiML App Voice URL — Twilio calls this when a Voice SDK client
+   * initiates an outbound call via voice.connect().
+   *
+   * Supports two modes:
+   *  - recipientType=client → app-to-app VoIP call
+   *  - recipientType=number → outbound PSTN call
+   *
+   * This endpoint does NOT affect the bridge-number PSTN→App flow,
+   * which is configured separately on each Twilio phone number
+   * and handled by the /incoming endpoint above.
+   */
+  @Post("outgoing")
+  @HttpCode(200)
+  async handleOutgoingCall(
+    @Body() body: Record<string, string>,
+    @Res() res: Response,
+  ): Promise<void> {
+    const to = body.To;
+    const from = body.From; // e.g. "client:user-42"
+    const recipientType = body.recipientType || "client";
+    const callSid = body.CallSid;
+
+    // Extract caller userId from "client:user-{id}" identity
+    const callerUserId = from?.replace("client:", "").replace("user-", "") || "";
+
+    this.logger.log(
+      "Outgoing call: sid=%s from=%s to=%s type=%s",
+      callSid,
+      from,
+      to,
+      recipientType,
+    );
+
+    const response = new TwiML.VoiceResponse();
+    const webhookBaseUrl = this.config.get<string>("webhookBaseUrl");
+
+    if (recipientType === "client") {
+      // App-to-app VoIP call
+      const dial = response.dial({
+        answerOnBridge: true,
+        callerId: from,
+        action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
+        timeout: 30,
+      });
+      dial.client(to);
+    } else {
+      // Outbound PSTN call
+      const bridgeNumber = this.config.get<string>("twilio.bridgeNumber");
+      const dial = response.dial({
+        answerOnBridge: true,
+        callerId: bridgeNumber,
+        action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
+        timeout: 30,
+      });
+      dial.number(to);
+    }
+
+    // Create call records for both caller and recipient so either side can record
+    const recipientUserId = to?.replace("user-", "") || "";
+    await this.callsService
+      .createCall({
+        twilioCallSid: callSid,
+        fromNumber: from || "",
+        toNumber: to || "",
+        userId: callerUserId,
+        direction: "outbound",
+        metadata: { recipientUserId, recipientType },
+      })
+      .catch((err) =>
+        this.logger.warn("Failed to create outgoing call record: %s", err),
+      );
+
+    if (recipientUserId && recipientType === "client") {
+      await this.callsService
+        .createCall({
+          twilioCallSid: callSid,
+          fromNumber: from || "",
+          toNumber: to || "",
+          userId: recipientUserId,
+          direction: "inbound",
+          metadata: { callerUserId, recipientType },
+        })
+        .catch((err) =>
+          this.logger.warn("Failed to create recipient call record: %s", err),
+        );
+    }
+
+    this.kafka.publish("call.started", {
+      callSid,
+      userId: callerUserId,
+      fromNumber: from,
+      toNumber: to,
+      direction: "outbound",
+      startedAt: new Date().toISOString(),
+    });
+
+    res.type("text/xml").send(response.toString());
+  }
+
+  /**
    * Call status callback — Twilio sends updates as the call progresses.
    */
   @Post("status")
