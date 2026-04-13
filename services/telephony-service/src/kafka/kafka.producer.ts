@@ -69,7 +69,9 @@ export class KafkaProducer implements OnModuleInit, OnModuleDestroy {
       this.logger.log("Published event to %s", topic);
     } catch (err) {
       this.logger.error("Failed to publish to %s: %s", topic, err);
-      throw err;
+      // Don't throw — Kafka publish is fire-and-forget.
+      // Crashing the service because a telemetry event failed to publish
+      // takes down voice calls for all users.
     }
   }
 }
