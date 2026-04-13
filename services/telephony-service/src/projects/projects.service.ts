@@ -133,6 +133,7 @@ export class ProjectsService {
     segmentId: string,
     projectId: string,
     userId: string,
+    laneIndex: number = 0,
   ): Promise<AudioSegment> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
@@ -147,16 +148,39 @@ export class ProjectsService {
     segment.projectId = projectId;
     const saved = await this.segmentRepo.save(segment);
 
-    // Auto-create a timeline clip spanning the full segment
+    // Dedup guard: only auto-create a timeline clip if no clip in this
+    // project already references this segment. Without this guard,
+    // repeated calls to addSegment (e.g. from the frontend's orphan
+    // resolver after a cold start) would each append a duplicate clip,
+    // and parallel calls would all see an empty lane and stack
+    // duplicates at positionInTimeline=0.
+    const existingForSegment = await this.clipRepo.count({
+      where: { projectId, segmentId: segment.id },
+    });
+    if (existingForSegment > 0) {
+      this.logger.log(
+        "Segment %s already has a clip in project %s (count=%d); skipping auto-create",
+        segmentId,
+        projectId,
+        existingForSegment,
+      );
+      return saved;
+    }
+
+    // Auto-create a timeline clip spanning the full segment on the
+    // requested lane (default: lane 0).
     const existingClips = await this.clipRepo.find({
       where: { projectId },
       order: { order: "ASC" },
     });
-    const lastClip = existingClips[existingClips.length - 1];
-    const nextOrder = lastClip ? lastClip.order + 1 : 0;
-    const nextPosition = lastClip
-      ? lastClip.positionInTimeline +
-        (lastClip.endInSegment - lastClip.startInSegment)
+    const laneClips = existingClips.filter(
+      (c) => (c.laneIndex ?? 0) === laneIndex,
+    );
+    const lastLaneClip = laneClips[laneClips.length - 1];
+    const nextOrder = existingClips.length;
+    const nextPosition = lastLaneClip
+      ? lastLaneClip.positionInTimeline +
+        (lastLaneClip.endInSegment - lastLaneClip.startInSegment)
       : 0;
 
     const clip = this.clipRepo.create({
@@ -167,14 +191,15 @@ export class ProjectsService {
       positionInTimeline: nextPosition,
       order: nextOrder,
       volume: 1.0,
-      laneIndex: 0,
+      laneIndex,
     });
     await this.clipRepo.save(clip);
 
     this.logger.log(
-      "Auto-created timeline clip for segment %s in project %s",
+      "Auto-created timeline clip for segment %s in project %s on lane %d",
       segmentId,
       projectId,
+      laneIndex,
     );
 
     return saved;
