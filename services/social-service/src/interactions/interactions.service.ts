@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -221,19 +222,20 @@ export class InteractionsService {
 
     const [comments, total] = await Promise.all([
       this.prisma.comment.findMany({
-        where: { contentId, parentId: null },
+        where: { contentId, parentId: null, isDeleted: false },
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,
         include: {
           replies: {
+            where: { isDeleted: false },
             orderBy: { createdAt: "asc" },
             take: 3,
           },
         },
       }),
       this.prisma.comment.count({
-        where: { contentId, parentId: null },
+        where: { contentId, parentId: null, isDeleted: false },
       }),
     ]);
 
@@ -272,6 +274,7 @@ export class InteractionsService {
       comment: c.text,
       parentId: c.parentId,
       createdAt: c.createdAt.toISOString(),
+      isEdited: c.isEdited,
       author: mapAuthor(c.userId),
       replies: c.replies.map((r) => ({
         id: r.id,
@@ -280,6 +283,7 @@ export class InteractionsService {
         comment: r.text,
         parentId: r.parentId,
         createdAt: r.createdAt.toISOString(),
+        isEdited: r.isEdited,
         author: mapAuthor(r.userId),
       })),
     }));
@@ -288,6 +292,84 @@ export class InteractionsService {
       comments: result,
       meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
+  }
+
+  async editComment(
+    userId: string,
+    commentId: string,
+    newText: string,
+  ): Promise<CommentResponseDto> {
+    const comment = await this.prisma.comment.findUnique({
+      where: { id: commentId },
+    });
+    if (!comment || comment.isDeleted) {
+      throw new NotFoundException("Comment not found");
+    }
+    if (comment.userId !== userId) {
+      throw new ForbiddenException("Cannot edit another user's comment");
+    }
+
+    const updated = await this.prisma.comment.update({
+      where: { id: commentId },
+      data: { text: newText, isEdited: true, editedAt: new Date() },
+    });
+
+    await this.kafkaProducer.send("interaction.updated", {
+      id: updated.id,
+      user_id: userId,
+      content_id: updated.contentId,
+      type: "comment",
+    });
+
+    const author = await this.grpcClients.getUser(userId);
+
+    this.logger.log(`User ${userId} edited comment ${commentId}`);
+
+    return {
+      id: updated.id,
+      userId: updated.userId,
+      contentId: updated.contentId,
+      comment: updated.text,
+      parentId: updated.parentId,
+      createdAt: updated.createdAt.toISOString(),
+      isEdited: updated.isEdited,
+      author: author
+        ? {
+            id: author.id,
+            username: author.username,
+            displayName: author.display_name || author.username,
+            avatar: author.avatar || null,
+          }
+        : undefined,
+    };
+  }
+
+  async deleteComment(userId: string, commentId: string): Promise<void> {
+    const comment = await this.prisma.comment.findUnique({
+      where: { id: commentId },
+    });
+    if (!comment || comment.isDeleted) {
+      throw new NotFoundException("Comment not found");
+    }
+    if (comment.userId !== userId) {
+      throw new ForbiddenException("Cannot delete another user's comment");
+    }
+
+    await this.prisma.comment.update({
+      where: { id: commentId },
+      data: { isDeleted: true, deletedAt: new Date() },
+    });
+
+    await this.redis.decrementCount("comments", comment.contentId);
+
+    await this.kafkaProducer.send("interaction.deleted", {
+      id: commentId,
+      user_id: userId,
+      content_id: comment.contentId,
+      type: "comment",
+    });
+
+    this.logger.log(`User ${userId} deleted comment ${commentId}`);
   }
 
   // ── Bookmarks ──

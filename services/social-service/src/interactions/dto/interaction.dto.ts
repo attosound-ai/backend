@@ -27,6 +27,13 @@ export class InteractionPaginationDto {
   limit?: number = 20;
 }
 
+export class UpdateCommentDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2000)
+  comment: string;
+}
+
 export class CommentResponseDto {
   id: string;
   userId: string;
@@ -34,6 +41,8 @@ export class CommentResponseDto {
   comment: string;
   parentId?: string | null;
   createdAt: string;
+  isEdited?: boolean;
+  isDeleted?: boolean;
   author?: {
     id: string;
     username: string;

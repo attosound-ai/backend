@@ -7,6 +7,10 @@ defmodule ChatService.Messages.MessageService do
   """
 
   alias ChatService.Messages.Message
+  alias ChatService.Messages.Authorizer
+  alias ChatService.Messages.Persistence
+  alias ChatService.Messages.EventPublisher
+  alias ChatService.Messages.ReactionCleaner
   alias ChatService.Conversations.ConversationService
   alias ChatService.Reactions.ReactionService
   alias ChatService.KafkaProducer
@@ -240,42 +244,45 @@ defmodule ChatService.Messages.MessageService do
   end
 
   @doc """
-  Soft-delete a message. Only the original sender can delete.
-  The message content is replaced with a tombstone; the row is preserved.
+  Soft-delete a message.
+
+  Orchestrates an authorize → persist → cascade → publish pipeline built
+  from swappable collaborators (`Authorizer`, `Persistence`, `EventPublisher`).
+  Each collaborator owns exactly one concern:
+
+    1. `Authorizer.can_delete?/3` — decides whether `user_id` may delete
+       the message. Only the original sender today; moderator and retention
+       policies can be added as new implementations (Open/Closed).
+    2. `Persistence.soft_delete/3` — writes the tombstone row and stamps
+       audit fields (`deleted_at`, `deleted_by`). Returns the DB-side
+       timestamp so the emitted payload matches the persisted state.
+    3. `ReactionService.delete_all_for_message/2` — cascades reaction
+       cleanup so the deleted message has no stale UI state. Failures are
+       logged but non-fatal because the parent mutation already committed.
+    4. `EventPublisher.publish_deleted/1` — fans out to Phoenix.PubSub for
+       in-node WebSocket subscribers and to Kafka (`message.deleted` topic)
+       for cross-service consumers (notifications, search, audit).
+
+  Any error short-circuits the pipeline via `with/1` and bubbles a specific
+  atom (`:forbidden`, `:not_found`, `:update_failed`, …) so upstream
+  controllers/channels can translate to HTTP/WS errors without inspecting
+  driver internals.
   """
-  def delete_message(message_id, conversation_id, sender_id) do
-    case verify_sender(message_id, conversation_id, sender_id) do
-      :ok ->
-        query = """
-        UPDATE messages
-        SET is_deleted = true, content = ''
-        WHERE conversation_id = ? AND message_id = ?
-        """
+  def delete_message(message_id, conversation_id, user_id) do
+    with :ok <- Authorizer.can_delete?(message_id, conversation_id, user_id),
+         {:ok, deleted_at} <- Persistence.soft_delete(message_id, conversation_id, user_id),
+         :ok <- ReactionCleaner.cleanup(message_id, conversation_id) do
+      payload = %{
+        message_id: message_id,
+        conversation_id: conversation_id,
+        sender_id: user_id,
+        deleted_by: user_id,
+        deleted_at: deleted_at,
+        is_deleted: true
+      }
 
-        params = %{
-          "conversation_id" => {"uuid", conversation_id},
-          "message_id" => {"timeuuid", message_id}
-        }
-
-        case Repo.execute_prepared(query, params) do
-          {:ok, _} ->
-            payload = %{
-              message_id: message_id,
-              conversation_id: conversation_id,
-              sender_id: sender_id,
-              is_deleted: true
-            }
-
-            broadcast_event(conversation_id, :message_deleted, payload)
-            {:ok, payload}
-
-          {:error, reason} ->
-            Logger.error("Failed to delete message: #{inspect(reason)}")
-            {:error, :update_failed}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+      :ok = EventPublisher.publish_deleted(payload)
+      {:ok, payload}
     end
   end
 

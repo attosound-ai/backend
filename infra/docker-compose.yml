@@ -572,7 +572,7 @@ services:
       mailpit:
         condition: service_started
     ports:
-      - "3005:3005"
+      - "3040:3005"
     environment:
       PORT: 3005
       EMAIL_PROVIDER: ${EMAIL_PROVIDER:-mailpit}

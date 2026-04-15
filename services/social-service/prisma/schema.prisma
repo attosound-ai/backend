@@ -34,18 +34,16 @@ model Interaction {
   @@map("interactions")
 }
 
-enum InteractionType {
-  LIKE
-  COMMENT
-  SHARE
-}
-
 model Comment {
   id        String    @id @default(uuid())
   userId    String    @map("user_id")
   contentId String    @map("content_id")
   text      String
   parentId  String?   @map("parent_id")
+  isEdited  Boolean   @default(false) @map("is_edited")
+  editedAt  DateTime? @map("edited_at")
+  isDeleted Boolean   @default(false) @map("is_deleted")
+  deletedAt DateTime? @map("deleted_at")
   createdAt DateTime  @default(now()) @map("created_at")
   parent    Comment?  @relation("Replies", fields: [parentId], references: [id])
   replies   Comment[] @relation("Replies")
@@ -95,6 +93,7 @@ model CreatorLogo {
   imageUrl  String   @map("image_url")
   sortOrder Int      @default(0) @map("sort_order")
   active    Boolean  @default(true)
+  creatorId String?  @map("creator_id")
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([active, sortOrder])
@@ -102,15 +101,15 @@ model CreatorLogo {
 }
 
 model FeedAd {
-  id         String   @id @default(uuid())
-  videoUrl   String   @map("video_url")
-  brandName  String   @map("brand_name") @db.VarChar(100)
-  brandAvatar String? @map("brand_avatar") @db.VarChar(500)
-  caption    String   @default("")
-  linkUrl    String?  @map("link_url") @db.VarChar(500)
-  sortOrder  Int      @default(0) @map("sort_order")
-  active     Boolean  @default(true)
-  createdAt  DateTime @default(now()) @map("created_at")
+  id          String   @id @default(uuid())
+  videoUrl    String   @map("video_url")
+  brandName   String   @map("brand_name") @db.VarChar(100)
+  brandAvatar String?  @map("brand_avatar") @db.VarChar(500)
+  caption     String   @default("")
+  linkUrl     String?  @map("link_url") @db.VarChar(500)
+  sortOrder   Int      @default(0) @map("sort_order")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
 
   @@index([active, sortOrder])
   @@map("feed_ads")
@@ -120,7 +119,7 @@ model CreatorLogoVote {
   id        String   @id @default(uuid())
   userId    String   @map("user_id")
   logoId    String   @map("logo_id")
-  vote      Int      // 1 = like, -1 = dislike
+  vote      Int
   createdAt DateTime @default(now()) @map("created_at")
 
   @@unique([userId, logoId])
@@ -140,4 +139,10 @@ model Notification {
   @@index([recipientId, createdAt])
   @@index([recipientId, isRead])
   @@map("notifications")
+}
+
+enum InteractionType {
+  LIKE
+  COMMENT
+  SHARE
 }

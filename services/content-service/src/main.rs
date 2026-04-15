@@ -17,9 +17,9 @@ use tonic::transport::Server as TonicServer;
 use cloudinary::{CloudinaryClient, CloudinaryConfig};
 use config::Config;
 use grpc::ContentGrpcServer;
-use handlers::{content_handler, health_handler, media_handler};
+use handlers::{chat_wallpaper_handler, content_handler, health_handler, media_handler};
 use kafka::KafkaProducer;
-use repositories::ContentRepository;
+use repositories::{ChatWallpaperRepository, ContentRepository};
 use services::ContentService;
 
 #[actix_web::main]
@@ -44,6 +44,7 @@ async fn main() -> std::io::Result<()> {
 
     // Create repository, Kafka producer, and service
     let repo = ContentRepository::new(&db);
+    let wallpaper_repo = ChatWallpaperRepository::new(&db);
     let kafka_producer = KafkaProducer::new(&config.kafka_brokers);
     let content_service = ContentService::new(repo, kafka_producer);
 
@@ -80,6 +81,7 @@ async fn main() -> std::io::Result<()> {
     let http_port = config.http_port;
     let config_data = web::Data::new(config);
     let service_data = web::Data::new(content_service);
+    let wallpaper_repo_data = web::Data::new(wallpaper_repo);
     let cloudinary_data = web::Data::new(cloudinary_client);
 
     info!("HTTP server listening on 0.0.0.0:{}", http_port);
@@ -88,11 +90,13 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(config_data.clone())
             .app_data(service_data.clone())
+            .app_data(wallpaper_repo_data.clone())
             .app_data(cloudinary_data.clone())
             .service(health_handler::health_check)
             .service(media_handler::sign_upload)
             .service(media_handler::upload_media)
             .service(media_handler::delete_media)
+            .service(chat_wallpaper_handler::list_chat_wallpapers)
             .service(content_handler::create_content)
             .service(content_handler::search_content)
             .service(content_handler::get_content)

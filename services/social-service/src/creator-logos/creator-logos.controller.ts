@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '../common/guards/auth.guard';
@@ -32,7 +33,7 @@ export class CreatorLogosController {
     @Param('id') logoId: string,
     @Body() dto: VoteDto,
   ) {
-    await this.service.vote(userId, logoId, dto.vote);
+    await this.service.vote(userId, logoId, dto.rating);
     const logos = await this.service.getActiveLogos(userId);
     return { success: true, data: logos, error: null };
   }
@@ -42,8 +43,11 @@ export class CreatorLogosController {
     @Param('id') logoId: string,
     @Param('type') type: string,
   ) {
-    const voteType = type === 'likes' ? 1 : -1;
-    const result = await this.service.getVoters(logoId, voteType, 1, 50);
+    const ratingValue = parseInt(type, 10);
+    const voteFilter = !isNaN(ratingValue) && ratingValue >= 1 && ratingValue <= 5
+      ? ratingValue
+      : 1;
+    const result = await this.service.getVoters(logoId, voteFilter, 1, 50);
     return { success: true, data: result.users, error: null, meta: { total: result.total } };
   }
 

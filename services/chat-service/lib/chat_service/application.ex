@@ -11,23 +11,34 @@ defmodule ChatService.Application do
     cassandra_nodes = Application.get_env(:chat_service, :cassandra_nodes, ["localhost:9042"])
     cassandra_keyspace = Application.get_env(:chat_service, :cassandra_keyspace, "atto_chat")
     kafka_brokers = Application.get_env(:chat_service, :kafka_brokers, [{"localhost", 9092}])
+    infra_enabled = Application.get_env(:chat_service, :infra_enabled, true)
 
-    # Bootstrap keyspace and tables with a temporary connection (no keyspace).
-    # The main Xandra.Cluster uses `keyspace: atto_chat` which sends USE atto_chat
-    # on connect. If the keyspace doesn't exist yet, ALL pool connections die.
-    bootstrap_cassandra(cassandra_nodes, cassandra_keyspace)
+    if infra_enabled do
+      # Bootstrap keyspace and tables with a temporary connection (no keyspace).
+      # The main Xandra.Cluster uses `keyspace: atto_chat` which sends USE atto_chat
+      # on connect. If the keyspace doesn't exist yet, ALL pool connections die.
+      bootstrap_cassandra(cassandra_nodes, cassandra_keyspace)
+    end
 
-    children = [
-      {Phoenix.PubSub, name: ChatService.PubSub},
-      {Xandra.Cluster,
-       name: ChatService.Repo,
-       nodes: cassandra_nodes,
-       pool_size: 10,
-       keyspace: cassandra_keyspace},
-      {ChatService.KafkaProducer, brokers: kafka_brokers},
-      {ChatService.KafkaConsumer, brokers: kafka_brokers},
-      ChatServiceWeb.Endpoint
-    ]
+    infra_children =
+      if infra_enabled do
+        [
+          {Xandra.Cluster,
+           name: ChatService.Repo,
+           nodes: cassandra_nodes,
+           pool_size: 10,
+           keyspace: cassandra_keyspace},
+          {ChatService.KafkaProducer, brokers: kafka_brokers},
+          {ChatService.KafkaConsumer, brokers: kafka_brokers}
+        ]
+      else
+        []
+      end
+
+    children =
+      [{Phoenix.PubSub, name: ChatService.PubSub}] ++
+        infra_children ++
+        [ChatServiceWeb.Endpoint]
 
     opts = [strategy: :one_for_one, name: ChatService.Supervisor]
     Supervisor.start_link(children, opts)
@@ -120,7 +131,9 @@ defmodule ChatService.Application do
       "ALTER TABLE #{keyspace}.messages ADD is_deleted boolean",
       "ALTER TABLE #{keyspace}.messages ADD reply_to_id text",
       "ALTER TABLE #{keyspace}.messages ADD reply_to_content text",
-      "ALTER TABLE #{keyspace}.messages ADD reply_to_sender text"
+      "ALTER TABLE #{keyspace}.messages ADD reply_to_sender text",
+      "ALTER TABLE #{keyspace}.messages ADD deleted_at timestamp",
+      "ALTER TABLE #{keyspace}.messages ADD deleted_by text"
     ]
 
     Enum.each(statements, fn stmt ->

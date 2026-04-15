@@ -81,6 +81,41 @@ defmodule ChatService.Reactions.ReactionService do
   end
 
   @doc """
+  Delete every reaction attached to `message_id`.
+
+  Cascaded from `MessageService.delete_message/3` so a soft-deleted message
+  never shows stale reactions. The reactions table is partitioned by
+  `message_id`, so a single partition-level DELETE drops all rows in one
+  round-trip.
+
+  Failures are logged but not propagated — the parent mutation already
+  succeeded at this point; a cleanup job (or a future Kafka consumer on the
+  `message.deleted` topic) can reconcile. We also broadcast a
+  `reactions_cleared` event so connected clients drop the UI state without
+  waiting for a refetch.
+  """
+  def delete_all_for_message(message_id, conversation_id) do
+    query = """
+    DELETE FROM reactions WHERE message_id = ?
+    """
+
+    params = %{"message_id" => {"timeuuid", message_id}}
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, _} ->
+        broadcast(conversation_id, "reactions_cleared", %{message_id: message_id})
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "Failed to cascade-delete reactions for #{message_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  @doc """
   Get all reactions for a single message.
   """
   def get_reactions(message_id) do

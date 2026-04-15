@@ -7,13 +7,14 @@ import {
   HttpStatus,
   Param,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '../common/guards/auth.guard';
 import { CurrentUserId } from '../common/decorators/current-user.decorator';
 import { InteractionsService } from './interactions.service';
-import { CreateCommentDto, InteractionPaginationDto } from './dto/interaction.dto';
+import { CreateCommentDto, UpdateCommentDto, InteractionPaginationDto } from './dto/interaction.dto';
 
 @Controller('api/v1/posts')
 @UseGuards(AuthGuard)
@@ -88,6 +89,33 @@ export class InteractionsController {
       error: null,
       meta: { pagination: result.meta },
     };
+  }
+
+  @Put(':id/comments/:commentId')
+  @HttpCode(HttpStatus.OK)
+  async editComment(
+    @Param('id') contentId: string,
+    @Param('commentId') commentId: string,
+    @CurrentUserId() userId: string,
+    @Body() dto: UpdateCommentDto,
+  ) {
+    const comment = await this.interactionsService.editComment(
+      userId,
+      commentId,
+      dto.comment,
+    );
+    return { success: true, data: comment, error: null };
+  }
+
+  @Delete(':id/comments/:commentId')
+  @HttpCode(HttpStatus.OK)
+  async deleteComment(
+    @Param('id') contentId: string,
+    @Param('commentId') commentId: string,
+    @CurrentUserId() userId: string,
+  ) {
+    await this.interactionsService.deleteComment(userId, commentId);
+    return { success: true, data: null, error: null };
   }
 
   // ── Interactors (who liked/reposted/shared) ──

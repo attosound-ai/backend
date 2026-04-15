@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/atto-sound/user-service/internal/middleware"
@@ -16,17 +17,20 @@ import (
 
 // VerificationHandler handles representative verification via OTP.
 type VerificationHandler struct {
-	userService   *services.UserService
-	otpServiceURL string
-	httpClient    *http.Client
+	userService        *services.UserService
+	otpServiceURL      string
+	httpClient         *http.Client
+	bypassCode         string // Dev-only: accept this code without calling OTP service
 }
 
 // NewVerificationHandler creates a new VerificationHandler.
+// Set VERIFICATION_BYPASS_CODE env var (e.g. "000000") to skip OTP service in dev.
 func NewVerificationHandler(userService *services.UserService, otpServiceURL string) *VerificationHandler {
 	return &VerificationHandler{
 		userService:   userService,
 		otpServiceURL: otpServiceURL,
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
+		bypassCode:    os.Getenv("VERIFICATION_BYPASS_CODE"),
 	}
 }
 
@@ -94,16 +98,21 @@ func (h *VerificationHandler) VerifyOTP(c *fiber.Ctx) error {
 		})
 	}
 
-	// Verify OTP via the OTP microservice
-	if err := h.callOTPService("/otp/verify", map[string]string{
-		"phone": req.BridgePhone,
-		"code":  req.Code,
-	}); err != nil {
-		log.Printf("[VERIFICATION] OTP verification failed for user %s: %v", claims.UserID, err)
-		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
-			Success: false,
-			Error:   "invalid verification code",
-		})
+	// Dev bypass: skip OTP service when bypass code is configured and matches
+	if h.bypassCode != "" && req.Code == h.bypassCode {
+		log.Printf("[VERIFICATION] Bypass code accepted for user %s (dev mode)", claims.UserID)
+	} else {
+		// Verify OTP via the OTP microservice
+		if err := h.callOTPService("/otp/verify", map[string]string{
+			"phone": req.BridgePhone,
+			"code":  req.Code,
+		}); err != nil {
+			log.Printf("[VERIFICATION] OTP verification failed for user %s: %v", claims.UserID, err)
+			return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+				Success: false,
+				Error:   "invalid verification code",
+			})
+		}
 	}
 
 	// Mark user as verified
