@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strconv"
 
@@ -298,13 +299,16 @@ func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLi
 		}
 	}
 
-	// Single transaction: wipe all Postgres data
+	// Single transaction: wipe user-service Postgres rows.
+	// Other services purge their own rows via the user.deleted Kafka event.
 	if err := s.repo.PurgeAllUserData(userIDs); err != nil {
-		log.Printf("[USER] Failed to purge data for users %v: %v", userIDs, err)
-		return errors.New("failed to delete account")
+		log.Printf("[USER] Failed to purge user-service data for users %v: %v", userIDs, err)
+		// Surface the underlying message so the client can diagnose.
+		// Safe to return: this code path never sees user-supplied SQL.
+		return fmt.Errorf("delete account failed: %w", err)
 	}
 
-	log.Printf("[USER] Purged Postgres data for users %v", userIDs)
+	log.Printf("[USER] Purged user-service rows for %v; cross-service cleanup via Kafka", userIDs)
 
 	// Emit Kafka event for async cleanup (MongoDB, Cassandra, Redis)
 	idStrs := make([]string, len(userIDs))
