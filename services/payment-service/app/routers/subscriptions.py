@@ -37,7 +37,7 @@ async def create_subscription(
         user_id=target_user,
         plan=body.plan,
     )
-    return ApiResponse(success=True, data=sub.model_dump())
+    return ApiResponse(success=True, data=sub.model_dump(by_alias=True))
 
 
 @router.get("/me", response_model=ApiResponse)
@@ -50,7 +50,7 @@ async def get_my_subscription(
     sub = await svc.get_active_subscription(user_id)
     if not sub:
         raise HTTPException(status_code=404, detail="No active subscription found")
-    return ApiResponse(success=True, data=sub.model_dump())
+    return ApiResponse(success=True, data=sub.model_dump(by_alias=True))
 
 
 @router.delete("/me", response_model=ApiResponse)
@@ -63,7 +63,7 @@ async def cancel_my_subscription(
     result = await svc.cancel_subscription(user_id)
     if not result:
         raise HTTPException(status_code=404, detail="No active subscription to cancel")
-    return ApiResponse(success=True, data=result.model_dump())
+    return ApiResponse(success=True, data=result.model_dump(by_alias=True))
 
 
 @router.get("/plans", response_model=ApiResponse)

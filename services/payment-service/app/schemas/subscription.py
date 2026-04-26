@@ -1,6 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_camel
 
 
 class CreateSubscriptionRequest(BaseModel):
@@ -37,16 +38,24 @@ class UpgradeSubscriptionRequest(BaseModel):
 class PendingPlanChange(BaseModel):
     """Scheduled plan change that has not yet been applied."""
 
-    target_plan: str = Field(alias="targetPlan")
-    applies_at: str = Field(alias="appliesAt")
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
-    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+    target_plan: str
+    applies_at: str
 
 
 class SubscriptionResponse(BaseModel):
-    """Subscription data returned in API responses."""
+    """Subscription data returned in API responses.
 
-    model_config = ConfigDict(from_attributes=True)
+    Serializes with camelCase field names to match the mobile app's
+    TypeScript types — call `.model_dump(by_alias=True)` to emit them.
+    """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
     id: str
     user_id: str
