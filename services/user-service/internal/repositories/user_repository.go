@@ -374,8 +374,19 @@ func (r *UserRepository) DeleteUserRecord(tx *gorm.DB, userID uint64) error {
 	return nil
 }
 
+// DEPRECATED: cross-database DELETEs no longer attempted from user-service.
+// Each service (social, payment, telephony, chat) owns its own Postgres DB
+// in production and consumes the `user.deleted` Kafka event to purge its
+// own rows. The functions below are kept for reference but no longer
+// invoked by PurgeAllUserData — they were running against user-service's
+// DB and failing with "relation does not exist" for tables that live in
+// other DBs, which silently broke account deletion for any user with
+// existing data.
+
 // DeleteSocialData removes all social-service rows for a user (raw SQL
 // because these tables are not managed by the user-service GORM models).
+//
+//nolint:unused // kept for reference/migration scenarios
 func (r *UserRepository) DeleteSocialData(tx *gorm.DB, userID string) error {
 	tables := []struct {
 		sql string
@@ -406,6 +417,8 @@ func (r *UserRepository) DeleteSocialData(tx *gorm.DB, userID string) error {
 }
 
 // DeletePaymentData removes subscriptions and transactions for a user.
+//
+//nolint:unused // kept for reference; superseded by Kafka user.deleted consumer
 func (r *UserRepository) DeletePaymentData(tx *gorm.DB, userID string) error {
 	if err := tx.Exec(`DELETE FROM subscriptions WHERE user_id = ?`, userID).Error; err != nil {
 		return fmt.Errorf("delete subscriptions: %w", err)
@@ -417,6 +430,8 @@ func (r *UserRepository) DeletePaymentData(tx *gorm.DB, userID string) error {
 }
 
 // DeleteTelephonyData removes calls, phone assignments, projects, and related data.
+//
+//nolint:unused // kept for reference; superseded by Kafka user.deleted consumer
 func (r *UserRepository) DeleteTelephonyData(tx *gorm.DB, userID string) error {
 	if err := tx.Exec(`DELETE FROM calls WHERE "userId" = ?`, userID).Error; err != nil {
 		return fmt.Errorf("delete calls: %w", err)
@@ -437,21 +452,24 @@ func (r *UserRepository) DeleteTelephonyData(tx *gorm.DB, userID string) error {
 	return nil
 }
 
-// PurgeAllUserData deletes all data for a list of user IDs in a single transaction.
+// PurgeAllUserData deletes user-service-owned rows for a list of user IDs
+// in a single atomic transaction (users, user_credentials, push_tokens).
+// Other services (social, payment, telephony, chat) own their own
+// Postgres DBs in production and consume the `user.deleted` Kafka event
+// to purge their own rows asynchronously.
+//
+// Earlier versions of this function attempted cross-database DELETEs from
+// user-service against tables like `follows`, `subscriptions`, `calls`,
+// etc. — those tables don't exist in user-service's DB so the transaction
+// always rolled back with "relation does not exist" and the user got
+// "Something went wrong". The cross-DB attempts have been removed; the
+// per-service Kafka consumers handle their own cleanup.
+//
+// Marker `_ = idStr` is omitted on purpose: idStr is no longer needed
+// here because we no longer call the cross-DB helpers.
 func (r *UserRepository) PurgeAllUserData(userIDs []uint64) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		for _, uid := range userIDs {
-			idStr := fmt.Sprintf("%d", uid)
-
-			if err := r.DeleteSocialData(tx, idStr); err != nil {
-				return fmt.Errorf("social data (user %d): %w", uid, err)
-			}
-			if err := r.DeletePaymentData(tx, idStr); err != nil {
-				return fmt.Errorf("payment data (user %d): %w", uid, err)
-			}
-			if err := r.DeleteTelephonyData(tx, idStr); err != nil {
-				return fmt.Errorf("telephony data (user %d): %w", uid, err)
-			}
 			if err := r.DeleteUserRecord(tx, uid); err != nil {
 				return fmt.Errorf("user record (user %d): %w", uid, err)
 			}
