@@ -52,13 +52,15 @@ class PlanChangeService:
         self,
         user_id: str,
         target_plan: str,
-        email: str,
+        email: str = "",
     ) -> dict:
         """Start a plan change.
 
         - upgrade   → returns { kind: 'upgrade', clientSecret, paymentIntentId, amountCents }
         - downgrade → returns { kind: 'downgrade_scheduled', appliesAt }
         - same      → raises PlanChangeError
+
+        `email` is only required for upgrades (Stripe customer lookup/creation).
         """
         sub = await self.repo.get_active_subscription(user_id)
         if not sub:
@@ -72,7 +74,7 @@ class PlanChangeService:
         if prv.direction == "upgrade":
             if not can_upgrade(sub.plan, target_plan):
                 raise PlanChangeError("Invalid upgrade path")
-            return await self._charge_upgrade_prorated(sub, prv, email)
+            return await self._charge_upgrade_prorated(sub, prv, email or "")
 
         # downgrade
         await self.repo.schedule_subscription_change(
