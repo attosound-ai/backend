@@ -88,22 +88,37 @@ async def stripe_webhook(
 
     # ── Process known event types ────────────────────────────────
     if event_type == "payment_intent.succeeded":
-        user_id = event_data.get("metadata", {}).get("user_id")
-        plan_id = event_data.get("metadata", {}).get("plan_id")
+        meta = event_data.get("metadata", {})
+        user_id = meta.get("user_id")
+        kind = meta.get("kind", "")
         amount_cents = event_data.get("amount", 0)
 
-        if user_id and plan_id:
+        if user_id and kind == "plan_change_upgrade":
+            from app.services.plan_change_service import PlanChangeService
+
+            target_plan = meta.get("to_plan")
+            if target_plan:
+                pc_svc = PlanChangeService(session)
+                await pc_svc.confirm_upgrade_paid(
+                    user_id=user_id,
+                    target_plan=target_plan,
+                    payment_intent_id=event_data.get("id", ""),
+                )
+                logger.info(
+                    "Processed plan_change_upgrade webhook user=%s %s→%s",
+                    user_id, meta.get("from_plan"), target_plan,
+                )
+        elif user_id and meta.get("plan_id"):
             svc = PaymentService(session)
             await svc.create_subscription_from_webhook(
                 user_id=user_id,
-                plan_id=plan_id,
+                plan_id=meta.get("plan_id"),
                 stripe_payment_intent_id=event_data.get("id", ""),
                 amount=Decimal(amount_cents) / Decimal(100),
             )
             logger.info(
                 "Processed payment_intent.succeeded for user %s, plan %s",
-                user_id,
-                plan_id,
+                user_id, meta.get("plan_id"),
             )
 
     elif event_type == "customer.subscription.created":

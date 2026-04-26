@@ -122,6 +122,42 @@ class TransactionRepository:
         )
         await self.session.commit()
 
+    async def upgrade_subscription_plan(
+        self, subscription_id: UUID, new_plan: str
+    ) -> Subscription | None:
+        """Apply an immediate plan change. Used after a successful upgrade payment."""
+        await self.session.execute(
+            update(Subscription)
+            .where(Subscription.id == subscription_id)
+            .values(plan=new_plan, pending_plan=None, pending_plan_applies_at=None)
+        )
+        await self.session.commit()
+        return await self.get_subscription_by_id(subscription_id)
+
+    async def schedule_subscription_change(
+        self, subscription_id: UUID, target_plan: str, applies_at,
+    ) -> Subscription | None:
+        """Store a deferred plan change (downgrade applied at period end)."""
+        await self.session.execute(
+            update(Subscription)
+            .where(Subscription.id == subscription_id)
+            .values(pending_plan=target_plan, pending_plan_applies_at=applies_at)
+        )
+        await self.session.commit()
+        return await self.get_subscription_by_id(subscription_id)
+
+    async def clear_pending_change(
+        self, subscription_id: UUID
+    ) -> Subscription | None:
+        """Cancel a previously scheduled plan change."""
+        await self.session.execute(
+            update(Subscription)
+            .where(Subscription.id == subscription_id)
+            .values(pending_plan=None, pending_plan_applies_at=None)
+        )
+        await self.session.commit()
+        return await self.get_subscription_by_id(subscription_id)
+
     async def update_subscription_bridge_number(
         self, user_id: str, phone_number: str
     ) -> None:

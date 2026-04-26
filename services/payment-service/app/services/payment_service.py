@@ -12,7 +12,11 @@ from app.models.subscription import Subscription
 from app.models.transaction import Transaction
 from app.repositories.transaction_repo import TransactionRepository
 from app.entitlements import get_entitlements
-from app.schemas.subscription import CancelSubscriptionResponse, SubscriptionResponse
+from app.schemas.subscription import (
+    CancelSubscriptionResponse,
+    PendingPlanChange,
+    SubscriptionResponse,
+)
 from app.schemas.transaction import TransactionResponse
 
 logger = logging.getLogger(__name__)
@@ -64,6 +68,12 @@ def _txn_to_response(txn: Transaction) -> TransactionResponse:
 def _sub_to_response(sub: Subscription) -> SubscriptionResponse:
     """Convert a Subscription ORM model to an API response schema."""
     plan_str = sub.plan if isinstance(sub.plan, str) else sub.plan.value
+    pending = None
+    if sub.pending_plan and sub.pending_plan_applies_at:
+        pending = PendingPlanChange(
+            target_plan=sub.pending_plan,
+            applies_at=sub.pending_plan_applies_at.isoformat(),
+        )
     return SubscriptionResponse(
         id=str(sub.id),
         user_id=str(sub.user_id),
@@ -73,6 +83,7 @@ def _sub_to_response(sub: Subscription) -> SubscriptionResponse:
         expires_at=sub.expires_at.isoformat() if sub.expires_at else "",
         transaction_id=str(sub.transaction_id) if sub.transaction_id else None,
         entitlements=sorted(e.value for e in get_entitlements(plan_str)),
+        pending_change=pending,
         created_at=sub.created_at.isoformat() if sub.created_at else "",
         updated_at=sub.updated_at.isoformat() if sub.updated_at else "",
     )
@@ -217,10 +228,17 @@ class PaymentService:
     async def get_active_subscription(
         self, user_id: str
     ) -> SubscriptionResponse | None:
-        """Return the current active subscription for a user."""
+        """Return the current active subscription for a user.
+
+        If a scheduled plan change has reached its applies_at date, materialize
+        it inline before returning — no cron required.
+        """
+        from app.services.plan_change_service import materialize_pending_if_due
+
         sub = await self.repo.get_active_subscription(user_id)
         if not sub:
             return None
+        sub = await materialize_pending_if_due(self.repo, sub)
         return _sub_to_response(sub)
 
     async def cancel_subscription(

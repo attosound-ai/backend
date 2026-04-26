@@ -41,6 +41,17 @@ async def lifespan(_app: FastAPI):
     # Create database tables (for development convenience)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Idempotent additive migrations for columns added after initial deploy.
+        # Postgres `ADD COLUMN IF NOT EXISTS` is safe to run on every boot.
+        from sqlalchemy import text
+        await conn.execute(text(
+            "ALTER TABLE subscriptions "
+            "ADD COLUMN IF NOT EXISTS pending_plan VARCHAR(32)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE subscriptions "
+            "ADD COLUMN IF NOT EXISTS pending_plan_applies_at TIMESTAMPTZ"
+        ))
     logger.info("Database tables ensured")
 
     # Start gRPC server
