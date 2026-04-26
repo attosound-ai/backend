@@ -62,14 +62,18 @@ class SubscriptionResponse(BaseModel):
 
 
 class ChangePlanRequest(BaseModel):
-    """Request body for upgrading or downgrading."""
+    """Request body for upgrading or downgrading.
+
+    `email` is only used for upgrades (Stripe customer creation). Downgrades
+    are pure DB writes and don't need it.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     target_plan: Literal["connect_free", "record", "record_pro", "connect_pro"] = Field(
         alias="targetPlan"
     )
-    email: str = Field(description="Customer email address")
+    email: str = Field(default="", description="Customer email address (required for upgrades)")
 
 
 class CancelSubscriptionResponse(BaseModel):
