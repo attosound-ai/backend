@@ -11,9 +11,14 @@ from app.entitlements import (
     get_entitlements,
 )
 from app.middleware.auth import get_current_user_id
-from app.schemas.subscription import CreateSubscriptionRequest, UpgradeSubscriptionRequest
+from app.schemas.subscription import (
+    ChangePlanRequest,
+    CreateSubscriptionRequest,
+    UpgradeSubscriptionRequest,
+)
 from app.schemas.transaction import ApiResponse
 from app.services.payment_service import PLAN_PRICES, PaymentService
+from app.services.plan_change_service import PlanChangeError, PlanChangeService
 from app.services import stripe_service
 
 router = APIRouter(prefix="/payments/subscriptions", tags=["subscriptions"])
@@ -99,7 +104,11 @@ async def upgrade_subscription(
     user_id: str = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """Upgrade to a higher subscription plan via Stripe checkout."""
+    """Legacy upgrade endpoint — charges full plan price.
+
+    Kept for first-time subscribers (free → paid). For existing paid users
+    changing plans use POST /me/change-plan which prorates correctly.
+    """
     target_user = body.for_user_id or user_id
     svc = PaymentService(session)
     sub = await svc.get_active_subscription(target_user)
@@ -118,3 +127,83 @@ async def upgrade_subscription(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return ApiResponse(success=True, data=result)
+
+
+@router.get("/me/change-plan/preview", response_model=ApiResponse)
+async def preview_plan_change(
+    target_plan: str,
+    user_id: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Preview a plan change without charging or persisting anything.
+
+    Returns the direction (upgrade/downgrade/same), prorated amount in cents,
+    and when the change applies. Stable enough to display in a confirmation UI.
+    """
+    svc = PlanChangeService(session)
+    try:
+        prv = await svc.preview(user_id, target_plan)
+    except PlanChangeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ApiResponse(
+        success=True,
+        data={
+            "direction": prv.direction,
+            "currentPlan": prv.current_plan,
+            "targetPlan": prv.target_plan,
+            "amountDueCents": prv.amount_due_cents,
+            "appliesAt": prv.applies_at.isoformat(),
+            "daysRemaining": prv.days_remaining,
+        },
+    )
+
+
+@router.post("/me/change-plan", response_model=ApiResponse)
+async def change_plan(
+    body: ChangePlanRequest,
+    user_id: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Apply a plan change.
+
+    Upgrade   → returns a Stripe PaymentIntent for the prorated diff.
+    Downgrade → schedules the change for the end of the current period.
+    """
+    svc = PlanChangeService(session)
+    try:
+        result = await svc.start_change(user_id, body.target_plan, body.email)
+    except PlanChangeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ApiResponse(success=True, data=result)
+
+
+@router.post("/me/change-plan/confirm", response_model=ApiResponse)
+async def confirm_plan_change(
+    body: ChangePlanRequest,
+    payment_intent_id: str,
+    user_id: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Mobile client calls this after the Stripe PaymentSheet succeeds.
+
+    Materializes the upgrade in our DB immediately (the webhook is the
+    canonical reconciliation path; this is a UX accelerator).
+    """
+    svc = PlanChangeService(session)
+    sub = await svc.confirm_upgrade_paid(user_id, body.target_plan, payment_intent_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="No active subscription")
+    return ApiResponse(success=True, data={"plan": sub.plan})
+
+
+@router.delete("/me/pending-change", response_model=ApiResponse)
+async def cancel_pending_change(
+    user_id: str = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Cancel a previously scheduled downgrade — the user keeps their current plan."""
+    svc = PlanChangeService(session)
+    sub = await svc.cancel_pending_change(user_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="No active subscription")
+    return ApiResponse(success=True, data={"plan": sub.plan, "pendingChange": None})

@@ -34,6 +34,15 @@ class UpgradeSubscriptionRequest(BaseModel):
     )
 
 
+class PendingPlanChange(BaseModel):
+    """Scheduled plan change that has not yet been applied."""
+
+    target_plan: str = Field(alias="targetPlan")
+    applies_at: str = Field(alias="appliesAt")
+
+    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+
+
 class SubscriptionResponse(BaseModel):
     """Subscription data returned in API responses."""
 
@@ -47,8 +56,20 @@ class SubscriptionResponse(BaseModel):
     expires_at: str
     transaction_id: str | None = None
     entitlements: list[str] = []
+    pending_change: PendingPlanChange | None = None
     created_at: str
     updated_at: str
+
+
+class ChangePlanRequest(BaseModel):
+    """Request body for upgrading or downgrading."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    target_plan: Literal["connect_free", "record", "record_pro", "connect_pro"] = Field(
+        alias="targetPlan"
+    )
+    email: str = Field(description="Customer email address")
 
 
 class CancelSubscriptionResponse(BaseModel):
