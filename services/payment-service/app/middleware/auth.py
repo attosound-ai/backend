@@ -4,8 +4,8 @@ from fastapi import Request, HTTPException
 from app.config import settings
 
 
-def _extract_user_id_from_token(authorization: str) -> str:
-    """Decode a Bearer JWT and return the 'sub' claim (user_id)."""
+def _decode_token(authorization: str) -> dict:
+    """Decode a Bearer JWT and return the full claims payload."""
     parts = authorization.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid authorization header format")
@@ -22,10 +22,14 @@ def _extract_user_id_from_token(authorization: str) -> str:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user_id = payload.get("sub")
-    if not user_id:
+    if not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Token missing subject")
-    return user_id
+    return payload
+
+
+def _extract_user_id_from_token(authorization: str) -> str:
+    """Decode a Bearer JWT and return the 'sub' claim (user_id)."""
+    return _decode_token(authorization)["sub"]
 
 
 async def get_current_user_id(request: Request) -> str:
@@ -46,6 +50,32 @@ async def get_current_user_id(request: Request) -> str:
 async def get_current_user_role(request: Request) -> str:
     """Extract X-User-Role from request headers."""
     return request.headers.get("X-User-Role", "user")
+
+
+async def require_creator(request: Request) -> str:
+    """FastAPI dependency: 403 unless the JWT belongs to a creator account.
+
+    Returns the user_id when allowed. Used to gate endpoints that only
+    creators should be able to call (subscription upgrades/downgrades).
+
+    Service-to-service callers using `X-User-ID` header are trusted —
+    they're internal Kafka consumers / other services and not user-driven.
+    """
+    authorization = request.headers.get("Authorization")
+    if authorization:
+        claims = _decode_token(authorization)
+        if claims.get("role") != "creator":
+            raise HTTPException(
+                status_code=403,
+                detail="Subscriptions are only available for creator accounts",
+            )
+        return claims["sub"]
+
+    user_id = request.headers.get("X-User-ID")
+    if user_id:
+        return user_id
+
+    raise HTTPException(status_code=401, detail="Missing authentication")
 
 
 class AuthMiddleware:

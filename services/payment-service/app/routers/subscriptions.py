@@ -10,7 +10,7 @@ from app.entitlements import (
     can_upgrade,
     get_entitlements,
 )
-from app.middleware.auth import get_current_user_id
+from app.middleware.auth import get_current_user_id, require_creator
 from app.schemas.subscription import (
     ChangePlanRequest,
     CreateSubscriptionRequest,
@@ -55,7 +55,7 @@ async def get_my_subscription(
 
 @router.delete("/me", response_model=ApiResponse)
 async def cancel_my_subscription(
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(require_creator),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Cancel the authenticated user's active subscription."""
@@ -101,7 +101,7 @@ async def get_my_entitlements(
 @router.post("/me/upgrade", response_model=ApiResponse)
 async def upgrade_subscription(
     body: UpgradeSubscriptionRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(require_creator),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Legacy upgrade endpoint — charges full plan price.
@@ -132,7 +132,7 @@ async def upgrade_subscription(
 @router.get("/me/change-plan/preview", response_model=ApiResponse)
 async def preview_plan_change(
     target_plan: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(require_creator),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Preview a plan change without charging or persisting anything.
@@ -161,7 +161,7 @@ async def preview_plan_change(
 @router.post("/me/change-plan", response_model=ApiResponse)
 async def change_plan(
     body: ChangePlanRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(require_creator),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Apply a plan change.
@@ -181,7 +181,7 @@ async def change_plan(
 async def confirm_plan_change(
     body: ChangePlanRequest,
     payment_intent_id: str,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(require_creator),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Mobile client calls this after the Stripe PaymentSheet succeeds.
@@ -198,7 +198,7 @@ async def confirm_plan_change(
 
 @router.delete("/me/pending-change", response_model=ApiResponse)
 async def cancel_pending_change(
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(require_creator),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """Cancel a previously scheduled downgrade — the user keeps their current plan."""
