@@ -282,6 +282,51 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `Content ${data.content_id} fanned out to ${followerIds.length} followers`,
     );
+
+    // Notify each follower that someone they follow just posted.
+    // Bulk insert + bulk push are fire-and-forget so a slow notification
+    // path can't stall the fanout (which the feed depends on).
+    if (followerIds.length > 0) {
+      this.prisma.notification
+        .createMany({
+          data: followerIds.map((followerId) => ({
+            recipientId: followerId,
+            type: "new_post",
+            actorId: data.author_id,
+            referenceId: data.content_id,
+            isRead: false,
+          })),
+        })
+        .catch((err) =>
+          this.logger.error(
+            `Failed to create new_post notifications for content ${data.content_id}: ${err.message}`,
+          ),
+        );
+
+      this.grpcClients
+        .getUser(data.author_id)
+        .then((author) => {
+          const authorUsername = author?.username || "Someone";
+          this.pushService
+            .sendPushBulk(
+              followerIds,
+              "new_post",
+              data.author_id,
+              authorUsername,
+              data.content_id,
+            )
+            .catch((err) =>
+              this.logger.error(
+                `Bulk push for new_post failed: ${err.message}`,
+              ),
+            );
+        })
+        .catch((err) =>
+          this.logger.error(
+            `GetUser for new_post push failed: ${err.message}`,
+          ),
+        );
+    }
   }
 
   /**

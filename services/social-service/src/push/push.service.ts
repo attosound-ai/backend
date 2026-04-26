@@ -13,6 +13,7 @@ const PUSH_BODY: Record<string, (actor: string) => string> = {
   repost: (a) => `${a} reposted your post`,
   share: (a) => `${a} shared your post`,
   message: (a) => `${a} sent you a message`,
+  new_post: (a) => `${a} just posted`,
 };
 
 type DeepLinkFn = (
@@ -39,6 +40,7 @@ const DEEP_LINK: Record<string, DeepLinkFn> = {
     });
     return `/chat?${params.toString()}`;
   },
+  new_post: (ref) => (ref ? `/post/${ref}` : null),
 };
 
 @Injectable()
@@ -145,6 +147,106 @@ export class PushService {
       }
     } catch (error) {
       this.logger.error(`Push notification failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fan out a single push notification to many recipients.
+   *
+   * Used by feed fanout (new_post) where one author triggers a push to all
+   * their followers. Body and deep link are computed once; per-recipient
+   * data (push tokens + multi-account `account_username`) are fetched in
+   * parallel. Expo handles batching the actual delivery via chunkPushNotifications.
+   *
+   * @param actorUsername — same contract as sendPush: must be the @username,
+   *   never a real-name field.
+   */
+  async sendPushBulk(
+    recipientIds: string[],
+    type: string,
+    actorId: string,
+    actorUsername: string,
+    referenceId?: string | null,
+  ): Promise<void> {
+    if (recipientIds.length === 0) return;
+    try {
+      const bodyFn = PUSH_BODY[type];
+      if (!bodyFn) {
+        this.logger.warn(`sendPushBulk: no body template for type "${type}"`);
+        return;
+      }
+
+      let safeActorUsername = actorUsername;
+      if (actorUsername && actorUsername.includes(" ")) {
+        this.logger.warn(
+          `sendPushBulk received non-username value "${actorUsername}" for actor ${actorId} (type=${type}); falling back to "Someone"`,
+        );
+        safeActorUsername = "Someone";
+      }
+
+      const body = bodyFn(safeActorUsername);
+      const url = DEEP_LINK[type]?.(
+        referenceId ?? null,
+        actorId,
+        safeActorUsername,
+      );
+
+      // TODO: replace per-id getPushTokens with a GetPushTokensBatch RPC
+      // when the user-service supports it. Current cost: 1 gRPC roundtrip
+      // per follower. Acceptable up to a few thousand; revisit at scale.
+      const [tokensList, recipients] = await Promise.all([
+        Promise.all(
+          recipientIds.map((id) => this.grpcClients.getPushTokens(id)),
+        ),
+        this.grpcClients.getUsersBatch(recipientIds),
+      ]);
+
+      const recipientUsernameById = new Map(
+        recipients.map((r) => [r.id, r.username]),
+      );
+
+      const messages: ExpoPushMessage[] = [];
+      for (let i = 0; i < recipientIds.length; i++) {
+        const recipientId = recipientIds[i];
+        const tokens = tokensList[i];
+        if (!tokens || tokens.length === 0) continue;
+        const recipientUsername = recipientUsernameById.get(recipientId);
+        for (const t of tokens) {
+          if (!Expo.isExpoPushToken(t.token)) continue;
+          messages.push({
+            to: t.token,
+            title: "ATTO SOUND",
+            body,
+            data: {
+              ...(url ? { url } : {}),
+              account_id: recipientId,
+              account_username: recipientUsername || undefined,
+            },
+            sound: "default" as const,
+            priority: "high" as const,
+            channelId: "default",
+          });
+        }
+      }
+
+      if (messages.length === 0) return;
+
+      const chunks = this.expo.chunkPushNotifications(messages);
+      for (const chunk of chunks) {
+        try {
+          await this.expo.sendPushNotificationsAsync(chunk);
+        } catch (err) {
+          this.logger.error(
+            `Bulk push chunk failed: ${(err as Error).message}`,
+          );
+        }
+      }
+
+      this.logger.debug(
+        `Bulk push sent: ${messages.length} message(s) for ${type} to ${recipientIds.length} recipient(s)`,
+      );
+    } catch (error) {
+      this.logger.error(`Bulk push failed: ${error.message}`);
     }
   }
 
