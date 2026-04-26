@@ -37,7 +37,7 @@ export class InteractionsService {
           recipientId,
           type,
           actorId,
-          actor?.display_name || "Someone",
+          actor?.username || "Someone",
           referenceId,
         )
         .catch((err) => this.logger.error(`Push failed: ${err.message}`));

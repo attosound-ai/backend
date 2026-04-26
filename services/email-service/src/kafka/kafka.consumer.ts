@@ -22,9 +22,9 @@ export class KafkaConsumer {
       `Received user.created event for ${data.email} (role: ${data.role})`,
     );
 
-    // Welcome email for all roles
+    // Welcome email for all roles — address the user by bare username
     await this.emailService.queueEmail('welcome', data.email, {
-      name: data.displayName || data.username,
+      name: data.username,
       role: data.role,
     });
 
@@ -33,7 +33,7 @@ export class KafkaConsumer {
       await this.emailService.queueEmail(
         'instructions',
         data.email,
-        { name: data.displayName || data.username },
+        { name: data.username },
         2,
       );
     }

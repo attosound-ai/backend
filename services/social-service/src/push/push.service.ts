@@ -18,7 +18,7 @@ const PUSH_BODY: Record<string, (actor: string) => string> = {
 type DeepLinkFn = (
   referenceId: string | null,
   actorId: string,
-  actorDisplayName?: string,
+  actorUsername?: string,
 ) => string | null;
 
 const DEEP_LINK: Record<string, DeepLinkFn> = {
@@ -27,12 +27,15 @@ const DEEP_LINK: Record<string, DeepLinkFn> = {
   comment: (ref) => (ref ? `/post/${ref}` : null),
   repost: (ref) => (ref ? `/post/${ref}` : null),
   share: (ref) => (ref ? `/post/${ref}` : null),
-  message: (ref, actorId, actorName) => {
+  message: (ref, actorId, actorUsername) => {
     if (!ref) return null;
+    // `participantName` here is the @username — the front uses this URL
+    // param as the chat header label. Renaming the key would require a
+    // coordinated frontend change (see chat.tsx / messages.tsx).
     const params = new URLSearchParams({
       conversationId: ref,
       participantId: actorId,
-      participantName: actorName || "",
+      participantName: actorUsername || "",
     });
     return `/chat?${params.toString()}`;
   },
@@ -47,13 +50,16 @@ export class PushService {
 
   /**
    * Send a push notification to a recipient. Fire-and-forget — never throws.
-   * Skips message and welcome types (messages use WebSocket banner).
+   *
+   * @param actorUsername — the actor's @username. NEVER pass displayName or
+   *   any real-name field here: the body is rendered verbatim to the user
+   *   and Atto's policy is that real names are never surfaced to anyone.
    */
   async sendPush(
     recipientId: string,
     type: string,
     actorId: string,
-    actorDisplayName: string,
+    actorUsername: string,
     referenceId?: string | null,
     customBody?: string,
   ): Promise<void> {
@@ -69,9 +75,25 @@ export class PushService {
       ]);
       if (!tokens || tokens.length === 0) return;
 
+      // Defensive: if a caller ever passes a value that looks like a real
+      // name (contains a space, which usernames cannot), drop it and log
+      // so the regression is visible in production instead of silently
+      // shipping real names in pushes.
+      let safeActorUsername = actorUsername;
+      if (actorUsername && actorUsername.includes(" ")) {
+        this.logger.warn(
+          `sendPush received non-username value "${actorUsername}" for actor ${actorId} (type=${type}); falling back to "Someone"`,
+        );
+        safeActorUsername = "Someone";
+      }
+
       const recipientUsername = recipient?.username;
-      const body = customBody || bodyFn(actorDisplayName);
-      const url = DEEP_LINK[type]?.(referenceId ?? null, actorId, actorDisplayName);
+      const body = customBody || bodyFn(safeActorUsername);
+      const url = DEEP_LINK[type]?.(
+        referenceId ?? null,
+        actorId,
+        safeActorUsername,
+      );
 
       const messages: ExpoPushMessage[] = tokens
         .filter((t) => Expo.isExpoPushToken(t.token))

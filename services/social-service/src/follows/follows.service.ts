@@ -119,7 +119,7 @@ export class FollowsService {
           followingId,
           "follow",
           followerId,
-          actor?.display_name || "Someone",
+          actor?.username || "Someone",
           follow.id,
         )
         .catch((err) => this.logger.error(`Push failed: ${err.message}`));

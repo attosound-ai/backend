@@ -65,6 +65,9 @@ export class NotificationsService {
               ? {
                   id: "system",
                   username: "system",
+                  // Real names are never surfaced to users; push/in-app
+                  // notifications always show @username. "ATTO SOUND" stays
+                  // as the only allowed branded label.
                   displayName: "ATTO SOUND",
                   avatar: null,
                   role: null,
@@ -73,14 +76,14 @@ export class NotificationsService {
                 ? {
                     id: actor.id,
                     username: actor.username,
-                    displayName: actor.display_name || actor.username,
+                    displayName: actor.username,
                     avatar: actor.avatar || null,
                     role: actor.role || null,
                   }
                 : {
                     id: notification.actorId,
                     username: "unknown",
-                    displayName: "Unknown User",
+                    displayName: "unknown",
                     avatar: null,
                     role: null,
                   },

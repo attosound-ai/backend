@@ -212,15 +212,11 @@ func strVal(s *string) string {
 	return *s
 }
 
-// effectiveDisplayName returns the best available display name for a user.
-// Falls back: DisplayName → CreatorName → Username.
+// effectiveDisplayName is the user-visible label returned in API responses.
+// Real names are never surfaced to other users; every client reads the bare
+// username regardless of what's stored in DisplayName / CreatorName. The `@`
+// prefix, when shown at all, is added by the client on the profile page only.
 func (u *User) effectiveDisplayName() string {
-	if u.DisplayName != "" {
-		return u.DisplayName
-	}
-	if u.CreatorName != nil && *u.CreatorName != "" {
-		return *u.CreatorName
-	}
 	return u.Username
 }
 

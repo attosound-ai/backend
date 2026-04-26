@@ -326,7 +326,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     this.grpcClients
       .getUser(data.sender_id)
       .then((actor) => {
-        const senderName = actor?.display_name || "Someone";
+        const senderName = actor?.username || "Someone";
         const messagePreview = data.content
           ? data.content.length > 100
             ? data.content.slice(0, 100) + "…"
