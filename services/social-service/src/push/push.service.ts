@@ -5,6 +5,7 @@ import Expo, {
   ExpoPushSuccessTicket,
 } from "expo-server-sdk";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
+import { BadgeCalculator } from "./badge-calculator.service";
 
 const PUSH_BODY: Record<string, (actor: string) => string> = {
   follow: (a) => `${a} followed you`,
@@ -48,7 +49,10 @@ export class PushService {
   private readonly logger = new Logger(PushService.name);
   private readonly expo = new Expo();
 
-  constructor(private readonly grpcClients: GrpcClientsService) {}
+  constructor(
+    private readonly grpcClients: GrpcClientsService,
+    private readonly badgeCalculator: BadgeCalculator,
+  ) {}
 
   /**
    * Send a push notification to a recipient. Fire-and-forget — never throws.
@@ -97,16 +101,26 @@ export class PushService {
         safeActorUsername,
       );
 
+      // Computed AFTER the notification row that triggered this push has
+      // been written, so the count already reflects the new event. This
+      // becomes `aps.badge` on iOS and `content.badge` on Android — the
+      // OS draws the red number on the home-screen icon without any JS
+      // running. Duplicated in `data.badge` so the foreground listener
+      // can also keep the in-memory store in sync.
+      const badge = await this.badgeCalculator.getUnreadCount(recipientId);
+
       const messages: ExpoPushMessage[] = tokens
         .filter((t) => Expo.isExpoPushToken(t.token))
         .map((t) => ({
           to: t.token,
           title: "ATTO SOUND",
           body,
+          badge,
           data: {
             ...(url ? { url } : {}),
             account_id: recipientId,
             account_username: recipientUsername || undefined,
+            badge,
           },
           sound: "default" as const,
           priority: "high" as const,
@@ -194,11 +208,12 @@ export class PushService {
       // TODO: replace per-id getPushTokens with a GetPushTokensBatch RPC
       // when the user-service supports it. Current cost: 1 gRPC roundtrip
       // per follower. Acceptable up to a few thousand; revisit at scale.
-      const [tokensList, recipients] = await Promise.all([
+      const [tokensList, recipients, badgeCounts] = await Promise.all([
         Promise.all(
           recipientIds.map((id) => this.grpcClients.getPushTokens(id)),
         ),
         this.grpcClients.getUsersBatch(recipientIds),
+        this.badgeCalculator.getUnreadCountsBatch(recipientIds),
       ]);
 
       const recipientUsernameById = new Map(
@@ -211,16 +226,19 @@ export class PushService {
         const tokens = tokensList[i];
         if (!tokens || tokens.length === 0) continue;
         const recipientUsername = recipientUsernameById.get(recipientId);
+        const badge = badgeCounts.get(recipientId) ?? 0;
         for (const t of tokens) {
           if (!Expo.isExpoPushToken(t.token)) continue;
           messages.push({
             to: t.token,
             title: "ATTO SOUND",
             body,
+            badge,
             data: {
               ...(url ? { url } : {}),
               account_id: recipientId,
               account_username: recipientUsername || undefined,
+              badge,
             },
             sound: "default" as const,
             priority: "high" as const,
