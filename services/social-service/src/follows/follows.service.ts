@@ -45,7 +45,14 @@ export class FollowsService {
       }
     }
 
-    return { followersCount, followingCount, postsCount };
+    // Defensive clamp: counts must never leave this service negative.
+    // The DB COUNT(*) can't go negative, but postsCount comes from a
+    // Redis cache that could have been corrupted by a buggy mutation.
+    return {
+      followersCount: Math.max(0, followersCount),
+      followingCount: Math.max(0, followingCount),
+      postsCount: Math.max(0, postsCount),
+    };
   }
 
   async follow(followerId: string, followingId: string): Promise<void> {

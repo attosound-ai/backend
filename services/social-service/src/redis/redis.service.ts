@@ -165,16 +165,33 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   async decrementCount(type: string, id: string): Promise<void> {
+    // Atomic decrement-then-clamp: if decr would have driven the value
+    // below zero, force it back to 0. Counts are denormalized caches —
+    // the source-of-truth Postgres COUNT(*) cannot be negative, so a
+    // negative cache value is always a bug we want to silently absorb
+    // here while the metric layer captures it for diagnosis.
     const key = this.countKey(type, id);
-    const pipeline = this.client.pipeline();
-    pipeline.decr(key);
-    pipeline.persist(key);
-    await pipeline.exec();
+    const result = await this.client.decr(key);
+    if (result < 0) {
+      await this.client.set(key, '0');
+      this.logger.warn(
+        `decrementCount underflow on ${type}:${id} — clamped to 0`,
+      );
+    }
+    await this.client.persist(key);
   }
 
   async getCount(type: string, id: string): Promise<number> {
     const val = await this.client.get(this.countKey(type, id));
-    return val ? parseInt(val, 10) : 0;
+    if (!val) return 0;
+    const parsed = parseInt(val, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      this.logger.warn(
+        `getCount returned invalid value ${val} for ${type}:${id} — clamping to 0`,
+      );
+      return 0;
+    }
+    return parsed;
   }
 
   async setCount(type: string, id: string, count: number): Promise<void> {
