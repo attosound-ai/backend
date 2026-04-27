@@ -196,6 +196,13 @@ async def _handle_user_deleted(data: dict) -> None:
 
     logger.info("Payment cleanup done for users: %s", user_ids)
 
+    # Schedule a delayed audit. If anything leaks past the consumers,
+    # PostHog gets `account_delete_orphans_detected` for our dashboard.
+    # Fire-and-forget so consumer offset commit isn't blocked on it.
+    from app.audit.deletion_audit import audit_user_deletion
+
+    asyncio.create_task(audit_user_deletion([str(u) for u in user_ids]))
+
 
 # ── Retry + DLQ wrapper ────────────────────────────────────────────────
 
