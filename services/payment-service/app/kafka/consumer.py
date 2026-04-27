@@ -91,13 +91,40 @@ async def _handle_number_provisioned(data: dict) -> None:
 
 
 async def _handle_user_deleted(data: dict) -> None:
-    """Fix #5: Cancel Stripe subscriptions when a user account is deleted."""
+    """Hard-delete payment-service rows for the user, then cancel Stripe.
+
+    Steps for each user_id:
+      1. DELETE FROM subscriptions / transactions  (Postgres source of truth).
+      2. Cancel any still-active Stripe Subscription objects, so Stripe
+         stops billing the deleted customer.
+
+    Earlier versions of this handler only cancelled Stripe subscriptions
+    and assumed the DB rows were purged elsewhere. They weren't — they
+    were left orphaned and the deletion-residue audit found them.
+    """
     raw = data.get("data", data)
     user_ids = raw.get("userIds", [])
     if not user_ids:
         logger.warning("user.deleted event missing userIds: %s", data)
         return
 
+    from app.database import async_session
+    from app.repositories.transaction_repo import TransactionRepository
+
+    # 1. Purge local DB rows
+    for user_id in user_ids:
+        try:
+            async with async_session() as session:
+                repo = TransactionRepository(session)
+                subs, txns = await repo.purge_user_data(str(user_id))
+                logger.info(
+                    "Purged payment DB for user %s: %d subscriptions, %d transactions",
+                    user_id, subs, txns,
+                )
+        except Exception as exc:
+            logger.error("Failed to purge payment DB for user %s: %s", user_id, exc)
+
+    # 2. Cancel Stripe subscriptions (best-effort, never blocks DB cleanup)
     import stripe
     from app.config import settings as cfg
 
@@ -105,7 +132,6 @@ async def _handle_user_deleted(data: dict) -> None:
 
     for user_id in user_ids:
         try:
-            # Search for active Stripe subscriptions by metadata
             subs = stripe.Subscription.list(limit=10)
             for sub in subs.auto_paging_iter():
                 if sub.metadata.get("user_id") == str(user_id) and sub.status in ("active", "trialing", "past_due"):
@@ -114,7 +140,7 @@ async def _handle_user_deleted(data: dict) -> None:
         except Exception as exc:
             logger.error("Failed to cancel Stripe for user %s: %s", user_id, exc)
 
-    logger.info("Stripe cleanup done for users: %s", user_ids)
+    logger.info("Payment cleanup done for users: %s", user_ids)
 
 
 async def _consume_loop() -> None:

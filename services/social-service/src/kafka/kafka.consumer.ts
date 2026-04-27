@@ -451,18 +451,37 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       const deletedContent = await this.grpcClients.deleteAllContentByAuthor(userId);
       this.logger.log(`Deleted ${deletedContent} content docs for user ${userId}`);
 
-      // 3. Fix follow graph in Redis
-      const followingIds = await this.redis.getFollowerIds(userId);
-      const followerIds = await this.redis.getFollowingIds(userId);
-      for (const fid of followingIds) {
-        await this.redis.removeFollow(userId, fid);
+      // 3. Fix follow graph in Redis.
+      //
+      // Naming was historically swapped here — `getFollowerIds(userId)`
+      // returns the SET `social:followers:userId` (= users who follow
+      // userId), and `getFollowingIds(userId)` returns
+      // `social:following:userId` (= users userId follows). The previous
+      // implementation mixed those up AND inverted the removeFollow()
+      // direction, so it never actually cleaned cross-user references.
+      // Followers/following keys belonging to OTHER users were left
+      // pointing at the deleted user. Audit caught this on user 147 →
+      // user 150's `social:following` still contained "147".
+      const followers = await this.redis.getFollowerIds(userId);   // who follows userId
+      const following = await this.redis.getFollowingIds(userId);  // who userId follows
+
+      // For each follower F → strip userId from F's following set
+      // (and from userId's followers set as a side-effect).
+      for (const f of followers) {
+        await this.redis.removeFollow(f, userId);
       }
-      for (const fid of followerIds) {
-        await this.redis.removeFollow(fid, userId);
+      // For each U that userId follows → strip userId from U's followers
+      // (and from userId's following set as a side-effect).
+      for (const u of following) {
+        await this.redis.removeFollow(userId, u);
       }
 
-      // 4. Delete user's own caches
+      // 4. Delete user's own caches — these may have leftover entries
+      // even after the loops above (defensive: explicit DEL of the SET
+      // keys themselves, not just SREM their members).
       await this.redis.del(`social:feed:${userId}`);
+      await this.redis.del(`social:following:${userId}`);
+      await this.redis.del(`social:followers:${userId}`);
       await this.redis.del(`social:count:posts:${userId}`);
       await this.redis.del(`social:count:following:${userId}`);
       await this.redis.del(`social:count:followers:${userId}`);

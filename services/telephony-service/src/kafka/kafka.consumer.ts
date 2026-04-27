@@ -7,10 +7,17 @@ import {
   forwardRef,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository, In } from "typeorm";
 import { Kafka, Consumer, EachMessagePayload } from "kafkajs";
 import { CallsService } from "../calls/calls.service";
 import { NumberProvisioningService } from "../numbers/number-provisioning.service";
 import { AudioStorageService } from "../media/audio-storage.service";
+import { Call } from "../entities/call.entity";
+import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entity";
+import { Project } from "../entities/project.entity";
+import { TimelineClip } from "../entities/timeline-clip.entity";
+import { AudioSegment } from "../entities/audio-segment.entity";
 
 @Injectable()
 export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
@@ -23,6 +30,16 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly callsService: CallsService,
     private readonly numberProvisioning: NumberProvisioningService,
     private readonly audioStorage: AudioStorageService,
+    @InjectRepository(Call)
+    private readonly callRepo: Repository<Call>,
+    @InjectRepository(PhoneNumberAssignment)
+    private readonly assignmentRepo: Repository<PhoneNumberAssignment>,
+    @InjectRepository(Project)
+    private readonly projectRepo: Repository<Project>,
+    @InjectRepository(TimelineClip)
+    private readonly timelineClipRepo: Repository<TimelineClip>,
+    @InjectRepository(AudioSegment)
+    private readonly audioSegmentRepo: Repository<AudioSegment>,
   ) {
     const brokers =
       this.config.get<string[]>("kafka.brokers") ?? ["localhost:9092"];
@@ -142,9 +159,13 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Fix #4 + #6: On account deletion, release Twilio numbers + delete S3 audio.
-   * NOTE: DB rows (calls, projects, audio_segments, phone_number_assignments)
-   * are already deleted by user-service before this event fires.
+   * On user.deleted: purge ALL telephony rows for the user from this
+   * service's Postgres, release Twilio numbers, and delete S3 audio.
+   *
+   * Earlier versions of this handler relied on user-service to delete
+   * the DB rows in a cross-database transaction — that path was broken
+   * (different Postgres instance per service) and orphaned rows like
+   * phone_number_assignments survived account deletions.
    */
   private async handleUserDeleted(
     event: Record<string, unknown>,
@@ -154,7 +175,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     if (userIds.length === 0) return;
 
     for (const userId of userIds) {
-      // Fix #6: Release Twilio number (uses in-memory lookup, not DB)
+      // 1. Release Twilio number (in-memory lookup, doesn't depend on DB).
       try {
         await this.numberProvisioning.releaseNumber(userId);
         this.logger.log(`Released Twilio number for deleted user ${userId}`);
@@ -162,12 +183,59 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`No Twilio number to release for user ${userId}: ${err}`);
       }
 
-      // Fix #4: Delete audio segments from S3/MinIO
+      // 2. Delete S3/MinIO audio files for this user.
       try {
         await this.audioStorage.deleteUserFiles(userId);
         this.logger.log(`Deleted S3 audio files for user ${userId}`);
       } catch (err) {
         this.logger.warn(`S3 cleanup failed for user ${userId}: ${err}`);
+      }
+
+      // 3. Purge Postgres rows owned by telephony-service.
+      // Order matters because of foreign keys:
+      //   timeline_clips → projects + audio_segments
+      //   audio_segments → projects + calls
+      // So we delete child rows first, then parents.
+      try {
+        const projects = await this.projectRepo.find({
+          where: { userId },
+          select: ["id"],
+        });
+        const projectIds = projects.map((p) => p.id);
+
+        if (projectIds.length > 0) {
+          await this.timelineClipRepo.delete({ projectId: In(projectIds) });
+          await this.audioSegmentRepo.delete({ projectId: In(projectIds) });
+        }
+
+        // audio_segments may also reference calls owned by this user
+        const userCalls = await this.callRepo.find({
+          where: { userId },
+          select: ["id"],
+        });
+        if (userCalls.length > 0) {
+          await this.audioSegmentRepo.delete({
+            callId: In(userCalls.map((c) => c.id)),
+          });
+        }
+
+        const callsResult = await this.callRepo.delete({ userId });
+        const projectsResult =
+          projectIds.length > 0
+            ? await this.projectRepo.delete({ userId })
+            : { affected: 0 };
+        const assignmentsResult = await this.assignmentRepo.delete({ userId });
+
+        this.logger.log(
+          `Purged telephony DB for user ${userId}: ` +
+            `${callsResult.affected ?? 0} calls, ` +
+            `${projectsResult.affected ?? 0} projects, ` +
+            `${assignmentsResult.affected ?? 0} phone_number_assignments`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Failed to purge telephony DB for user ${userId}: ${(err as Error).message}`,
+        );
       }
     }
 

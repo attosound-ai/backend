@@ -1,7 +1,7 @@
 import logging
 from uuid import UUID
 
-from sqlalchemy import desc, func, select, update
+from sqlalchemy import delete, desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.subscription import Subscription
@@ -171,3 +171,18 @@ class TransactionRepository:
             .values(bridge_number=phone_number)
         )
         await self.session.commit()
+
+    async def purge_user_data(self, user_id: str) -> tuple[int, int]:
+        """Hard-delete every Subscription and Transaction for a user.
+
+        Called by the user.deleted Kafka consumer. Returns
+        (subscriptions_deleted, transactions_deleted).
+        """
+        sub_result = await self.session.execute(
+            delete(Subscription).where(Subscription.user_id == user_id)
+        )
+        txn_result = await self.session.execute(
+            delete(Transaction).where(Transaction.user_id == user_id)
+        )
+        await self.session.commit()
+        return (sub_result.rowcount or 0, txn_result.rowcount or 0)
