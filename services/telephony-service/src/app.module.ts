@@ -10,6 +10,7 @@ import { KafkaModule } from './kafka/kafka.module';
 import { NumbersModule } from './numbers/numbers.module';
 import { ProjectsModule } from './projects/projects.module';
 import { CacheModule } from './cache/cache.module';
+import { OutboxModule } from './outbox/outbox.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { CacheModule } from './cache/cache.module';
     CallsModule,
     MediaModule,
     KafkaModule,
+    OutboxModule,
     NumbersModule,
     ProjectsModule,
   ],

@@ -7,6 +7,7 @@ import { AudioSegment } from '../entities/audio-segment.entity';
 import { ProvisionedNumber } from '../entities/provisioned-number.entity';
 import { Project } from '../entities/project.entity';
 import { TimelineClip } from '../entities/timeline-clip.entity';
+import { OutboxEvent } from '../entities/outbox-event.entity';
 
 @Module({
   imports: [
@@ -16,7 +17,7 @@ import { TimelineClip } from '../entities/timeline-clip.entity';
       useFactory: (config: ConfigService) => ({
         type: 'postgres' as const,
         url: config.get<string>('database.url'),
-        entities: [PhoneNumberAssignment, Call, AudioSegment, ProvisionedNumber, Project, TimelineClip],
+        entities: [PhoneNumberAssignment, Call, AudioSegment, ProvisionedNumber, Project, TimelineClip, OutboxEvent],
         synchronize: true,
         logging: process.env.NODE_ENV !== 'production',
       }),
