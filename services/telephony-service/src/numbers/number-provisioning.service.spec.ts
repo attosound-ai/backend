@@ -2,9 +2,10 @@ import { NumberProvisioningService } from "./number-provisioning.service";
 import { TwilioNumberService } from "./twilio-number.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
 import { ConfigService } from "@nestjs/config";
-import { Repository } from "typeorm";
+import { DataSource, Repository } from "typeorm";
 import { ProvisionedNumber } from "../entities/provisioned-number.entity";
 import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entity";
+import { OutboxService } from "../outbox/outbox.service";
 
 describe("NumberProvisioningService", () => {
   let service: NumberProvisioningService;
@@ -13,6 +14,8 @@ describe("NumberProvisioningService", () => {
   let twilioNumbers: jest.Mocked<TwilioNumberService>;
   let kafka: jest.Mocked<KafkaProducer>;
   let config: jest.Mocked<ConfigService>;
+  let dataSource: jest.Mocked<DataSource>;
+  let outbox: jest.Mocked<OutboxService>;
 
   beforeEach(() => {
     numberRepo = {
@@ -45,12 +48,23 @@ describe("NumberProvisioningService", () => {
       get: jest.fn().mockReturnValue("http://localhost:3009"),
     } as unknown as jest.Mocked<ConfigService>;
 
+    dataSource = {
+      createQueryRunner: jest.fn(),
+      transaction: jest.fn().mockImplementation(async (fn: any) => fn({})),
+    } as unknown as jest.Mocked<DataSource>;
+
+    outbox = {
+      enqueue: jest.fn().mockResolvedValue(undefined),
+    } as unknown as jest.Mocked<OutboxService>;
+
     service = new NumberProvisioningService(
       numberRepo,
       assignmentRepo,
       twilioNumbers,
       kafka,
       config,
+      dataSource,
+      outbox,
     );
   });
 

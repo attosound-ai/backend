@@ -1,14 +1,20 @@
 import asyncio
 import json
 import logging
+from typing import Awaitable, Callable
+from uuid import UUID
 
-from aiokafka import AIOKafkaConsumer
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models import ProcessedEvent
 
 logger = logging.getLogger(__name__)
 
 _consumer: AIOKafkaConsumer | None = None
+_dlq_producer: AIOKafkaProducer | None = None
 _consumer_task: asyncio.Task | None = None
 
 TOPIC_USER_CREATED = "user.created"
@@ -16,28 +22,72 @@ TOPIC_USER_DELETED = "user.deleted"
 TOPIC_NUMBER_PROVISIONED = "number.provisioned"
 TOPIC_NUMBER_PROVISIONING_FAILED = "number.provisioning.failed"
 
+# Bounded retry policy. After all delays elapse and the handler still
+# raises, the message is shipped to a DLQ topic and the original is
+# acked so it doesn't block its partition. An operator should watch
+# DLQ depth — a DLQ no one watches is just /dev/null.
+RETRY_DELAYS_S = (1, 5, 30)
+
+
+# ── Idempotency ────────────────────────────────────────────────────────
+
+
+async def _try_claim_event(
+    session: AsyncSession,
+    event_id: str | None,
+    event_type: str,
+) -> bool:
+    """Insert the event into processed_events.
+
+    Returns True if this is the first time we see it (caller should process),
+    False if it was already processed (caller should skip).
+
+    Producer-side outbox writes a UUID `event_id` with each message; older
+    messages without one are processed unconditionally so the migration
+    is backwards-compatible.
+    """
+    if not event_id:
+        return True
+
+    try:
+        parsed = UUID(event_id)
+    except (TypeError, ValueError):
+        logger.warning("Invalid event_id %r; processing without dedup", event_id)
+        return True
+
+    stmt = (
+        pg_insert(ProcessedEvent)
+        .values(event_id=parsed, event_type=event_type)
+        .on_conflict_do_nothing(index_elements=[ProcessedEvent.event_id])
+        .returning(ProcessedEvent.event_id)
+    )
+    result = await session.execute(stmt)
+    inserted = result.scalar_one_or_none()
+    return inserted is not None
+
+
+# ── Handlers ──────────────────────────────────────────────────────────
+
 
 async def _handle_user_created(data: dict) -> None:
     """Handle a user.created event by provisioning a free subscription."""
-    # Support both flat {"user_id": "4"} and nested {"data": {"id": "4"}} formats
     user_id = data.get("user_id") or data.get("data", {}).get("id")
     if not user_id:
         logger.warning("user.created event missing user_id field: %s", data)
         return
 
-    # Import here to avoid circular imports at module level
     from app.database import async_session
     from app.services.payment_service import PaymentService
 
-    try:
-        async with async_session() as session:
-            svc = PaymentService(session)
-            await svc.create_free_subscription(user_id)
-            logger.info("Provisioned free subscription for new user %s", user_id)
-    except Exception as exc:
-        logger.error(
-            "Failed to provision free subscription for user %s: %s", user_id, exc
-        )
+    async with async_session() as session:
+        if not await _try_claim_event(session, data.get("event_id"), TOPIC_USER_CREATED):
+            logger.debug("user.created event %s already processed, skipping", data.get("event_id"))
+            await session.commit()
+            return
+        svc = PaymentService(session)
+        await svc.create_free_subscription(user_id)
+        await session.commit()
+        logger.info("Provisioned free subscription for new user %s", user_id)
 
 
 async def _handle_number_provisioning_failed(data: dict) -> None:
@@ -52,21 +102,28 @@ async def _handle_number_provisioning_failed(data: dict) -> None:
     from app.database import async_session
     from app.services.payment_service import PaymentService
 
-    try:
-        async with async_session() as session:
-            svc = PaymentService(session)
-            await svc.mark_provisioning_failed(user_id, reason)
-            logger.warning(
-                "Marked provisioning as failed for user %s: %s", user_id, reason
+    async with async_session() as session:
+        if not await _try_claim_event(session, data.get("event_id"), TOPIC_NUMBER_PROVISIONING_FAILED):
+            logger.debug(
+                "number.provisioning.failed event %s already processed, skipping",
+                data.get("event_id"),
             )
-    except Exception as exc:
-        logger.error(
-            "Failed to mark provisioning failure for user %s: %s", user_id, exc
+            await session.commit()
+            return
+        svc = PaymentService(session)
+        await svc.mark_provisioning_failed(user_id, reason)
+        await session.commit()
+        logger.warning(
+            "Marked provisioning as failed for user %s: %s", user_id, reason
         )
 
 
 async def _handle_number_provisioned(data: dict) -> None:
-    """Handle a number.provisioned event by updating the subscription's bridge number."""
+    """Handle a number.provisioned event by updating the subscription's bridge number.
+
+    Idempotent via processed_events: if Kafka redelivers (consumer crash,
+    rebalance, producer retry), the second attempt no-ops cleanly.
+    """
     user_id = data.get("userId") or data.get("user_id")
     phone_number = data.get("phoneNumber") or data.get("phone_number")
 
@@ -77,17 +134,18 @@ async def _handle_number_provisioned(data: dict) -> None:
     from app.database import async_session
     from app.services.payment_service import PaymentService
 
-    try:
-        async with async_session() as session:
-            svc = PaymentService(session)
-            await svc.update_bridge_number(user_id, phone_number)
-            logger.info(
-                "Updated bridge number for user %s: %s", user_id, phone_number
+    async with async_session() as session:
+        if not await _try_claim_event(session, data.get("event_id"), TOPIC_NUMBER_PROVISIONED):
+            logger.debug(
+                "number.provisioned event %s already processed, skipping",
+                data.get("event_id"),
             )
-    except Exception as exc:
-        logger.error(
-            "Failed to update bridge number for user %s: %s", user_id, exc
-        )
+            await session.commit()
+            return
+        svc = PaymentService(session)
+        await svc.update_bridge_number(user_id, phone_number)
+        await session.commit()
+        logger.info("Updated bridge number for user %s: %s", user_id, phone_number)
 
 
 async def _handle_user_deleted(data: dict) -> None:
@@ -97,10 +155,6 @@ async def _handle_user_deleted(data: dict) -> None:
       1. DELETE FROM subscriptions / transactions  (Postgres source of truth).
       2. Cancel any still-active Stripe Subscription objects, so Stripe
          stops billing the deleted customer.
-
-    Earlier versions of this handler only cancelled Stripe subscriptions
-    and assumed the DB rows were purged elsewhere. They weren't — they
-    were left orphaned and the deletion-residue audit found them.
     """
     raw = data.get("data", data)
     user_ids = raw.get("userIds", [])
@@ -143,9 +197,73 @@ async def _handle_user_deleted(data: dict) -> None:
     logger.info("Payment cleanup done for users: %s", user_ids)
 
 
+# ── Retry + DLQ wrapper ────────────────────────────────────────────────
+
+
+async def _process_with_retry(
+    handler: Callable[[dict], Awaitable[None]],
+    topic: str,
+    data: dict,
+) -> None:
+    """Run a handler with bounded exponential backoff. On final failure,
+    publish to ``<topic>.dlq`` so the partition isn't blocked and an
+    operator can replay the message after fixing the underlying issue.
+    """
+    last_err: Exception | None = None
+    for attempt, delay in enumerate((0,) + RETRY_DELAYS_S):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await handler(data)
+            return
+        except Exception as exc:  # noqa: BLE001 — we want the broadest catch here
+            last_err = exc
+            logger.warning(
+                "Handler failed for topic=%s attempt=%d: %s",
+                topic, attempt, exc,
+            )
+
+    # All retries exhausted — DLQ the message and ack so we move on.
+    await _send_to_dlq(topic, data, last_err)
+
+
+async def _send_to_dlq(topic: str, data: dict, last_err: Exception | None) -> None:
+    """Publish the unprocessable message to <topic>.dlq with the last error."""
+    global _dlq_producer
+    if _dlq_producer is None:
+        logger.error(
+            "DLQ producer not initialized; dropping message from %s: %s",
+            topic, last_err,
+        )
+        return
+
+    dlq_topic = f"{topic}.dlq"
+    payload = {
+        "original_topic": topic,
+        "original_payload": data,
+        "error": str(last_err) if last_err else "unknown",
+    }
+    try:
+        await _dlq_producer.send_and_wait(
+            dlq_topic, value=json.dumps(payload).encode("utf-8")
+        )
+        logger.error(
+            "Message sent to DLQ %s after exhausting retries: %s",
+            dlq_topic, last_err,
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to send to DLQ %s (giving up): %s | original error: %s",
+            dlq_topic, exc, last_err,
+        )
+
+
+# ── Consumer loop ──────────────────────────────────────────────────────
+
+
 async def _consume_loop() -> None:
     """Main consumer loop that reads messages and dispatches handlers."""
-    global _consumer
+    global _consumer, _dlq_producer
 
     sasl_kwargs: dict = {}
     if settings.kafka_use_tls:
@@ -171,11 +289,19 @@ async def _consume_loop() -> None:
         **sasl_kwargs,
     )
 
+    _dlq_producer = AIOKafkaProducer(
+        bootstrap_servers=settings.kafka_brokers,
+        client_id="payment-service-dlq",
+        **sasl_kwargs,
+    )
+
     await _consumer.start()
+    await _dlq_producer.start()
     logger.info(
-        "Kafka consumer started (brokers=%s, topics=[%s, %s, %s])",
+        "Kafka consumer started (brokers=%s, topics=[%s, %s, %s, %s])",
         settings.kafka_brokers,
         TOPIC_USER_CREATED,
+        TOPIC_USER_DELETED,
         TOPIC_NUMBER_PROVISIONED,
         TOPIC_NUMBER_PROVISIONING_FAILED,
     )
@@ -187,16 +313,20 @@ async def _consume_loop() -> None:
 
             logger.debug("Received message on %s: %s", topic, data)
 
+            handler: Callable[[dict], Awaitable[None]] | None = None
             if topic == TOPIC_USER_CREATED:
-                await _handle_user_created(data)
+                handler = _handle_user_created
             elif topic == TOPIC_USER_DELETED:
-                await _handle_user_deleted(data)
+                handler = _handle_user_deleted
             elif topic == TOPIC_NUMBER_PROVISIONED:
-                await _handle_number_provisioned(data)
+                handler = _handle_number_provisioned
             elif topic == TOPIC_NUMBER_PROVISIONING_FAILED:
-                await _handle_number_provisioning_failed(data)
+                handler = _handle_number_provisioning_failed
             else:
                 logger.warning("Unhandled topic: %s", topic)
+                continue
+
+            await _process_with_retry(handler, topic, data)
     except asyncio.CancelledError:
         logger.info("Kafka consumer loop cancelled")
         raise
@@ -206,7 +336,10 @@ async def _consume_loop() -> None:
         if _consumer is not None:
             await _consumer.stop()
             _consumer = None
-            logger.info("Kafka consumer stopped")
+        if _dlq_producer is not None:
+            await _dlq_producer.stop()
+            _dlq_producer = None
+        logger.info("Kafka consumer stopped")
 
 
 def start_consumer() -> None:

@@ -7,6 +7,7 @@ import { ProvisionedNumber } from "../entities/provisioned-number.entity";
 import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entity";
 import { TwilioNumberService } from "./twilio-number.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
+import { OutboxService } from "../outbox/outbox.service";
 
 /**
  * Business logic for provisioning and releasing phone numbers.
@@ -25,6 +26,7 @@ export class NumberProvisioningService {
     private readonly kafka: KafkaProducer,
     private readonly config: ConfigService,
     private readonly dataSource: DataSource,
+    private readonly outbox: OutboxService,
   ) {}
 
   /**
@@ -38,7 +40,11 @@ export class NumberProvisioningService {
     subscriptionId: string,
     creatorName?: string,
   ): Promise<string> {
-    // Idempotency check (outside transaction — read-only, safe)
+    // Idempotency check (outside transaction — read-only, safe).
+    // If the user already has a number, enqueue an outbox event so the
+    // payment-service can update the new subscription's bridge_number.
+    // Goes through the outbox so we never lose the event when Kafka is
+    // down at re-publish time.
     const existing = await this.numberRepo.findOne({
       where: { userId, status: "assigned" },
     });
@@ -48,17 +54,20 @@ export class NumberProvisioningService {
         userId,
         existing.phoneNumber,
       );
-      // Re-publish so payment-service updates the new subscription's bridge_number
-      try {
-        await this.kafka.publish("number.provisioned", {
+      await this.dataSource.transaction(async (manager) => {
+        await this.outbox.enqueue(
+          manager,
+          "number.provisioned",
+          "phone_number",
           userId,
-          subscriptionId,
-          phoneNumber: existing.phoneNumber,
-          twilioNumberSid: existing.twilioNumberSid,
-        });
-      } catch (err) {
-        this.logger.warn("Failed to re-publish number.provisioned: %s", err);
-      }
+          {
+            userId,
+            subscriptionId,
+            phoneNumber: existing.phoneNumber,
+            twilioNumberSid: existing.twilioNumberSid,
+          },
+        );
+      });
       return existing.phoneNumber;
     }
 
@@ -103,31 +112,24 @@ export class NumberProvisioningService {
         creatorName,
       );
 
-      await queryRunner.commitTransaction();
+      // Enqueue the `number.provisioned` event in the same transaction
+      // (transactional outbox pattern). The OutboxPublisherService picks
+      // it up and ships it to Kafka asynchronously — guaranteeing
+      // at-least-once delivery even if the broker is unreachable now.
+      await this.outbox.enqueue(
+        queryRunner.manager,
+        "number.provisioned",
+        "phone_number",
+        userId,
+        {
+          userId,
+          subscriptionId,
+          phoneNumber: provisioned.phoneNumber,
+          twilioNumberSid: provisioned.twilioNumberSid,
+        },
+      );
 
-      // Publish Kafka event AFTER commit. If this fails, the DB is
-      // still correct — payment service has a fallback to query
-      // bridge_number directly via /payments/bridge-number.
-      try {
-        await this.kafka.publish(
-          "number.provisioned",
-          {
-            userId,
-            subscriptionId,
-            phoneNumber: provisioned.phoneNumber,
-            twilioNumberSid: provisioned.twilioNumberSid,
-          },
-          userId,
-        );
-      } catch (kafkaErr) {
-        this.logger.warn(
-          "Kafka publish failed after DB commit for user %s, number %s. " +
-            "Payment service will fall back to direct query. Error: %s",
-          userId,
-          provisioned.phoneNumber,
-          kafkaErr,
-        );
-      }
+      await queryRunner.commitTransaction();
 
       this.logger.log(
         "Number %s assigned to user %s (sub=%s)",
@@ -159,39 +161,36 @@ export class NumberProvisioningService {
       return;
     }
 
-    // Mark as available for reuse (keep the Twilio number active)
-    provisioned.status = "available";
-    provisioned.userId = null;
-    provisioned.subscriptionId = null;
-    provisioned.releasedAt = new Date();
-    await this.numberRepo.save(provisioned);
+    const phoneNumber = provisioned.phoneNumber;
 
-    // Deactivate the phone assignment (stop routing calls)
-    await this.assignmentRepo.update(
-      { phoneNumber: provisioned.phoneNumber },
-      { status: "inactive" },
-    );
+    // Wrap the state change + outbox enqueue in a single transaction so
+    // the release is never visible without its accompanying event.
+    await this.dataSource.transaction(async (manager) => {
+      provisioned.status = "available";
+      provisioned.userId = null;
+      provisioned.subscriptionId = null;
+      provisioned.releasedAt = new Date();
+      await manager.save(provisioned);
 
-    try {
-      await this.kafka.publish(
+      // Deactivate the phone assignment (stop routing calls)
+      await manager.update(
+        PhoneNumberAssignment,
+        { phoneNumber },
+        { status: "inactive" },
+      );
+
+      await this.outbox.enqueue(
+        manager,
         "number.released",
-        {
-          userId,
-          phoneNumber: provisioned.phoneNumber,
-        },
+        "phone_number",
         userId,
+        { userId, phoneNumber },
       );
-    } catch (kafkaErr) {
-      this.logger.warn(
-        "Kafka publish failed for number.released (user=%s). Error: %s",
-        userId,
-        kafkaErr,
-      );
-    }
+    });
 
     this.logger.log(
       "Number %s released from user %s (returned to pool)",
-      provisioned.phoneNumber,
+      phoneNumber,
       userId,
     );
   }
