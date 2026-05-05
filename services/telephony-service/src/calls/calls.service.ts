@@ -124,17 +124,19 @@ export class CallsService {
       await this.callRepo.save(call);
     }
 
-    const parentCallSid = call.twilioCallSid;
     const webhookBaseUrl =
       this.config.get<string>("webhookBaseUrl") ?? "http://localhost:3009";
     const streamUrl = `${webhookBaseUrl.replace("http", "ws")}/telephony/media-stream`;
 
-    // Use the parent call SID for the Twilio REST API
+    // Attach the stream to the SID the client sent — that's the leg the user
+    // is actively on. The DB-stored SID is the parent PSTN/dial leg, which the
+    // recipient does not own on Twilio's side, so streams.create returns 404.
+    const streamCallSid = callSid;
     const stream = await this.twilioClient
-      .calls(parentCallSid)
+      .calls(streamCallSid)
       .streams.create({
         url: streamUrl,
-        name: `capture-${parentCallSid}-${Date.now()}`,
+        name: `capture-${streamCallSid}-${Date.now()}`,
         track: "both_tracks",
         "parameter1.name": "callId",
         "parameter1.value": call.id,
@@ -145,7 +147,7 @@ export class CallsService {
     this.logger.log(
       "Stream started: sid=%s call=%s",
       stream.sid,
-      parentCallSid,
+      streamCallSid,
     );
     return { streamSid: stream.sid };
   }
@@ -171,15 +173,17 @@ export class CallsService {
     }
     if (!call) throw new NotFoundException("Call not found");
 
-    const parentCallSid = call.twilioCallSid;
+    // Mirror startStream: target the SID the client sent (their active SDK leg),
+    // not the DB-stored parent leg.
+    const streamCallSid = callSid;
     await this.twilioClient
-      .calls(parentCallSid)
+      .calls(streamCallSid)
       .streams(streamSid)
       .update({ status: "stopped" });
     this.logger.log(
       "Stream stopped: sid=%s call=%s",
       streamSid,
-      parentCallSid,
+      streamCallSid,
     );
   }
 
