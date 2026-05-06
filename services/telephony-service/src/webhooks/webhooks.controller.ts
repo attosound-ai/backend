@@ -13,6 +13,7 @@ import { ConfigService } from "@nestjs/config";
 import { TwilioSignatureGuard } from "./guards/twilio-signature.guard";
 import { CallsService } from "../calls/calls.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
+import { UsersClientService } from "../users-client/users-client.service";
 
 @Controller("telephony/webhooks/voice")
 @UseGuards(TwilioSignatureGuard)
@@ -23,6 +24,7 @@ export class WebhooksController {
     private readonly callsService: CallsService,
     private readonly config: ConfigService,
     private readonly kafka: KafkaProducer,
+    private readonly usersClient: UsersClientService,
   ) {}
 
   /**
@@ -84,7 +86,17 @@ export class WebhooksController {
       action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
       timeout: 30,
     });
-    dial.client(`user-${assignment.userId}`);
+    const client = dial.client(`user-${assignment.userId}`);
+
+    // Always set DisplayName so the receiving app's
+    // setIncomingCallContactHandleTemplate("${DisplayName}") template
+    // never renders the literal placeholder. For PSTN inbound the
+    // caller's E.164 IS the friendly identity (matches the legacy
+    // banner), so we pass it through verbatim.
+    client.parameter({
+      name: "DisplayName",
+      value: callerName?.trim() || from || "Unknown",
+    });
 
     this.logger.log(
       "Routing call %s to client user-%s",
@@ -140,7 +152,25 @@ export class WebhooksController {
         action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
         timeout: 30,
       });
-      dial.client(to);
+      const client = dial.client(to);
+
+      // Enrich the invite with the caller's username so the recipient's
+      // CallKit (iOS) / notification (Android) banner shows `@username`
+      // instead of the raw `client:user-{id}` identity.
+      // The receiving app substitutes ${DisplayName} via Twilio's
+      // setIncomingCallContactHandleTemplate(...) API.
+      //
+      // The lookup is timeout-bounded and never throws; on any failure
+      // we still send DisplayName, falling back to the raw `from` so the
+      // template ALWAYS resolves to something readable. (Without a
+      // value, the receiver would render the literal `${DisplayName}`.)
+      const callerUsername = await this.usersClient.getUsernameById(
+        callerUserId,
+      );
+      client.parameter({
+        name: "DisplayName",
+        value: callerUsername ? `@${callerUsername}` : from || "Unknown",
+      });
     } else {
       // Outbound PSTN call
       const bridgeNumber = this.config.get<string>("twilio.bridgeNumber");
