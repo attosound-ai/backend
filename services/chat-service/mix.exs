@@ -35,7 +35,8 @@ defmodule ChatService.MixProject do
       {:decimal, "~> 2.0"},
       {:brod, "~> 3.16"},
       {:uuid, "~> 1.1"},
-      {:corsica, "~> 2.1"}
+      {:corsica, "~> 2.1"},
+      {:joken, "~> 2.6"}
     ]
   end
 
