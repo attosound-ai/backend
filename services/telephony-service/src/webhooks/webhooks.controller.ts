@@ -86,7 +86,17 @@ export class WebhooksController {
       action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
       timeout: 30,
     });
-    dial.client(`user-${assignment.userId}`);
+    const client = dial.client(`user-${assignment.userId}`);
+
+    // Always set DisplayName so the receiving app's
+    // setIncomingCallContactHandleTemplate("${DisplayName}") template
+    // never renders the literal placeholder. For PSTN inbound the
+    // caller's E.164 IS the friendly identity (matches the legacy
+    // banner), so we pass it through verbatim.
+    client.parameter({
+      name: "DisplayName",
+      value: callerName?.trim() || from || "Unknown",
+    });
 
     this.logger.log(
       "Routing call %s to client user-%s",
@@ -149,18 +159,18 @@ export class WebhooksController {
       // instead of the raw `client:user-{id}` identity.
       // The receiving app substitutes ${DisplayName} via Twilio's
       // setIncomingCallContactHandleTemplate(...) API.
-      // Best-effort: lookup is timeout-bounded and never throws; on any
-      // failure we omit the parameter and the banner falls back to the
-      // existing behavior.
+      //
+      // The lookup is timeout-bounded and never throws; on any failure
+      // we still send DisplayName, falling back to the raw `from` so the
+      // template ALWAYS resolves to something readable. (Without a
+      // value, the receiver would render the literal `${DisplayName}`.)
       const callerUsername = await this.usersClient.getUsernameById(
         callerUserId,
       );
-      if (callerUsername) {
-        client.parameter({
-          name: "DisplayName",
-          value: `@${callerUsername}`,
-        });
-      }
+      client.parameter({
+        name: "DisplayName",
+        value: callerUsername ? `@${callerUsername}` : from || "Unknown",
+      });
     } else {
       // Outbound PSTN call
       const bridgeNumber = this.config.get<string>("twilio.bridgeNumber");
