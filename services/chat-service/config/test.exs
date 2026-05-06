@@ -12,5 +12,8 @@ config :chat_service, ChatServiceWeb.Endpoint,
   server: false,
   secret_key_base: String.duplicate("a", 64)
 
+# Deterministic JWT secret for tests. Production reads from JWT_SECRET env var.
+config :chat_service, ChatService.Auth.JWT, secret: "test-jwt-secret-do-not-use-in-prod"
+
 # Print only warnings and up during test runs.
 config :logger, level: :warning

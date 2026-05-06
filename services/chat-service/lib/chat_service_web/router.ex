@@ -9,7 +9,7 @@ defmodule ChatServiceWeb.Router do
   end
 
   pipeline :authenticated do
-    plug ChatServiceWeb.Plugs.RequireUserId
+    plug ChatServiceWeb.Plugs.AuthenticateUser
   end
 
   scope "/api/v1", ChatServiceWeb do
