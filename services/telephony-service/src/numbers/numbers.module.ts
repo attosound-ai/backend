@@ -4,6 +4,7 @@ import { ProvisionedNumber } from "../entities/provisioned-number.entity";
 import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entity";
 import { TwilioNumberService } from "./twilio-number.service";
 import { NumberProvisioningService } from "./number-provisioning.service";
+import { NumbersController } from "./numbers.controller";
 import { KafkaModule } from "../kafka/kafka.module";
 import { OutboxModule } from "../outbox/outbox.module";
 
@@ -13,6 +14,7 @@ import { OutboxModule } from "../outbox/outbox.module";
     forwardRef(() => KafkaModule),
     OutboxModule,
   ],
+  controllers: [NumbersController],
   providers: [TwilioNumberService, NumberProvisioningService],
   exports: [TwilioNumberService, NumberProvisioningService],
 })
