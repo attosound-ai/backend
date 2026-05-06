@@ -39,4 +39,8 @@ export default () => ({
     port: parseInt(process.env.REDIS_PORT ?? "6379", 10),
     password: process.env.REDIS_PASSWORD || "atto_dev",
   },
+  userService: {
+    url: process.env.USER_SERVICE_URL || "http://localhost:8080",
+    timeoutMs: parseInt(process.env.USER_SERVICE_TIMEOUT_MS ?? "500", 10),
+  },
 });

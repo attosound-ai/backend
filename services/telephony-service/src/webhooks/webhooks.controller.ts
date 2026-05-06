@@ -13,6 +13,7 @@ import { ConfigService } from "@nestjs/config";
 import { TwilioSignatureGuard } from "./guards/twilio-signature.guard";
 import { CallsService } from "../calls/calls.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
+import { UsersClientService } from "../users-client/users-client.service";
 
 @Controller("telephony/webhooks/voice")
 @UseGuards(TwilioSignatureGuard)
@@ -23,6 +24,7 @@ export class WebhooksController {
     private readonly callsService: CallsService,
     private readonly config: ConfigService,
     private readonly kafka: KafkaProducer,
+    private readonly usersClient: UsersClientService,
   ) {}
 
   /**
@@ -140,7 +142,25 @@ export class WebhooksController {
         action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
         timeout: 30,
       });
-      dial.client(to);
+      const client = dial.client(to);
+
+      // Enrich the invite with the caller's username so the recipient's
+      // CallKit (iOS) / notification (Android) banner shows `@username`
+      // instead of the raw `client:user-{id}` identity.
+      // The receiving app substitutes ${DisplayName} via Twilio's
+      // setIncomingCallContactHandleTemplate(...) API.
+      // Best-effort: lookup is timeout-bounded and never throws; on any
+      // failure we omit the parameter and the banner falls back to the
+      // existing behavior.
+      const callerUsername = await this.usersClient.getUsernameById(
+        callerUserId,
+      );
+      if (callerUsername) {
+        client.parameter({
+          name: "DisplayName",
+          value: `@${callerUsername}`,
+        });
+      }
     } else {
       // Outbound PSTN call
       const bridgeNumber = this.config.get<string>("twilio.bridgeNumber");
