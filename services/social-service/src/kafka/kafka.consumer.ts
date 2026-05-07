@@ -5,7 +5,10 @@ import {
   OnModuleInit,
 } from "@nestjs/common";
 import { Kafka, Consumer, EachMessagePayload } from "kafkajs";
-import { RedisService } from "../redis/redis.service";
+import { CountsRepository } from "../redis/repositories/counts.repository";
+import { FollowGraphRepository } from "../redis/repositories/follow-graph.repository";
+import { FeedRepository } from "../redis/repositories/feed.repository";
+import { RedisClientProvider } from "../redis/redis-client.provider";
 import { PrismaService } from "../prisma/prisma.service";
 import { PushService } from "../push/push.service";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
@@ -17,7 +20,10 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   private consumer: Consumer;
 
   constructor(
-    private readonly redis: RedisService,
+    private readonly counts: CountsRepository,
+    private readonly followGraph: FollowGraphRepository,
+    private readonly feedRepo: FeedRepository,
+    private readonly redisClient: RedisClientProvider,
     private readonly prisma: PrismaService,
     private readonly pushService: PushService,
     private readonly grpcClients: GrpcClientsService,
@@ -188,30 +194,22 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     );
 
     // Decrement post count
-    await this.redis.decrementCount("posts", data.author_id);
+    await this.counts.decrement("posts", data.author_id);
 
-    // Remove from author's feed cache and all followers' feeds
-    const client = this.redis.getClient();
-    const followerIds = await this.redis.getFollowerIds(data.author_id);
-    const feedKeys = [
-      `social:feed:${data.author_id}`,
-      ...followerIds.map((fid) => `social:feed:${fid}`),
-    ];
-    if (feedKeys.length > 0) {
-      const pipeline = client.pipeline();
-      for (const key of feedKeys) {
-        pipeline.zrem(key, data.content_id);
-      }
-      await pipeline.exec();
-    }
+    // Remove the content id from the author's own feed and from every
+    // follower's feed. One pipelined ZREM per key inside FeedRepository.
+    const followerIds = await this.followGraph.getFollowers(data.author_id);
+    await this.feedRepo.removeContentFromFeeds(
+      [data.author_id, ...followerIds],
+      data.content_id,
+    );
 
-    // Clean up interaction counts from Redis
-    const countTypes = ["likes", "comments", "shares", "reposts"];
-    const cleanPipeline = client.pipeline();
-    for (const type of countTypes) {
-      cleanPipeline.del(`social:count:${type}:${data.content_id}`);
-    }
-    await cleanPipeline.exec();
+    // Clean up interaction counts from Redis through the repository.
+    await Promise.all(
+      (["likes", "comments", "shares", "reposts"] as const).map((type) =>
+        this.counts.invalidate(type, data.content_id),
+      ),
+    );
 
     // Clean up DB interactions for this content
     await Promise.all([
@@ -257,7 +255,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       : Date.now();
 
     // Get all followers of the author
-    let followerIds = await this.redis.getFollowerIds(data.author_id);
+    let followerIds = await this.followGraph.getFollowers(data.author_id);
 
     // If Redis cache is empty, fall back to DB
     if (followerIds.length === 0) {
@@ -269,15 +267,15 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
 
       // Re-populate Redis cache
       for (const fid of followerIds) {
-        await this.redis.addFollow(fid, data.author_id);
+        await this.followGraph.addEdge(fid, data.author_id);
       }
     }
 
     // Also add to the author's own feed
-    await this.redis.addToFeed(data.author_id, data.content_id, timestamp);
+    await this.feedRepo.add(data.author_id, data.content_id, timestamp);
 
     // Fan out to all followers
-    await this.redis.addToFeedBulk(followerIds, data.content_id, timestamp);
+    await this.feedRepo.addToFollowerFeeds(followerIds, data.content_id, timestamp);
 
     this.logger.log(
       `Content ${data.content_id} fanned out to ${followerIds.length} followers`,
@@ -462,33 +460,40 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       // Followers/following keys belonging to OTHER users were left
       // pointing at the deleted user. Audit caught this on user 147 →
       // user 150's `social:following` still contained "147".
-      const followers = await this.redis.getFollowerIds(userId);   // who follows userId
-      const following = await this.redis.getFollowingIds(userId);  // who userId follows
+      const followers = await this.followGraph.getFollowers(userId);   // who follows userId
+      const following = await this.followGraph.getFollowing(userId);  // who userId follows
 
       // For each follower F → strip userId from F's following set
       // (and from userId's followers set as a side-effect).
       for (const f of followers) {
-        await this.redis.removeFollow(f, userId);
+        await this.followGraph.removeEdge(f, userId);
       }
       // For each U that userId follows → strip userId from U's followers
       // (and from userId's following set as a side-effect).
       for (const u of following) {
-        await this.redis.removeFollow(userId, u);
+        await this.followGraph.removeEdge(userId, u);
       }
 
       // 4. Delete user's own caches — these may have leftover entries
       // even after the loops above (defensive: explicit DEL of the SET
-      // keys themselves, not just SREM their members).
-      await this.redis.del(`social:feed:${userId}`);
-      await this.redis.del(`social:following:${userId}`);
-      await this.redis.del(`social:followers:${userId}`);
-      await this.redis.del(`social:count:posts:${userId}`);
-      await this.redis.del(`social:count:following:${userId}`);
-      await this.redis.del(`social:count:followers:${userId}`);
+      // keys themselves, not just SREM their members). Done through the
+      // repository abstractions so every key namespace is owned by the
+      // class that defines it (no service knows the exact Redis keys).
+      await Promise.all([
+        this.feedRepo.invalidate(userId),
+        this.followGraph.invalidateUser(userId),
+        this.counts.invalidate("posts", userId),
+        this.counts.invalidate("following", userId),
+        this.counts.invalidate("followers", userId),
+      ]);
 
-      // Fix #2: Remove deleted user's content from ALL other users' feed caches
+      // Fix #2: Remove deleted user's content from ALL other users' feed
+      // caches. This is a global SCAN over the `social:feed:*` namespace —
+      // an intentional escape hatch out of the repository abstraction
+      // because cross-key admin enumeration is not a normal-path API
+      // (and exposing it would invite misuse from request handlers).
       if (userContentIds.length > 0) {
-        const client = this.redis.getClient();
+        const client = this.redisClient.client();
         let feedCursor = '0';
         let cleanedEntries = 0;
         do {
@@ -531,9 +536,11 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     // 4. Recalculate counts for ALL posts that still exist in interactions/comments
     //    Since user rows are already deleted, the DB counts are now correct —
     //    we just need to refresh Redis to match.
-    //    Scan all Redis count keys and recalculate from DB.
-    const client = this.redis.getClient();
-    const countTypes = ["likes", "comments", "shares", "reposts"];
+    //    Same admin-scan rationale as above: we're walking every key in
+    //    the `social:count:*` namespace, which is not a repository-level
+    //    API, so we drop down to the raw client deliberately.
+    const client = this.redisClient.client();
+    const countTypes = ["likes", "comments", "shares", "reposts"] as const;
 
     for (const type of countTypes) {
       const pattern = `social:count:${type}:*`;
@@ -569,7 +576,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
             });
           }
 
-          await this.redis.setCount(type, contentId, dbCount);
+          await this.counts.set(type, contentId, dbCount);
         }
       } while (cursor !== "0");
     }

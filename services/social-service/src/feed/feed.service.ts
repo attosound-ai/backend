@@ -1,6 +1,9 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { RedisService } from '../redis/redis.service';
+import { CountsRepository } from '../redis/repositories/counts.repository';
+import { FeedRepository } from '../redis/repositories/feed.repository';
+import { FollowGraphRepository } from '../redis/repositories/follow-graph.repository';
+import { RedisClientProvider } from '../redis/redis-client.provider';
 import { GrpcClientsService } from '../grpc/grpc-clients.service';
 import { InteractionsService } from '../interactions/interactions.service';
 import { FollowsService } from '../follows/follows.service';
@@ -12,7 +15,10 @@ export class FeedService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
+    private readonly counts: CountsRepository,
+    private readonly feedRepo: FeedRepository,
+    private readonly followGraph: FollowGraphRepository,
+    private readonly redisClient: RedisClientProvider,
     private readonly grpcClients: GrpcClientsService,
     private readonly interactionsService: InteractionsService,
     private readonly followsService: FollowsService,
@@ -43,10 +49,14 @@ export class FeedService {
     let cacheHit = false;
 
     if (cursor > 0) {
-      const cached = await this.redis.getFeedContentIds(userId, cursor, limit);
-      if (cached.contentIds.length > 0) {
-        contentIds = cached.contentIds;
-        nextCursor = cached.nextCursor;
+      const { members, nextCursor: cachedNext } = await this.feedRepo.page(
+        userId,
+        cursor,
+        limit,
+      );
+      if (members.length > 0) {
+        contentIds = members;
+        nextCursor = cachedNext;
         cacheHit = true;
       }
     }
@@ -146,10 +156,12 @@ export class FeedService {
     // Get personalised feed IDs (larger window so we have enough reels after filtering)
     let personalIds: string[] = [];
     try {
-      const { contentIds: feedIds } = await this.redis.getFeedContentIds(userId, cursor, limit * 5);
-      personalIds = feedIds;
+      const { members } = await this.feedRepo.page(userId, cursor, limit * 5);
+      personalIds = members;
     } catch (err) {
-      this.logger.warn(`Redis reels feed read failed, using empty list: ${(err as Error).message}`);
+      this.logger.warn(
+        `Redis reels feed read failed, using empty list: ${(err as Error).message}`,
+      );
     }
     if (personalIds.length === 0 && cursor === 0) {
       const result = await this.buildFeedFromFollowing(userId, 0, limit * 5);
@@ -224,7 +236,11 @@ export class FeedService {
     limit: number,
   ): Promise<{ posts: FeedPostDto[]; meta: { nextCursor: number | null; hasMore: boolean } }> {
     // Get personalised feed IDs (larger window)
-    const { contentIds: feedIds } = await this.redis.getFeedContentIds(userId, cursor, limit * 5);
+    const { members: feedIds } = await this.feedRepo.page(
+      userId,
+      cursor,
+      limit * 5,
+    );
     let personalIds = feedIds;
     if (personalIds.length === 0 && cursor === 0) {
       const result = await this.buildFeedFromFollowing(userId, 0, limit * 5);
@@ -341,7 +357,7 @@ export class FeedService {
       const cacheEntries = allContents.map((c) => ({ id: c.id, timestamp: c.timestamp }));
       Promise.resolve().then(async () => {
         try {
-          const client = this.redis.getClient();
+          const client = this.redisClient.client();
           const pipeline = client.pipeline();
           const feedKey = `social:feed:${userId}`;
           for (const entry of cacheEntries) {
@@ -420,16 +436,16 @@ export class FeedService {
     }
 
     // Update posts count in Redis
-    await this.redis.incrementCount('posts', userId);
+    await this.counts.increment('posts', userId);
 
     // Add to author's own feed
     const timestamp = new Date(content.created_at).getTime();
-    await this.redis.addToFeed(userId, content.id, timestamp);
+    await this.feedRepo.add(userId, content.id, timestamp);
 
     // Fan out to followers' feeds
-    const followerIds = await this.redis.getFollowerIds(userId);
+    const followerIds = await this.followGraph.getFollowers(userId);
     if (followerIds.length > 0) {
-      await this.redis.addToFeedBulk(followerIds, content.id, timestamp);
+      await this.feedRepo.addToFollowerFeeds(followerIds, content.id, timestamp);
     }
 
     // Fetch author details

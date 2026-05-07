@@ -1,11 +1,13 @@
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
-import { RedisService } from "../redis/redis.service";
+import { RedisClientProvider } from "../redis/redis-client.provider";
+import { JsonCache } from "../redis/caches/json-cache";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import * as path from "path";
 import * as fs from "fs";
 
 const USER_CACHE_TTL = 600; // 10 minutes
+const USER_NEGATIVE_TTL = 60; // 1 minute — short, since users do get created
 
 interface UserResponse {
   id: string;
@@ -46,8 +48,15 @@ export class GrpcClientsService implements OnModuleInit {
   private readonly logger = new Logger(GrpcClientsService.name);
   private userClient: any;
   private contentClient: any;
+  private readonly userCache: JsonCache<UserResponse>;
 
-  constructor(private readonly redis: RedisService) {}
+  constructor(redis: RedisClientProvider) {
+    this.userCache = new JsonCache<UserResponse>(redis, {
+      keyPrefix: "social:user",
+      ttlSeconds: USER_CACHE_TTL,
+      negativeTtlSeconds: USER_NEGATIVE_TTL,
+    });
+  }
 
   onModuleInit(): void {
     this.initUserClient();
@@ -147,72 +156,37 @@ export class GrpcClientsService implements OnModuleInit {
     this.logger.log(`Content gRPC client connected to ${address}`);
   }
 
-  // ── User Service RPCs (with Redis cache) ──
-
-  private userCacheKey(userId: string): string {
-    return `social:user:${userId}`;
-  }
+  // ── User Service RPCs (Redis-cached via JsonCache) ──
 
   /** Invalidate a user's cached profile — call on user.updated / user.deleted. */
   async invalidateUserCache(userId: string): Promise<void> {
-    await this.redis.del(this.userCacheKey(userId));
+    await this.userCache.invalidate(userId);
   }
 
   async getUser(userId: string): Promise<UserResponse | null> {
-    // Cache check
-    const cached = await this.redis.get(this.userCacheKey(userId));
-    if (cached) {
-      try { return JSON.parse(cached); } catch { /* fall through */ }
-    }
-
-    return new Promise((resolve) => {
-      this.userClient.GetUser(
-        { user_id: userId },
-        { deadline: this.deadline() },
-        (err: any, response: UserResponse) => {
-          if (err) {
-            this.logger.error(`GetUser failed for ${userId}: ${err.message}`);
-            resolve(null);
-          } else {
-            // Cache (fire-and-forget)
-            this.redis.set(this.userCacheKey(userId), JSON.stringify(response), USER_CACHE_TTL).catch(() => {});
-            resolve(response);
-          }
-        },
-      );
-    });
+    return this.userCache.getOrCompute(userId, () => this.fetchUser(userId));
   }
 
   /**
-   * Batch fetch users with Redis cache layer.
-   * Reads all from cache in 1 pipeline, only calls gRPC for misses.
+   * Batch fetch users with Redis cache layer. One pipelined read for
+   * the cache, one gRPC call for the misses, one pipelined write to
+   * back-fill. Cached negative entries (sentinel) are returned as
+   * absent and NOT re-fetched, which intentionally absorbs short
+   * windows where a user is being deleted.
    */
   async getUsersBatch(userIds: string[]): Promise<UserResponse[]> {
     if (userIds.length === 0) return [];
 
-    // 1. Pipeline read from Redis
-    const client = this.redis.getClient();
-    const pipeline = client.pipeline();
-    for (const id of userIds) {
-      pipeline.get(this.userCacheKey(id));
-    }
-    const results = await pipeline.exec();
-
+    const cachedMap = await this.userCache.getMany(userIds);
     const cached: UserResponse[] = [];
     const missingIds: string[] = [];
 
-    for (let i = 0; i < userIds.length; i++) {
-      const val = results?.[i]?.[1] as string | null;
-      if (val) {
-        try {
-          cached.push(JSON.parse(val));
-          continue;
-        } catch { /* fall through */ }
-      }
-      missingIds.push(userIds[i]);
+    for (const id of userIds) {
+      const value = cachedMap.get(id);
+      if (value) cached.push(value);
+      else missingIds.push(id);
     }
 
-    // 2. gRPC only for cache misses
     if (missingIds.length === 0) return cached;
 
     const fromGrpc = await new Promise<UserResponse[]>((resolve) => {
@@ -230,16 +204,32 @@ export class GrpcClientsService implements OnModuleInit {
       );
     });
 
-    // 3. Cache the gRPC results (fire-and-forget pipeline)
+    // Back-fill positive entries (fire-and-forget; failures don't block the
+    // user-visible response).
     if (fromGrpc.length > 0) {
-      const cachePipeline = client.pipeline();
-      for (const user of fromGrpc) {
-        cachePipeline.set(this.userCacheKey(user.id), JSON.stringify(user), 'EX', USER_CACHE_TTL);
-      }
-      cachePipeline.exec().catch(() => {});
+      this.userCache
+        .setMany(fromGrpc.map((user) => ({ id: user.id, value: user })))
+        .catch(() => {});
     }
 
     return [...cached, ...fromGrpc];
+  }
+
+  private fetchUser(userId: string): Promise<UserResponse | null> {
+    return new Promise((resolve) => {
+      this.userClient.GetUser(
+        { user_id: userId },
+        { deadline: this.deadline() },
+        (err: any, response: UserResponse) => {
+          if (err) {
+            this.logger.error(`GetUser failed for ${userId}: ${err.message}`);
+            resolve(null);
+          } else {
+            resolve(response);
+          }
+        },
+      );
+    });
   }
 
   async validateToken(
