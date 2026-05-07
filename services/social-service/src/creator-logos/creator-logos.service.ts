@@ -1,37 +1,47 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { RedisService } from '../redis/redis.service';
+import { RedisClientProvider } from '../redis/redis-client.provider';
+import { JsonCache } from '../redis/caches/json-cache';
 import { GrpcClientsService } from '../grpc/grpc-clients.service';
 import type { CreatorLogoDto } from './dto/creator-logo.dto';
 
-const CACHE_KEY = 'social:creator-logos';
+interface CachedLogos {
+  logos: Array<{
+    id: string;
+    imageUrl: string;
+    sortOrder: number;
+    creatorId: string | null;
+  }>;
+}
+
 const CACHE_TTL = 300; // 5 minutes
+const CACHE_ID = "active"; // singleton list — single id under the prefix
 
 @Injectable()
 export class CreatorLogosService {
   private readonly logger = new Logger(CreatorLogosService.name);
+  private readonly logosCache: JsonCache<CachedLogos>;
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
+    redis: RedisClientProvider,
     private readonly grpcClients: GrpcClientsService,
-  ) {}
+  ) {
+    this.logosCache = new JsonCache<CachedLogos>(redis, {
+      keyPrefix: "social:creator-logos",
+      ttlSeconds: CACHE_TTL,
+    });
+  }
 
   async getActiveLogos(userId: string): Promise<CreatorLogoDto[]> {
-    // Fetch active logos (cached list)
-    let logos: { id: string; imageUrl: string; sortOrder: number; creatorId: string | null }[];
-
-    const cached = await this.redis.get(CACHE_KEY);
-    if (cached) {
-      logos = JSON.parse(cached);
-    } else {
-      logos = await this.prisma.creatorLogo.findMany({
+    const wrapper = await this.logosCache.getOrCompute(CACHE_ID, async () => ({
+      logos: await this.prisma.creatorLogo.findMany({
         where: { active: true },
-        orderBy: { sortOrder: 'asc' },
+        orderBy: { sortOrder: "asc" },
         select: { id: true, imageUrl: true, sortOrder: true, creatorId: true },
-      });
-      await this.redis.set(CACHE_KEY, JSON.stringify(logos), CACHE_TTL);
-    }
+      }),
+    }));
+    const logos = wrapper?.logos ?? [];
 
     if (logos.length === 0) return [];
 

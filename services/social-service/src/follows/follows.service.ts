@@ -6,7 +6,8 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
-import { RedisService } from "../redis/redis.service";
+import { CountsRepository } from "../redis/repositories/counts.repository";
+import { FollowGraphRepository } from "../redis/repositories/follow-graph.repository";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
 import { PushService } from "../push/push.service";
@@ -18,32 +19,29 @@ export class FollowsService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
+    private readonly counts: CountsRepository,
+    private readonly followGraph: FollowGraphRepository,
     private readonly grpcClients: GrpcClientsService,
     private readonly kafkaProducer: KafkaProducer,
     private readonly pushService: PushService,
   ) {}
 
   async getStats(userId: string): Promise<{ followersCount: number; followingCount: number; postsCount: number }> {
-    const [followersCount, followingCount, cachedPosts] = await Promise.all([
+    const [followersCount, followingCount, postsCount] = await Promise.all([
       this.prisma.follow.count({ where: { followingId: userId } }),
       this.prisma.follow.count({ where: { followerId: userId } }),
-      this.redis.getCount('posts', userId),
-    ]);
-
-    // If Redis counter is missing or stale, derive from content-service (source of truth)
-    let postsCount = cachedPosts;
-    if (postsCount <= 0) {
-      try {
-        const { meta } = await this.grpcClients.getContentByAuthor(userId, { cursor: '', limit: 1 });
-        postsCount = meta.total ?? 0;
-        if (postsCount > 0) {
-          await this.redis.setCount('posts', userId, postsCount);
+      this.counts.getOrCompute("posts", userId, async () => {
+        try {
+          const { meta } = await this.grpcClients.getContentByAuthor(userId, {
+            cursor: "",
+            limit: 1,
+          });
+          return meta.total ?? 0;
+        } catch {
+          return 0;
         }
-      } catch {
-        postsCount = 0;
-      }
-    }
+      }),
+    ]);
 
     // Defensive clamp: counts must never leave this service negative.
     // The DB COUNT(*) can't go negative, but postsCount comes from a
@@ -84,9 +82,9 @@ export class FollowsService {
 
     // Update Redis cache (best-effort — DB is source of truth)
     try {
-      await this.redis.addFollow(followerId, followingId);
-      await this.redis.incrementCount("followers", followingId);
-      await this.redis.incrementCount("following", followerId);
+      await this.followGraph.addEdge(followerId, followingId);
+      await this.counts.increment("followers", followingId);
+      await this.counts.increment("following", followerId);
     } catch (err) {
       this.logger.warn(
         `Redis follow cache update failed: ${(err as Error).message}`,
@@ -164,9 +162,9 @@ export class FollowsService {
 
     // Update Redis cache (best-effort — DB is source of truth)
     try {
-      await this.redis.removeFollow(followerId, followingId);
-      await this.redis.decrementCount("followers", followingId);
-      await this.redis.decrementCount("following", followerId);
+      await this.followGraph.removeEdge(followerId, followingId);
+      await this.counts.decrement("followers", followingId);
+      await this.counts.decrement("following", followerId);
     } catch (err) {
       this.logger.warn(
         `Redis unfollow cache update failed: ${(err as Error).message}`,
@@ -256,24 +254,19 @@ export class FollowsService {
   }
 
   async getFollowingIds(userId: string): Promise<string[]> {
-    // Try Redis first
-    let ids = await this.redis.getFollowingIds(userId);
-
-    if (ids.length === 0) {
-      // Fall back to DB and populate cache
+    // Read-through against the follow graph cache. The repository's
+    // getFollowingOrMaterialize materializes the SET in a single
+    // pipeline (DEL → SADD many → EXPIRE), avoiding the per-id loop
+    // we used to do here. Empty results are also cached, so a user
+    // who follows nobody doesn't trigger a Postgres scan on every
+    // feed render.
+    return this.followGraph.getFollowingOrMaterialize(userId, async () => {
       const follows = await this.prisma.follow.findMany({
         where: { followerId: userId },
         select: { followingId: true },
       });
-      ids = follows.map((f) => f.followingId);
-
-      // Populate Redis cache
-      for (const followingId of ids) {
-        await this.redis.addFollow(userId, followingId);
-      }
-    }
-
-    return ids;
+      return follows.map((f) => f.followingId);
+    });
   }
 
   private async enrichUserSummaries(

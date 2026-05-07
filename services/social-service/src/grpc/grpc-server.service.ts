@@ -3,7 +3,8 @@ import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
-import { RedisService } from '../redis/redis.service';
+import { CountsRepository } from '../redis/repositories/counts.repository';
+import { FollowGraphRepository } from '../redis/repositories/follow-graph.repository';
 
 @Injectable()
 export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
@@ -12,7 +13,8 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
+    private readonly counts: CountsRepository,
+    private readonly followGraph: FollowGraphRepository,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -73,23 +75,13 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     try {
       const { userId } = call.request;
-
-      // Try Redis first
-      let count = await this.redis.getFollowersCount(userId);
-      if (count === 0) {
-        // Fall back to DB
-        count = await this.prisma.follow.count({
-          where: { followingId: userId },
-        });
-      }
-
+      const count = await this.counts.getOrCompute("followers", userId, () =>
+        this.prisma.follow.count({ where: { followingId: userId } }),
+      );
       callback(null, { count });
     } catch (error) {
       this.logger.error(`GetFollowersCount error: ${error.message}`);
-      callback({
-        code: grpc.status.INTERNAL,
-        message: error.message,
-      });
+      callback({ code: grpc.status.INTERNAL, message: error.message });
     }
   }
 
@@ -99,21 +91,13 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     try {
       const { userId } = call.request;
-
-      let count = await this.redis.getFollowingCount(userId);
-      if (count === 0) {
-        count = await this.prisma.follow.count({
-          where: { followerId: userId },
-        });
-      }
-
+      const count = await this.counts.getOrCompute("following", userId, () =>
+        this.prisma.follow.count({ where: { followerId: userId } }),
+      );
       callback(null, { count });
     } catch (error) {
       this.logger.error(`GetFollowingCount error: ${error.message}`);
-      callback({
-        code: grpc.status.INTERNAL,
-        message: error.message,
-      });
+      callback({ code: grpc.status.INTERNAL, message: error.message });
     }
   }
 
@@ -123,24 +107,15 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     try {
       const { userId } = call.request;
-
-      // Posts count is tracked via interactions or content service
-      // We cache it in Redis
-      let count = await this.redis.getCount('posts', userId);
-      if (count === 0) {
-        // Count interactions of type that indicate a post
-        // In this context, posts are created via Content service.
-        // We return the cached value or 0
-        count = 0;
-      }
-
+      // Source of truth for posts lives in content-service. The loader
+      // here returns 0 — same behavior as before — but now zeros are
+      // cached with the negative-TTL policy, so a creator-with-no-posts
+      // doesn't trigger a Redis lookup that misses on every gRPC call.
+      const count = await this.counts.getOrCompute("posts", userId, async () => 0);
       callback(null, { count });
     } catch (error) {
       this.logger.error(`GetPostsCount error: ${error.message}`);
-      callback({
-        code: grpc.status.INTERNAL,
-        message: error.message,
-      });
+      callback({ code: grpc.status.INTERNAL, message: error.message });
     }
   }
 
@@ -150,48 +125,25 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     try {
       const { contentId } = call.request;
-
-      // Try Redis cache first
-      const cachedLikes = await this.redis.getCount('likes', contentId);
-      const cachedComments = await this.redis.getCount('comments', contentId);
-      const cachedShares = await this.redis.getCount('shares', contentId);
-
-      if (cachedLikes > 0 || cachedComments > 0 || cachedShares > 0) {
-        callback(null, {
-          likesCount: cachedLikes,
-          commentsCount: cachedComments,
-          sharesCount: cachedShares,
-        });
-        return;
-      }
-
-      // Fall back to DB
       const [likesCount, commentsCount, sharesCount] = await Promise.all([
-        this.prisma.interaction.count({
-          where: { contentId, type: 'LIKE' },
-        }),
-        this.prisma.interaction.count({
-          where: { contentId, type: 'COMMENT' },
-        }),
-        this.prisma.interaction.count({
-          where: { contentId, type: 'SHARE' },
-        }),
+        this.counts.getOrCompute("likes", contentId, () =>
+          this.prisma.interaction.count({ where: { contentId, type: "LIKE" } }),
+        ),
+        this.counts.getOrCompute("comments", contentId, () =>
+          this.prisma.interaction.count({
+            where: { contentId, type: "COMMENT" },
+          }),
+        ),
+        this.counts.getOrCompute("shares", contentId, () =>
+          this.prisma.interaction.count({
+            where: { contentId, type: "SHARE" },
+          }),
+        ),
       ]);
-
-      // Cache the results
-      await Promise.all([
-        this.redis.setCount('likes', contentId, likesCount),
-        this.redis.setCount('comments', contentId, commentsCount),
-        this.redis.setCount('shares', contentId, sharesCount),
-      ]);
-
       callback(null, { likesCount, commentsCount, sharesCount });
     } catch (error) {
       this.logger.error(`GetInteractionCounts error: ${error.message}`);
-      callback({
-        code: grpc.status.INTERNAL,
-        message: error.message,
-      });
+      callback({ code: grpc.status.INTERNAL, message: error.message });
     }
   }
 
@@ -202,8 +154,11 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
     try {
       const { followerId, followingId } = call.request;
 
-      // Try Redis first
-      const cachedResult = await this.redis.isFollowing(
+      // Cache says "yes" → trust it (false-positive on a cached entry
+      // would require an out-of-band write that bypassed the repo).
+      // Cache says "no" → could be a genuine "no" OR a cold cache, so
+      // fall through to DB to avoid false negatives.
+      const cachedResult = await this.followGraph.isFollowing(
         followerId,
         followingId,
       );
@@ -212,13 +167,9 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // Fall back to DB
       const follow = await this.prisma.follow.findUnique({
         where: {
-          followerId_followingId: {
-            followerId,
-            followingId,
-          },
+          followerId_followingId: { followerId, followingId },
         },
       });
 

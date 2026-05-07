@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
-import { RedisService } from "../redis/redis.service";
+import { CountsRepository } from "../redis/repositories/counts.repository";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
 import { PushService } from "../push/push.service";
@@ -18,7 +18,7 @@ export class InteractionsService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly redis: RedisService,
+    private readonly counts: CountsRepository,
     private readonly grpcClients: GrpcClientsService,
     private readonly kafkaProducer: KafkaProducer,
     private readonly pushService: PushService,
@@ -61,7 +61,7 @@ export class InteractionsService {
       data: { userId, contentId, type: "LIKE" },
     });
 
-    await this.redis.incrementCount("likes", contentId);
+    await this.counts.increment("likes", contentId);
 
     const content = await this.grpcClients.getContent(contentId);
     if (content && content.author_id !== userId) {
@@ -111,7 +111,7 @@ export class InteractionsService {
       },
     });
 
-    await this.redis.decrementCount("likes", contentId);
+    await this.counts.decrement("likes", contentId);
 
     await this.kafkaProducer.send("interaction.removed", {
       user_id: userId,
@@ -157,7 +157,7 @@ export class InteractionsService {
       },
     });
 
-    await this.redis.incrementCount("comments", contentId);
+    await this.counts.increment("comments", contentId);
 
     const content = await this.grpcClients.getContent(contentId);
     if (content && content.author_id !== userId) {
@@ -360,7 +360,7 @@ export class InteractionsService {
       data: { isDeleted: true, deletedAt: new Date() },
     });
 
-    await this.redis.decrementCount("comments", comment.contentId);
+    await this.counts.decrement("comments", comment.contentId);
 
     await this.kafkaProducer.send("interaction.deleted", {
       id: commentId,
@@ -437,7 +437,7 @@ export class InteractionsService {
     if (existing) throw new ConflictException("Already reposted");
 
     await this.prisma.repost.create({ data: { userId, contentId } });
-    await this.redis.incrementCount("reposts", contentId);
+    await this.counts.increment("reposts", contentId);
 
     const content = await this.grpcClients.getContent(contentId);
     if (content && content.author_id !== userId) {
@@ -470,7 +470,7 @@ export class InteractionsService {
     await this.prisma.repost.delete({
       where: { userId_contentId: { userId, contentId } },
     });
-    await this.redis.decrementCount("reposts", contentId);
+    await this.counts.decrement("reposts", contentId);
 
     await this.kafkaProducer.send("interaction.removed", {
       user_id: userId,
@@ -499,7 +499,7 @@ export class InteractionsService {
       create: { userId, contentId, type: "SHARE" },
     });
 
-    await this.redis.incrementCount("shares", contentId);
+    await this.counts.increment("shares", contentId);
 
     const content = await this.grpcClients.getContent(contentId);
     if (content && content.author_id !== userId) {
@@ -541,36 +541,29 @@ export class InteractionsService {
     sharesCount: number;
     repostsCount: number;
   }> {
-    const [likes, comments, shares, reposts] = await Promise.all([
-      this.redis.getCount("likes", contentId),
-      this.redis.getCount("comments", contentId),
-      this.redis.getCount("shares", contentId),
-      this.redis.getCount("reposts", contentId),
-    ]);
-
-    if (likes > 0 || comments > 0 || shares > 0 || reposts > 0) {
-      return {
-        likesCount: likes,
-        commentsCount: comments,
-        sharesCount: shares,
-        repostsCount: reposts,
-      };
-    }
-
+    // Read-through: each counter is fetched from Redis, falling back to
+    // a Prisma COUNT(*) on miss and seeding the cache (including zeros)
+    // through CountsRepository's negative-caching policy. Replaces the
+    // previous "all-or-nothing" pattern that did 4 GETs followed by
+    // 4 SETs only when *every* key was zero — that pattern silently
+    // skipped re-syncing single stale counters and left zeros uncached.
     const [likesCount, commentsCount, sharesCount, repostsCount] =
       await Promise.all([
-        this.prisma.interaction.count({ where: { contentId, type: "LIKE" } }),
-        this.prisma.comment.count({ where: { contentId } }),
-        this.prisma.interaction.count({ where: { contentId, type: "SHARE" } }),
-        this.prisma.repost.count({ where: { contentId } }),
+        this.counts.getOrCompute("likes", contentId, () =>
+          this.prisma.interaction.count({ where: { contentId, type: "LIKE" } }),
+        ),
+        this.counts.getOrCompute("comments", contentId, () =>
+          this.prisma.comment.count({ where: { contentId } }),
+        ),
+        this.counts.getOrCompute("shares", contentId, () =>
+          this.prisma.interaction.count({
+            where: { contentId, type: "SHARE" },
+          }),
+        ),
+        this.counts.getOrCompute("reposts", contentId, () =>
+          this.prisma.repost.count({ where: { contentId } }),
+        ),
       ]);
-
-    await Promise.all([
-      this.redis.setCount("likes", contentId, likesCount),
-      this.redis.setCount("comments", contentId, commentsCount),
-      this.redis.setCount("shares", contentId, sharesCount),
-      this.redis.setCount("reposts", contentId, repostsCount),
-    ]);
 
     return { likesCount, commentsCount, sharesCount, repostsCount };
   }
@@ -585,92 +578,122 @@ export class InteractionsService {
   async getInteractionCountsBatch(
     contentIds: string[],
   ): Promise<Map<string, { likesCount: number; commentsCount: number; sharesCount: number; repostsCount: number }>> {
-    const result = new Map<string, { likesCount: number; commentsCount: number; sharesCount: number; repostsCount: number }>();
+    const result = new Map<
+      string,
+      {
+        likesCount: number;
+        commentsCount: number;
+        sharesCount: number;
+        repostsCount: number;
+      }
+    >();
     if (contentIds.length === 0) return result;
 
-    // Try Redis pipeline first (1 roundtrip for all counts)
-    const client = this.redis.getClient();
-    const pipeline = client.pipeline();
-    for (const id of contentIds) {
-      pipeline.get(`social:count:likes:${id}`);
-      pipeline.get(`social:count:comments:${id}`);
-      pipeline.get(`social:count:shares:${id}`);
-      pipeline.get(`social:count:reposts:${id}`);
-    }
-    const redisResults = await pipeline.exec();
-
-    const missingIds: string[] = [];
-    for (let i = 0; i < contentIds.length; i++) {
-      const likes = redisResults?.[i * 4]?.[1];
-      const comments = redisResults?.[i * 4 + 1]?.[1];
-      const shares = redisResults?.[i * 4 + 2]?.[1];
-      const reposts = redisResults?.[i * 4 + 3]?.[1];
-
-      if (likes || comments || shares || reposts) {
-        result.set(contentIds[i], {
-          likesCount: parseInt(likes as string, 10) || 0,
-          commentsCount: parseInt(comments as string, 10) || 0,
-          sharesCount: parseInt(shares as string, 10) || 0,
-          repostsCount: parseInt(reposts as string, 10) || 0,
-        });
-      } else {
-        missingIds.push(contentIds[i]);
-      }
-    }
-
-    // Fallback: batch DB queries for cache misses (GROUP BY instead of N individual COUNTs)
-    if (missingIds.length > 0) {
-      const [likeGroups, commentGroups, shareGroups, repostGroups] = await Promise.all([
-        this.prisma.interaction.groupBy({
-          by: ['contentId'],
-          where: { contentId: { in: missingIds }, type: 'LIKE' },
-          _count: { contentId: true },
-        }),
-        this.prisma.comment.groupBy({
-          by: ['contentId'],
-          where: { contentId: { in: missingIds } },
-          _count: { contentId: true },
-        }),
-        this.prisma.interaction.groupBy({
-          by: ['contentId'],
-          where: { contentId: { in: missingIds }, type: 'SHARE' },
-          _count: { contentId: true },
-        }),
-        this.prisma.repost.groupBy({
-          by: ['contentId'],
-          where: { contentId: { in: missingIds } },
-          _count: { contentId: true },
-        }),
+    // 4 pipelined batch reads (one per count type). Each round-trip is
+    // a few ms on the internal Railway network, so the total is on par
+    // with the previous single-pipeline implementation while keeping
+    // Redis details fully encapsulated in CountsRepository.
+    const [cachedLikes, cachedComments, cachedShares, cachedReposts] =
+      await Promise.all([
+        this.counts.getMany("likes", contentIds),
+        this.counts.getMany("comments", contentIds),
+        this.counts.getMany("shares", contentIds),
+        this.counts.getMany("reposts", contentIds),
       ]);
 
-      const likeMap = new Map(likeGroups.map((g) => [g.contentId, g._count.contentId]));
-      const commentMap = new Map(commentGroups.map((g) => [g.contentId, g._count.contentId]));
-      const shareMap = new Map(shareGroups.map((g) => [g.contentId, g._count.contentId]));
-      const repostMap = new Map(repostGroups.map((g) => [g.contentId, g._count.contentId]));
+    // A content id is considered "fully cached" only when ALL four
+    // counts are present. Mixed states (e.g. likes cached, comments
+    // not) fall through to DB to guarantee the response is internally
+    // consistent rather than mixing fresh and stale numbers.
+    const missingIds: string[] = [];
+    for (const id of contentIds) {
+      const likes = cachedLikes.get(id);
+      const comments = cachedComments.get(id);
+      const shares = cachedShares.get(id);
+      const reposts = cachedReposts.get(id);
 
-      // Cache in Redis and populate result
-      const cachePipeline = client.pipeline();
-      for (const id of missingIds) {
-        const counts = {
-          likesCount: likeMap.get(id) || 0,
-          commentsCount: commentMap.get(id) || 0,
-          sharesCount: shareMap.get(id) || 0,
-          repostsCount: repostMap.get(id) || 0,
-        };
-        result.set(id, counts);
-        cachePipeline.set(`social:count:likes:${id}`, counts.likesCount, 'EX', 3600);
-        cachePipeline.set(`social:count:comments:${id}`, counts.commentsCount, 'EX', 3600);
-        cachePipeline.set(`social:count:shares:${id}`, counts.sharesCount, 'EX', 3600);
-        cachePipeline.set(`social:count:reposts:${id}`, counts.repostsCount, 'EX', 3600);
+      if (
+        likes != null &&
+        comments != null &&
+        shares != null &&
+        reposts != null
+      ) {
+        result.set(id, {
+          likesCount: likes,
+          commentsCount: comments,
+          sharesCount: shares,
+          repostsCount: reposts,
+        });
+      } else {
+        missingIds.push(id);
       }
-      await cachePipeline.exec();
     }
 
-    // Fill any remaining IDs with zeros
-    for (const id of contentIds) {
-      if (!result.has(id)) {
-        result.set(id, { likesCount: 0, commentsCount: 0, sharesCount: 0, repostsCount: 0 });
+    if (missingIds.length > 0) {
+      const [likeGroups, commentGroups, shareGroups, repostGroups] =
+        await Promise.all([
+          this.prisma.interaction.groupBy({
+            by: ["contentId"],
+            where: { contentId: { in: missingIds }, type: "LIKE" },
+            _count: { contentId: true },
+          }),
+          this.prisma.comment.groupBy({
+            by: ["contentId"],
+            where: { contentId: { in: missingIds } },
+            _count: { contentId: true },
+          }),
+          this.prisma.interaction.groupBy({
+            by: ["contentId"],
+            where: { contentId: { in: missingIds }, type: "SHARE" },
+            _count: { contentId: true },
+          }),
+          this.prisma.repost.groupBy({
+            by: ["contentId"],
+            where: { contentId: { in: missingIds } },
+            _count: { contentId: true },
+          }),
+        ]);
+
+      const likeMap = new Map(
+        likeGroups.map((g) => [g.contentId, g._count.contentId]),
+      );
+      const commentMap = new Map(
+        commentGroups.map((g) => [g.contentId, g._count.contentId]),
+      );
+      const shareMap = new Map(
+        shareGroups.map((g) => [g.contentId, g._count.contentId]),
+      );
+      const repostMap = new Map(
+        repostGroups.map((g) => [g.contentId, g._count.contentId]),
+      );
+
+      const likesEntries: Array<{ id: string; count: number }> = [];
+      const commentsEntries: Array<{ id: string; count: number }> = [];
+      const sharesEntries: Array<{ id: string; count: number }> = [];
+      const repostsEntries: Array<{ id: string; count: number }> = [];
+
+      for (const id of missingIds) {
+        const counts = {
+          likesCount: likeMap.get(id) ?? 0,
+          commentsCount: commentMap.get(id) ?? 0,
+          sharesCount: shareMap.get(id) ?? 0,
+          repostsCount: repostMap.get(id) ?? 0,
+        };
+        result.set(id, counts);
+        likesEntries.push({ id, count: counts.likesCount });
+        commentsEntries.push({ id, count: counts.commentsCount });
+        sharesEntries.push({ id, count: counts.sharesCount });
+        repostsEntries.push({ id, count: counts.repostsCount });
       }
+
+      // Write back to cache (zeros included — each entry's TTL respects
+      // the type's negative-TTL policy via setMany).
+      await Promise.all([
+        this.counts.setMany("likes", likesEntries),
+        this.counts.setMany("comments", commentsEntries),
+        this.counts.setMany("shares", sharesEntries),
+        this.counts.setMany("reposts", repostsEntries),
+      ]);
     }
 
     return result;
