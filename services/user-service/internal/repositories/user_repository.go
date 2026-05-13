@@ -150,7 +150,7 @@ func (r *UserRepository) SearchUsers(query string, limit int) ([]models.User, er
 		limit = 100
 	}
 	pattern := "%" + query + "%"
-	err := r.db.Where("(username ILIKE ? OR display_name ILIKE ? OR email ILIKE ? OR phone_number ILIKE ?) AND registration_status = ?", pattern, pattern, pattern, pattern, "completed").
+	err := r.db.Where("username ILIKE ? OR display_name ILIKE ? OR email ILIKE ? OR phone_number ILIKE ?", pattern, pattern, pattern, pattern).
 		Limit(limit).
 		Order("username ASC").
 		Find(&users).Error
@@ -166,7 +166,7 @@ func (r *UserRepository) DiscoverUsers(excludeID uint64, limit int) ([]models.Us
 	if limit > 100 {
 		limit = 100
 	}
-	err := r.db.Where("id != ? AND registration_status = ?", excludeID, "completed").
+	err := r.db.Where("id != ?", excludeID).
 		Limit(limit).
 		Order("RANDOM()").
 		Find(&users).Error
@@ -266,7 +266,6 @@ func (r *UserRepository) CreateManagedCreator(
 		ConsentToRecording: &consentToRecording,
 		CreatorTypes:       creatorTypes,
 		CreatorGenres:      creatorGenres,
-		RegistrationStatus: "completed",
 	}
 
 	// If we have a real password, create user + credentials in a transaction

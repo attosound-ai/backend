@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/atto-sound/user-service/internal/config"
 	usergrpc "github.com/atto-sound/user-service/internal/grpc"
@@ -38,19 +40,41 @@ func main() {
 	log.Println("[STARTUP] Connected to PostgreSQL")
 
 	// ── Auto-migrate GORM models ──
-	if err := db.AutoMigrate(&models.User{}, &models.UserCredentials{}, &models.PushToken{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.UserCredentials{}, &models.PushToken{}, &models.SignupSession{}); err != nil {
 		log.Fatalf("[STARTUP] Failed to auto-migrate models: %v", err)
 	}
 	log.Println("[STARTUP] Database migration completed")
 
+	// Post-migration housekeeping for the signup_sessions refactor.
+	// 1. Drop the legacy users.registration_status column. Pending users are
+	//    deleted in the cutover migration script; completed users implicitly
+	//    have status 'completed' by virtue of being in the users table at all.
+	// 2. Create the unique partial index on signup_sessions(identifier) for
+	//    active sessions only. AutoMigrate cannot express partial indexes,
+	//    so we do it by hand. Idempotent — CREATE INDEX IF NOT EXISTS.
+	if db.Migrator().HasColumn(&models.User{}, "registration_status") {
+		if err := db.Migrator().DropColumn(&models.User{}, "registration_status"); err != nil {
+			log.Printf("[STARTUP] WARN: could not drop users.registration_status: %v", err)
+		} else {
+			log.Println("[STARTUP] Dropped legacy users.registration_status column")
+		}
+	}
+	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS signup_sessions_active_identifier
+		ON signup_sessions (identifier)
+		WHERE status IN ('started','verified')`).Error; err != nil {
+		log.Fatalf("[STARTUP] Failed to create signup_sessions partial index: %v", err)
+	}
+
 	// ── Initialise dependencies ──
 	repo := repositories.NewUserRepository(db)
+	signupRepo := repositories.NewSignupRepository(db)
 	jwtMgr := middleware.NewJWTManager(cfg)
 	producer := kafka.NewProducer(cfg.KafkaBrokers)
 	defer producer.Close()
 
 	authService := services.NewAuthService(repo, jwtMgr, producer, cfg.OTPServiceURL)
 	userService := services.NewUserService(repo, producer)
+	signupService := services.NewSignupService(signupRepo, repo, jwtMgr, producer, cfg.OTPServiceURL)
 
 	inmateService := services.NewInmateService()
 
@@ -60,6 +84,7 @@ func main() {
 	inmateHandler := handlers.NewInmateHandler(inmateService)
 	pushTokenHandler := handlers.NewPushTokenHandler(repo)
 	healthHandler := handlers.NewHealthHandler()
+	signupHandler := handlers.NewSignupHandler(signupService)
 
 	// ── Fiber HTTP server ──
 	app := fiber.New(fiber.Config{
@@ -102,8 +127,19 @@ func main() {
 
 	// Auth routes (protected)
 	auth.Get("/me", middleware.RequireAuth(jwtMgr), authHandler.Me)
-	auth.Post("/complete-registration", middleware.RequireAuth(jwtMgr), authHandler.CompleteRegistration)
+	auth.Post("/complete-registration", authHandler.CompleteRegistration) // 426 — kept for old clients
 	auth.Post("/switch-account", middleware.RequireAuth(jwtMgr), authHandler.SwitchAccount)
+
+	// Signup routes — new draft-session flow.
+	// Start + verifyOTP are public (session ID + OTP code are the credentials).
+	// The remainder requires a signup_pending scoped JWT.
+	signup := app.Group("/signup")
+	signup.Post("/sessions", signupHandler.Start)
+	signup.Post("/sessions/:id/verify-otp", signupHandler.VerifyOTP)
+	signup.Get("/sessions/me", middleware.RequireSignupScope(jwtMgr), signupHandler.Me)
+	signup.Patch("/sessions/me", middleware.RequireSignupScope(jwtMgr), signupHandler.Patch)
+	signup.Post("/sessions/me/complete", middleware.RequireSignupScope(jwtMgr), signupHandler.Complete)
+	signup.Delete("/sessions/me", middleware.RequireSignupScope(jwtMgr), signupHandler.Abandon)
 
 	// 2FA management (protected)
 	auth.Post("/2fa/enable", middleware.RequireAuth(jwtMgr), authHandler.Enable2FAInit)
@@ -129,6 +165,24 @@ func main() {
 	users.Get("/:id", userHandler.GetUser)
 	users.Get("/:id/followers", userHandler.GetFollowers)
 	users.Get("/:id/following", userHandler.GetFollowing)
+
+	// ── Signup session cleanup worker ──
+	// Hourly: mark expired sessions abandoned. Grace period 24h before purge so
+	// we keep a paper trail for analytics/support. With ~50 signups/day this is
+	// negligible storage; revisit if it ever becomes meaningful.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			marked, purged, err := signupService.CleanupExpired(context.Background(), 24*time.Hour)
+			if err != nil {
+				log.Printf("[SIGNUP-CLEAN] failed: %v", err)
+			} else if marked > 0 || purged > 0 {
+				log.Printf("[SIGNUP-CLEAN] marked=%d purged=%d", marked, purged)
+			}
+			<-ticker.C
+		}
+	}()
 
 	// ── Start gRPC server in a goroutine ──
 	grpcServer := usergrpc.NewUserGRPCServer(userService, jwtMgr)

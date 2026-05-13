@@ -35,6 +35,25 @@ defmodule ChatServiceWeb.Plugs.AuthenticateUser do
     end
   end
 
+  # 403 (not 401) for signup_pending: the token is valid, the route is just
+  # out of scope. 401 would tell the client to refresh — there is no refresh
+  # that helps here, only completing the signup.
+  defp reject(conn, :signup_pending) do
+    Logger.info("auth rejected: signup_pending scope")
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(
+      403,
+      Jason.encode!(%{
+        success: false,
+        data: nil,
+        error: "insufficient_scope: finish registration first"
+      })
+    )
+    |> halt()
+  end
+
   defp reject(conn, reason) do
     Logger.info("auth rejected: #{reason}")
 

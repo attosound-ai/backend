@@ -167,7 +167,6 @@ type UserProfile struct {
 	ProfileVerified    bool     `json:"profileVerified"`
 	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
 	TwoFactorMethod    string `json:"twoFactorMethod"`
-	RegistrationStatus string  `json:"registrationStatus"`
 	RepresentativeID   *uint64 `json:"representativeId,omitempty"`
 	IsManagedAccount   bool    `json:"isManagedAccount"`
 	FollowersCount     int64   `json:"followersCount"`
@@ -252,7 +251,6 @@ func (u *User) ToProfile() *UserProfile {
 		RecordLabel:       u.RecordLabel,
 		BookingEmail:      u.BookingEmail,
 		ProfileVerified:    u.ProfileVerified,
-		RegistrationStatus: u.RegistrationStatus,
 		FollowersCount:     u.FollowersCount,
 		FollowingCount:     u.FollowingCount,
 		PostsCount:         u.PostsCount,
