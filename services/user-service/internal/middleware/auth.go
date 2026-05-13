@@ -196,36 +196,42 @@ func (m *JWTManager) Validate2FAToken(tokenStr string) (*JWTClaims, error) {
 }
 
 // extractClaims validates the bearer token from the request and stores the
-// resulting claims under c.Locals. Returns nil + a Fiber error response when
-// the header is missing or the token is invalid.
-func extractClaims(c *fiber.Ctx, jwtMgr *JWTManager) (*JWTClaims, error) {
+// resulting claims under c.Locals. When the header is missing or the token is
+// invalid it writes the 401 response itself and returns `(nil, true)` — the
+// caller MUST check `done` and return immediately, not the error value, since
+// Fiber's `c.JSON()` returns `nil` on success and a non-nil-error check is
+// unreliable.
+func extractClaims(c *fiber.Ctx, jwtMgr *JWTManager) (claims *JWTClaims, done bool) {
 	authHeader := c.Get("Authorization")
 	if authHeader == "" {
-		return nil, c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+		_ = c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
 			Success: false,
 			Error:   "missing authorization header",
 		})
+		return nil, true
 	}
 
 	parts := strings.SplitN(authHeader, " ", 2)
 	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-		return nil, c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+		_ = c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
 			Success: false,
 			Error:   "invalid authorization header format",
 		})
+		return nil, true
 	}
 
-	claims, err := jwtMgr.ValidateToken(parts[1])
+	parsed, err := jwtMgr.ValidateToken(parts[1])
 	if err != nil {
-		return nil, c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+		_ = c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
 			Success: false,
 			Error:   "invalid or expired token",
 		})
+		return nil, true
 	}
-	c.Locals("claims", claims)
-	c.Locals("userID", claims.UserID)
-	c.Locals("scope", claims.EffectiveScope())
-	return claims, nil
+	c.Locals("claims", parsed)
+	c.Locals("userID", parsed.UserID)
+	c.Locals("scope", parsed.EffectiveScope())
+	return parsed, false
 }
 
 // RequireAuth gates routes intended for fully-registered users. A signup_pending
@@ -234,9 +240,9 @@ func extractClaims(c *fiber.Ctx, jwtMgr *JWTManager) (*JWTClaims, error) {
 // trick the client into a refresh loop.
 func RequireAuth(jwtMgr *JWTManager) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		claims, errResp := extractClaims(c, jwtMgr)
-		if errResp != nil {
-			return errResp
+		claims, done := extractClaims(c, jwtMgr)
+		if done {
+			return nil
 		}
 		if claims.EffectiveScope() != ScopeUser {
 			return c.Status(fiber.StatusForbidden).JSON(models.APIResponse{
@@ -253,9 +259,9 @@ func RequireAuth(jwtMgr *JWTManager) fiber.Handler {
 // never accidentally drive signup endpoints with their session token.
 func RequireSignupScope(jwtMgr *JWTManager) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		claims, errResp := extractClaims(c, jwtMgr)
-		if errResp != nil {
-			return errResp
+		claims, done := extractClaims(c, jwtMgr)
+		if done {
+			return nil
 		}
 		if claims.EffectiveScope() != ScopeSignupPending {
 			return c.Status(fiber.StatusForbidden).JSON(models.APIResponse{
