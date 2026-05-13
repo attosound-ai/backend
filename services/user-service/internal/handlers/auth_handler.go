@@ -4,7 +4,6 @@ import (
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
 	"github.com/atto-sound/user-service/internal/services"
-	"github.com/atto-sound/user-service/internal/validation"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -284,116 +283,24 @@ func (h *AuthHandler) CheckEmail(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{Success: true})
 }
 
-// PreRegister handles POST /auth/pre-register
+// PreRegister handles POST /auth/pre-register.
+// Deprecated as of the signup-sessions refactor. Old app builds that haven't
+// been updated still hit this route — we respond with 426 so the client can
+// surface an "update required" screen instead of trying to parse a generic 4xx.
 func (h *AuthHandler) PreRegister(c *fiber.Ctx) error {
-	var req models.PreRegisterRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-			Success: false,
-			Error:   "invalid request body",
-		})
-	}
-
-	hasEmail := req.Email != nil && *req.Email != ""
-	hasPhone := req.PhoneNumber != nil && *req.PhoneNumber != ""
-	if req.Password == "" || req.DisplayName == "" || req.Username == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-			Success: false,
-			Error:   "password, displayName, and username are required",
-		})
-	}
-	if !hasEmail && !hasPhone {
-		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-			Success: false,
-			Error:   "email or phone number is required",
-		})
-	}
-	if len(req.Username) < 3 || len(req.Username) > 50 {
-		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-			Success: false,
-			Error:   "username must be between 3 and 50 characters",
-		})
-	}
-	if len(req.Password) < 8 {
-		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-			Success: false,
-			Error:   "password must be at least 8 characters",
-		})
-	}
-
-	if req.DateOfBirth != nil {
-		if _, err := validation.ParseAndValidateDOB(*req.DateOfBirth); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-				Success: false,
-				Error:   err.Error(),
-			})
-		}
-	}
-
-	result, err := h.authService.PreRegister(c.Context(), &req)
-	if err != nil {
-		status := fiber.StatusInternalServerError
-		if err.Error() == "email already registered" || err.Error() == "username already taken" || err.Error() == "phone number already registered" {
-			status = fiber.StatusConflict
-		}
-		return c.Status(status).JSON(models.APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-	}
-
-	return c.Status(fiber.StatusCreated).JSON(models.APIResponse{
-		Success: true,
-		Data:    result,
+	return c.Status(fiber.StatusUpgradeRequired).JSON(models.APIResponse{
+		Success: false,
+		Error:   "client_outdated: please update the app to register",
 	})
 }
 
-// CompleteRegistration handles POST /auth/complete-registration (requires JWT)
+// CompleteRegistration handles POST /auth/complete-registration.
+// Deprecated alongside /auth/pre-register — returns 426 so old clients can
+// surface "update required" rather than hitting a dead code path.
 func (h *AuthHandler) CompleteRegistration(c *fiber.Ctx) error {
-	claims, ok := c.Locals("claims").(*middleware.JWTClaims)
-	if !ok || claims == nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
-			Success: false,
-			Error:   "unauthorized",
-		})
-	}
-
-	var req models.CompleteRegistrationRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-			Success: false,
-			Error:   "invalid request body",
-		})
-	}
-
-	if req.Role == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-			Success: false,
-			Error:   "role is required",
-		})
-	}
-	if req.Role != "creator" && req.Role != "representative" && req.Role != "listener" {
-		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
-			Success: false,
-			Error:   "role must be one of: creator, representative, listener",
-		})
-	}
-
-	result, err := h.authService.CompleteRegistration(c.Context(), claims.UserID, &req)
-	if err != nil {
-		status := fiber.StatusInternalServerError
-		if err.Error() == "user not found" {
-			status = fiber.StatusNotFound
-		}
-		return c.Status(status).JSON(models.APIResponse{
-			Success: false,
-			Error:   err.Error(),
-		})
-	}
-
-	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
-		Success: true,
-		Data:    result,
+	return c.Status(fiber.StatusUpgradeRequired).JSON(models.APIResponse{
+		Success: false,
+		Error:   "client_outdated: please update the app to finish registration",
 	})
 }
 

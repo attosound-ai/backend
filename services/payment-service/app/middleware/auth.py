@@ -3,6 +3,10 @@ from fastapi import Request, HTTPException
 
 from app.config import settings
 
+# signup_pending tokens are scoped to /signup/* on user-service. Reject them
+# anywhere else with 403 — the token is valid, the route is just out of scope.
+SCOPE_SIGNUP_PENDING = "signup_pending"
+
 
 def _decode_token(authorization: str) -> dict:
     """Decode a Bearer JWT and return the full claims payload."""
@@ -10,12 +14,14 @@ def _decode_token(authorization: str) -> dict:
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid authorization header format")
 
+    # The signup token uses a different issuer; accept both at decode time and
+    # gate by scope below.
     try:
         payload = jwt.decode(
             parts[1],
             settings.jwt_secret,
             algorithms=["HS256"],
-            issuer="atto-sound-user-service",
+            options={"verify_iss": False},
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -24,6 +30,10 @@ def _decode_token(authorization: str) -> dict:
 
     if not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Token missing subject")
+    if payload.get("scope") == SCOPE_SIGNUP_PENDING:
+        raise HTTPException(
+            status_code=403, detail="insufficient_scope: finish registration first"
+        )
     return payload
 
 

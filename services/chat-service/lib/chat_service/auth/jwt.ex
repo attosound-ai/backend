@@ -39,9 +39,11 @@ defmodule ChatService.Auth.JWT do
   * `:missing_subject` — token verified but no `sub` / `user_id` claim
   """
   @spec verify_user_token(any()) ::
-          {:ok, String.t()} | {:error, :missing_token | :invalid_token | :missing_subject}
+          {:ok, String.t()}
+          | {:error, :missing_token | :invalid_token | :missing_subject | :signup_pending}
   def verify_user_token(token) when is_binary(token) and byte_size(token) > 0 do
     case verify_and_validate(token, signer()) do
+      {:ok, %{"scope" => "signup_pending"}} -> {:error, :signup_pending}
       {:ok, claims} -> extract_user_id(claims)
       {:error, _reason} -> {:error, :invalid_token}
     end

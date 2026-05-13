@@ -36,7 +36,6 @@ type User struct {
 	CreatorEmail       *string        `gorm:"size:255" json:"creatorEmail,omitempty"`
 	CreatorPhone       *string        `gorm:"size:20" json:"creatorPhone,omitempty"`
 	ProfileVerified    bool           `gorm:"default:false" json:"profileVerified"`
-	RegistrationStatus string         `gorm:"type:varchar(20);not null;default:'completed'" json:"registrationStatus"`
 	RepresentativeID   *uint64        `json:"representativeId,omitempty"`
 	IsManagedAccount   bool           `gorm:"default:false" json:"isManagedAccount"`
 	CreatorTypes       pq.StringArray `gorm:"type:text[];column:creator_types" json:"creatorTypes,omitempty"`

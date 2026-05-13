@@ -1,6 +1,7 @@
 import {
   CanActivate,
   ExecutionContext,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
   Logger,
@@ -13,7 +14,13 @@ interface JwtPayload {
   username: string;
   email: string;
   role: string;
+  scope?: string;
 }
+
+// Tokens carrying this scope are limited to /signup/* on user-service and
+// MUST NOT reach the social service. Treat their presence here as 403 rather
+// than 401 — the token is valid, just out of scope.
+const SCOPE_SIGNUP_PENDING = 'signup_pending';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -41,10 +48,16 @@ export class AuthGuard implements CanActivate {
     const token = authHeader.slice(7);
     try {
       const payload = jwt.verify(token, this.jwtSecret) as JwtPayload;
+      if (payload.scope === SCOPE_SIGNUP_PENDING) {
+        throw new ForbiddenException(
+          'insufficient_scope: finish registration first',
+        );
+      }
       (request as any).userId = payload.sub;
       (request as any).userRole = payload.role || 'user';
       return true;
     } catch (error: unknown) {
+      if (error instanceof ForbiddenException) throw error;
       const message =
         error instanceof Error ? error.message : 'Token validation failed';
       this.logger.warn(`JWT validation failed: ${message}`);
