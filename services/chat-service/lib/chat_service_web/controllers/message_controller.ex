@@ -3,6 +3,7 @@ defmodule ChatServiceWeb.MessageController do
   require Logger
 
   alias ChatService.Messages.MessageService
+  alias ChatService.Conversations.ConversationService
 
   action_fallback ChatServiceWeb.FallbackController
 
@@ -68,15 +69,36 @@ defmodule ChatServiceWeb.MessageController do
         |> json(%{success: false, data: nil, error: "content is required"})
 
       true ->
-        case MessageService.send_message(user_id, conversation_id, content, content_type) do
-          {:ok, message} ->
+        # Defense-in-depth: only a participant of the conversation may post to
+        # it. Turns a non-member / unknown conversation into a deterministic 404
+        # instead of a Cassandra-driven 500 (the client now always resolves the
+        # conversation first, so this should never trip in normal flows).
+        case ConversationService.find_conversation(user_id, conversation_id) do
+          {:ok, _conversation} ->
+            case MessageService.send_message(user_id, conversation_id, content, content_type) do
+              {:ok, message} ->
+                conn
+                |> put_status(201)
+                |> put_view(ChatServiceWeb.MessageView)
+                |> render("show.json", message: message)
+
+              {:error, reason} ->
+                Logger.error("Failed to send message for user #{user_id}: #{inspect(reason)}")
+
+                conn
+                |> put_status(500)
+                |> json(%{success: false, data: nil, error: "Failed to send message"})
+            end
+
+          {:error, :not_found} ->
             conn
-            |> put_status(201)
-            |> put_view(ChatServiceWeb.MessageView)
-            |> render("show.json", message: message)
+            |> put_status(404)
+            |> json(%{success: false, data: nil, error: "Conversation not found"})
 
           {:error, reason} ->
-            Logger.error("Failed to send message for user #{user_id}: #{inspect(reason)}")
+            Logger.error(
+              "Failed to verify conversation #{conversation_id} for user #{user_id}: #{inspect(reason)}"
+            )
 
             conn
             |> put_status(500)
