@@ -40,7 +40,13 @@ func main() {
 	log.Println("[STARTUP] Connected to PostgreSQL")
 
 	// ── Auto-migrate GORM models ──
-	if err := db.AutoMigrate(&models.User{}, &models.UserCredentials{}, &models.PushToken{}, &models.SignupSession{}); err != nil {
+	if err := db.AutoMigrate(
+		&models.User{},
+		&models.UserCredentials{},
+		&models.PushToken{},
+		&models.SignupSession{},
+		&models.UserAppIconPreference{},
+	); err != nil {
 		log.Fatalf("[STARTUP] Failed to auto-migrate models: %v", err)
 	}
 	log.Println("[STARTUP] Database migration completed")
@@ -83,6 +89,7 @@ func main() {
 	verificationHandler := handlers.NewVerificationHandler(userService, cfg.OTPServiceURL)
 	inmateHandler := handlers.NewInmateHandler(inmateService)
 	pushTokenHandler := handlers.NewPushTokenHandler(repo)
+	appIconHandler := handlers.NewAppIconHandler(repo)
 	healthHandler := handlers.NewHealthHandler()
 	signupHandler := handlers.NewSignupHandler(signupService)
 
@@ -154,6 +161,8 @@ func main() {
 	users.Post("/me/verification/verify", middleware.RequireAuth(jwtMgr), verificationHandler.VerifyOTP)
 	users.Post("/me/push-token", middleware.RequireAuth(jwtMgr), pushTokenHandler.RegisterToken)
 	users.Delete("/me/push-token", middleware.RequireAuth(jwtMgr), pushTokenHandler.UnregisterToken)
+	users.Get("/me/app-icon", middleware.RequireAuth(jwtMgr), appIconHandler.GetAppIcon)
+	users.Put("/me/app-icon", middleware.RequireAuth(jwtMgr), appIconHandler.UpdateAppIcon)
 	users.Delete("/me/account", middleware.RequireAuth(jwtMgr), userHandler.DeleteAccount)
 
 	// Inmate lookup (public)

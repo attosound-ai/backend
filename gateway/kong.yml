@@ -162,6 +162,22 @@ services:
           - DELETE
           - OPTIONS
 
+  # ADMIN routes → Content Service (Rust). Auth enforced inside the
+  # service via X-Admin-Token (admin_auth middleware).
+  - name: content-admin
+    url: http://content-service:8081
+    routes:
+      - name: content-admin-routes
+        paths:
+          - /api/v1/admin
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+
   # OTP routes → OTP Service (Go)
   - name: otp-service
     url: http://otp-service:8000/otp

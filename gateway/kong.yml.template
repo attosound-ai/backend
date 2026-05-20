@@ -165,6 +165,25 @@ services:
           - DELETE
           - OPTIONS
 
+  # ADMIN routes → Content Service (Rust). Same upstream as /api/v1/content
+  # but a separate Kong service so policies (rate-limit, allow-list) can
+  # be applied later without touching the public catalogue routes. Auth
+  # gate is enforced inside content-service via X-Admin-Token (see
+  # middleware/admin_auth.rs).
+  - name: content-admin
+    url: ${CONTENT_SERVICE_URL}
+    routes:
+      - name: content-admin-routes
+        paths:
+          - /api/v1/admin
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+
   # OTP routes → OTP Service (Go)
   - name: otp-service
     url: ${OTP_SERVICE_URL}/otp

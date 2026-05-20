@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/atto-sound/user-service/internal/models"
 	"gorm.io/gorm"
@@ -346,6 +347,43 @@ func (r *UserRepository) DeletePushToken(userID uint64, token string) error {
 // (e.g. DeviceNotRegistered — the device no longer exists).
 func (r *UserRepository) DeactivateAllForToken(token string) error {
 	return r.db.Model(&models.PushToken{}).Where("token = ?", token).Update("is_active", false).Error
+}
+
+// ── App-icon preference methods ──
+// One row per user; absence of a row means "primary icon".
+
+// GetAppIconPreference returns the user's stored slot name, or empty string
+// when no preference has been recorded yet.
+func (r *UserRepository) GetAppIconPreference(userID uint64) (string, error) {
+	var pref models.UserAppIconPreference
+	err := r.db.Where("user_id = ?", userID).First(&pref).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return pref.SlotName, nil
+}
+
+// SetAppIconPreference upserts the user's selected slot. Passing an empty
+// `slotName` deletes the row, which represents "revert to the primary icon".
+func (r *UserRepository) SetAppIconPreference(userID uint64, slotName string) error {
+	if slotName == "" {
+		return r.db.Where("user_id = ?", userID).Delete(&models.UserAppIconPreference{}).Error
+	}
+	now := time.Now().UTC()
+	pref := models.UserAppIconPreference{
+		UserID:     userID,
+		SlotName:   slotName,
+		SelectedAt: now,
+		UpdatedAt:  now,
+	}
+	return r.db.
+		Where("user_id = ?", userID).
+		Assign(pref).
+		FirstOrCreate(&pref).
+		Error
 }
 
 // GetActivePushTokens returns all active push tokens for a user.
