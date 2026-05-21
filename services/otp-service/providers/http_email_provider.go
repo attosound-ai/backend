@@ -21,7 +21,12 @@ func NewHttpEmailProvider(emailServiceURL string) *HttpEmailProvider {
 	return &HttpEmailProvider{
 		emailServiceURL: emailServiceURL,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			// Resend (downstream of email-service) routinely takes 5–8 s on
+			// cold paths. A 5 s budget here surfaces the request to the user
+			// as "verification failed" even when the email is *actually*
+			// delivered moments later. 20 s gives Resend headroom without
+			// pinning the request handler indefinitely.
+			Timeout: 20 * time.Second,
 		},
 	}
 }
