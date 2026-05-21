@@ -397,8 +397,42 @@ func (r *UserRepository) GetActivePushTokens(userID uint64) ([]models.PushToken,
 // All methods accept a *gorm.DB (transaction) so the caller can wrap
 // everything in a single atomic commit.
 
-// DeleteUserRecord hard-deletes the user, credentials, and push tokens.
+// DeleteUserRecord hard-deletes the user, credentials, push tokens, and any
+// signup_sessions still referencing the user's email or phone.
+//
+// signup_sessions must be cleared here because they're keyed by identifier
+// (email/phone), not user_id, so they don't cascade with the user row. If
+// left behind, a re-signup with the same identifier reuses the stale
+// "verified" session and pre-fills the wizard with the old draft data —
+// confusing and a privacy concern.
 func (r *UserRepository) DeleteUserRecord(tx *gorm.DB, userID uint64) error {
+	// Snapshot the identifiers from the user row BEFORE we delete it so we
+	// know which signup_sessions to wipe. Match the normalization the signup
+	// service applies: emails are lowercased; phones are countryCode+number
+	// concatenated (no separator).
+	var user models.User
+	if err := tx.Unscoped().Select("email, phone_country_code, phone_number").First(&user, userID).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("load user for identifier snapshot: %w", err)
+		}
+	} else {
+		identifiers := []string{}
+		if user.Email != nil && *user.Email != "" {
+			identifiers = append(identifiers, strings.ToLower(*user.Email))
+		}
+		if user.PhoneCountryCode != nil && user.PhoneNumber != nil &&
+			*user.PhoneCountryCode != "" && *user.PhoneNumber != "" {
+			identifiers = append(identifiers, *user.PhoneCountryCode+*user.PhoneNumber)
+		}
+		if len(identifiers) > 0 {
+			if err := tx.Unscoped().
+				Where("identifier IN ?", identifiers).
+				Delete(&models.SignupSession{}).Error; err != nil {
+				return fmt.Errorf("delete signup_sessions: %w", err)
+			}
+		}
+	}
+
 	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.PushToken{}).Error; err != nil {
 		return fmt.Errorf("delete push_tokens: %w", err)
 	}
