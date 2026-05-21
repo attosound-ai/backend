@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::cloudinary::{CloudinaryClient, SignedUploadParams};
 use crate::cloudinary::types::SignUploadRequest;
 use crate::config::Config;
-use crate::middleware::extract_user_id;
+use crate::middleware::{extract_signup_session_id, extract_user_id};
 
 /// POST /api/v1/media/sign — Generate signed Cloudinary upload parameters.
 /// The frontend uses these to upload directly to Cloudinary (no file bytes through our server).
@@ -20,8 +20,25 @@ pub async fn sign_upload(
     cloudinary: web::Data<CloudinaryClient>,
     config: web::Data<Config>,
 ) -> HttpResponse {
+    // Confirmed users can sign uploads for any context. signup_pending tokens
+    // are also accepted *for context=avatar only* — the ProfileSetup wizard
+    // step needs to upload a profile picture before the `users` row is created
+    // by /signup/sessions/me/complete. Using the session ID as the owner is
+    // only used in the log line; the public_id is a random short UUID.
     let user_id = match extract_user_id(&req, &config.jwt_secret) {
         Some(id) => id,
+        None if body.context == "avatar" => {
+            match extract_signup_session_id(&req, &config.jwt_secret) {
+                Some(id) => id,
+                None => {
+                    return HttpResponse::Unauthorized().json(json!({
+                        "success": false,
+                        "data": null,
+                        "error": "Missing X-User-ID header"
+                    }));
+                }
+            }
+        }
         None => {
             return HttpResponse::Unauthorized().json(json!({
                 "success": false,

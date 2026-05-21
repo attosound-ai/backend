@@ -44,3 +44,25 @@ pub fn extract_user_id(req: &HttpRequest, jwt_secret: &str) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
 }
+
+/// Extract the signup session ID from a `signup_pending` JWT, if present.
+///
+/// Returns None for confirmed-user tokens (use `extract_user_id` for those),
+/// for missing/invalid Authorization headers, and for X-User-ID fallback.
+/// Use only at endpoints that are explicitly safe for in-progress signups
+/// (currently: avatar uploads during the ProfileSetup wizard step, so the
+/// user can pick a profile picture before their `users` row exists).
+pub fn extract_signup_session_id(req: &HttpRequest, jwt_secret: &str) -> Option<String> {
+    let auth_header = req.headers().get("Authorization")?;
+    let auth_str = auth_header.to_str().ok()?;
+    let token = auth_str.strip_prefix("Bearer ")?;
+    let key = DecodingKey::from_secret(jwt_secret.as_bytes());
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = false;
+    let data = decode::<Claims>(token, &key, &validation).ok()?;
+    if data.claims.scope.as_deref() == Some(SCOPE_SIGNUP_PENDING) {
+        Some(data.claims.sub)
+    } else {
+        None
+    }
+}
