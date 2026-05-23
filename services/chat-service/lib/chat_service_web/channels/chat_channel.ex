@@ -142,6 +142,11 @@ defmodule ChatServiceWeb.ChatChannel do
   """
   def handle_in("typing", %{"is_typing" => is_typing}, socket) do
     user_id = socket.assigns.user_id
+    conversation_id = socket.assigns.conversation_id
+
+    Logger.info(
+      "[TYPING] user=#{user_id} conv=#{conversation_id} is_typing=#{is_typing}"
+    )
 
     broadcast_from!(socket, "typing", %{
       user_id: user_id,
