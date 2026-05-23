@@ -110,12 +110,31 @@ defmodule ChatServiceWeb.MessageController do
   @doc """
   POST /api/v1/messages/:chat_id/read
   Mark all messages in a conversation as read for the current user.
+
+  Also broadcasts `messages_read` on the `chat:<chat_id>` channel so the
+  *other* participant's UI can flip read-receipts in real time. The WS
+  `mark_read` handler does the same broadcast, but the client uses BOTH
+  paths (REST + WS) because the WS push can no-op when the channel hasn't
+  finished joining (the retry loop gives up after ~3 s). Without the REST
+  broadcast, the sender's read-receipts never updated even though the
+  recipient had marked the conversation as read.
+
+  We include `user_id` so clients can ignore self-broadcasts; the server
+  can't use `broadcast_from` here (no socket pid in a REST request), so
+  the broadcast reaches every subscriber including the reader. The reader
+  filters it out client-side.
   """
   def mark_read(conn, %{"chat_id" => chat_id}) do
     user_id = conn.assigns.user_id
 
     case MessageService.mark_as_read(chat_id, user_id) do
       {:ok, :marked} ->
+        ChatServiceWeb.Endpoint.broadcast(
+          "chat:#{chat_id}",
+          "messages_read",
+          %{user_id: user_id, conversation_id: chat_id}
+        )
+
         conn
         |> put_status(200)
         |> json(%{success: true, data: %{status: "marked"}})
