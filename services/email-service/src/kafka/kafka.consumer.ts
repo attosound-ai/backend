@@ -8,6 +8,8 @@ interface UserCreatedPayload {
   email: string;
   displayName: string;
   role: 'creator' | 'representative' | 'listener';
+  /** BCP-47 locale captured at signup_start. May be missing on legacy events. */
+  locale?: string;
 }
 
 // user-service (Go) publishes every event wrapped in this envelope —
@@ -43,14 +45,20 @@ export class KafkaConsumer {
       return;
     }
 
+    // Normalize locale: BCP-47 may arrive as "en-US"/"pt-BR" but our
+    // templates branch on the language part ("en"/"es"/"pt"). Default to
+    // "en" when missing so legacy/test events don't fall into the old
+    // hard-coded Spanish path.
+    const locale = (data.locale ?? 'en').toLowerCase();
     this.logger.log(
-      `Received user.created event for ${data.email} (role: ${data.role})`,
+      `Received user.created event for ${data.email} (role: ${data.role}, locale: ${locale})`,
     );
 
     // Welcome email for all roles — address the user by bare username
     await this.emailService.queueEmail('welcome', data.email, {
       name: data.username,
       role: data.role,
+      locale,
     });
 
     // Instructions email only for representatives
@@ -58,7 +66,7 @@ export class KafkaConsumer {
       await this.emailService.queueEmail(
         'instructions',
         data.email,
-        { name: data.username },
+        { name: data.username, locale },
         2,
       );
     }

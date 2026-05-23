@@ -138,9 +138,19 @@ func (s *SignupService) Start(
 		if identifierType == models.IdentifierEmail {
 			session.Draft.Email = &identifier
 		}
+		if locale != "" {
+			loc := locale
+			session.Draft.Locale = &loc
+		}
 		if err := s.signupRepo.Create(session); err != nil {
 			return nil, fmt.Errorf("create signup session: %w", err)
 		}
+	} else if locale != "" && (session.Draft.Locale == nil || *session.Draft.Locale == "") {
+		// Existing session being reused — backfill locale if it wasn't set yet
+		// (e.g. session created by an older client that didn't ship locale).
+		loc := locale
+		session.Draft.Locale = &loc
+		_ = s.signupRepo.Update(session)
 	}
 
 	// Trigger OTP send (best-effort, but we surface failure — the user can't
@@ -423,8 +433,15 @@ func (s *SignupService) Complete(ctx context.Context, sessionID uuid.UUID) (*Com
 		}
 	}
 
-	// Publish event and clean up the session.
-	go s.publishUserCreated(user)
+	// Publish event and clean up the session. Pass through the wizard's
+	// captured locale so downstream consumers (welcome email, push
+	// notifications, …) render in the user's language instead of falling
+	// back to whatever default they hard-code.
+	locale := ""
+	if session.Draft.Locale != nil {
+		locale = *session.Draft.Locale
+	}
+	go s.publishUserCreated(user, locale)
 	if err := s.signupRepo.Delete(session.ID); err != nil {
 		log.Printf("[SIGNUP] Failed to delete completed session %s: %v", session.ID, err)
 	}
@@ -793,14 +810,18 @@ func (s *SignupService) verifyOTP(identifier string, idType models.IdentifierTyp
 	return nil
 }
 
-func (s *SignupService) publishUserCreated(user *models.User) {
+func (s *SignupService) publishUserCreated(user *models.User, locale string) {
 	idStr := fmt.Sprintf("%d", user.ID)
+	if locale == "" {
+		locale = "en"
+	}
 	eventData := map[string]interface{}{
 		"id":          idStr,
 		"username":    user.Username,
 		"email":       strVal(user.Email),
 		"displayName": user.DisplayName,
 		"role":        string(user.Role),
+		"locale":      locale,
 	}
 	if err := s.producer.Publish(context.Background(), "user.created", idStr, eventData); err != nil {
 		log.Printf("[SIGNUP] Failed to publish user.created: %v", err)
