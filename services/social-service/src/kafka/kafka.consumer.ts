@@ -560,19 +560,21 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           const contentId = key.replace(`social:count:${type}:`, "");
           let dbCount: number;
 
+          // Reposts live in their own table (`reposts`), not in `interactions`.
+          // The InteractionType enum is {LIKE, COMMENT, SHARE} — there is no
+          // REPOST value. The previous code tried `interaction.count({where:
+          // {type: "REPOST"}})` which Prisma rejected with
+          // `Invalid value for argument type. Expected InteractionType`,
+          // breaking the entire user.deleted cleanup for every account that
+          // had reposts in their feed scope.
           if (type === "comments") {
-            dbCount = await this.prisma.comment.count({
-              where: { contentId },
-            });
+            dbCount = await this.prisma.comment.count({ where: { contentId } });
+          } else if (type === "reposts") {
+            dbCount = await this.prisma.repost.count({ where: { contentId } });
           } else {
-            const interactionType = type === "likes"
-              ? "LIKE"
-              : type === "shares"
-                ? "SHARE"
-                : "REPOST" // type guard not needed — only known types hit here
-            ;
+            const interactionType = type === "likes" ? "LIKE" : "SHARE";
             dbCount = await this.prisma.interaction.count({
-              where: { contentId, type: interactionType as any },
+              where: { contentId, type: interactionType },
             });
           }
 

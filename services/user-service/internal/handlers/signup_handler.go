@@ -32,6 +32,14 @@ type startSignupRequest struct {
 
 type signupVerifyOTPRequest struct {
 	Code string `json:"code" validate:"required,len=6"`
+	// Draft is optional — when present, the server merges these fields into
+	// the session draft BEFORE verifying the OTP code. Used by the client
+	// to ship name/dob/password atomically with the OTP verification so a
+	// lost response (network blip after the server already verified) doesn't
+	// leave the server with a verified session but no user data, which
+	// previously made the signup unrecoverable. See `VerifyOTP` in
+	// signup_service.go for the idempotency contract.
+	Draft *models.SignupDraft `json:"draft,omitempty"`
 }
 
 type sessionView struct {
@@ -140,6 +148,12 @@ func (h *SignupHandler) Start(c *fiber.Ctx) error {
 
 // VerifyOTP handles POST /signup/sessions/:id/verify-otp.
 // Public — the session ID is the credential here, paired with the OTP code.
+//
+// Accepts an optional `draft` in the request body so the client can flush
+// name/dob/password atomically with the verification. Mirrors the
+// Patch handler's raw-password mapping (`password` -> `PasswordHash`,
+// `creatorPassword` -> `CreatorPasswordHash`) so the service can bcrypt
+// them server-side.
 func (h *SignupHandler) VerifyOTP(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -149,7 +163,25 @@ func (h *SignupHandler) VerifyOTP(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || req.Code == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{Success: false, Error: "code is required"})
 	}
-	result, err := h.svc.VerifyOTP(c.Context(), id, req.Code)
+	// Raw password fields aren't on the SignupDraft struct (it stores
+	// `password_hash`), so map them out of the JSON body the same way
+	// Patch does. Keeps the wire contract stable across both endpoints.
+	if req.Draft != nil {
+		var rawBody struct {
+			Draft struct {
+				Password        *string `json:"password,omitempty"`
+				CreatorPassword *string `json:"creatorPassword,omitempty"`
+			} `json:"draft"`
+		}
+		_ = c.BodyParser(&rawBody)
+		if rawBody.Draft.Password != nil {
+			req.Draft.PasswordHash = rawBody.Draft.Password
+		}
+		if rawBody.Draft.CreatorPassword != nil {
+			req.Draft.CreatorPasswordHash = rawBody.Draft.CreatorPassword
+		}
+	}
+	result, err := h.svc.VerifyOTP(c.Context(), id, req.Code, req.Draft)
 	if err != nil {
 		return mapSignupErr(c, err)
 	}

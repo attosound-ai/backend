@@ -165,7 +165,27 @@ type VerifyOTPResult struct {
 
 // VerifyOTP confirms the OTP code with the OTP service. On success the session
 // transitions to "verified" and a signup_pending token is issued.
-func (s *SignupService) VerifyOTP(ctx context.Context, sessionID uuid.UUID, code string) (*VerifyOTPResult, error) {
+//
+// Two robustness properties matter here:
+//
+//  1. **Optional draft merge.** Callers may include partial draft fields
+//     (displayName, dateOfBirth, password, …) which are merged into the
+//     session *before* the OTP is verified. If the request reaches the
+//     server but the response is lost mid-flight, the draft is persisted
+//     regardless — so when the client retries (with a new code, after
+//     resend), name/dob/password are already on the server.
+//  2. **Idempotent re-verify for verified sessions.** If the session is
+//     already in `verified` status, this call skips the OTP roundtrip and
+//     just re-issues a fresh signup_pending token. The session_id is a
+//     capability — possessing it after a successful verify is sufficient to
+//     reclaim the token (e.g. recovering from a lost-response retry). The
+//     OTP is single-use, so the alternative would brick the user.
+func (s *SignupService) VerifyOTP(
+	ctx context.Context,
+	sessionID uuid.UUID,
+	code string,
+	draft *models.SignupDraft,
+) (*VerifyOTPResult, error) {
 	session, err := s.signupRepo.FindByID(sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load session: %w", err)
@@ -175,6 +195,32 @@ func (s *SignupService) VerifyOTP(ctx context.Context, sessionID uuid.UUID, code
 	}
 	if !session.IsActive() {
 		return nil, ErrSignupSessionExpired
+	}
+
+	// Apply draft FIRST so it persists even on subsequent failure paths.
+	// Idempotent: re-sending the same draft on retry is a no-op.
+	if draft != nil {
+		mergeDraft(&session.Draft, draft)
+		if err := s.signupRepo.Update(session); err != nil {
+			return nil, fmt.Errorf("merge draft into session: %w", err)
+		}
+	}
+
+	// Idempotent path: session already verified → just re-issue the token.
+	// Skip the OTP roundtrip (the code is single-use and may already be
+	// burned; we don't want to fail a recovery retry on that).
+	if session.Status == models.SignupStatusVerified {
+		token, ttl, err := s.jwtMgr.GenerateSignupToken(session.ID.String(), time.Until(session.ExpiresAt))
+		if err != nil {
+			return nil, fmt.Errorf("re-issue signup token: %w", err)
+		}
+		return &VerifyOTPResult{
+			SessionID:   session.ID.String(),
+			Token:       token,
+			ExpiresIn:   ttl,
+			NextStep:    NextStepFor(session),
+			DraftRecord: session,
+		}, nil
 	}
 
 	// Forward to OTP service.
