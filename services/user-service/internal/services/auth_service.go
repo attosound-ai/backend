@@ -111,7 +111,10 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		return nil, errors.New("failed to create user")
 	}
 
-	// Publish user.created event (fire and forget, log errors)
+	// Publish user.created event (fire and forget, log errors). Legacy
+	// register endpoint doesn't carry a locale, so default to "en" — the
+	// new signup wizard captures and forwards the real value via the
+	// signup_session path.
 	userIDStr := strconv.FormatUint(user.ID, 10)
 	go func() {
 		eventData := map[string]interface{}{
@@ -120,6 +123,7 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 			"email":       strVal(user.Email),
 			"displayName": user.DisplayName,
 			"role":        string(user.Role),
+			"locale":      "en",
 		}
 		if err := s.producer.Publish(context.Background(), "user.created", userIDStr, eventData); err != nil {
 			log.Printf("[AUTH] Failed to publish user.created event: %v", err)
