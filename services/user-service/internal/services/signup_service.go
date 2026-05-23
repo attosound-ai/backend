@@ -198,9 +198,15 @@ func (s *SignupService) VerifyOTP(
 	}
 
 	// Apply draft FIRST so it persists even on subsequent failure paths.
-	// Idempotent: re-sending the same draft on retry is a no-op.
+	// Idempotent: re-sending the same draft on retry is a no-op. Use the
+	// shared helper that mirrors PatchDraft (bcrypts the raw password,
+	// validates DOB, recomputes completedSteps) — a bare `mergeDraft` was
+	// silently dropping `password` because the merger intentionally skips
+	// PasswordHash (the hashing lives in the caller).
 	if draft != nil {
-		mergeDraft(&session.Draft, draft)
+		if err := s.applyDraftPatch(session, draft); err != nil {
+			return nil, fmt.Errorf("apply draft on verify-otp: %w", err)
+		}
 		if err := s.signupRepo.Update(session); err != nil {
 			return nil, fmt.Errorf("merge draft into session: %w", err)
 		}
@@ -289,36 +295,10 @@ func (s *SignupService) PatchDraft(
 		return nil, "", ErrOTPNotVerified
 	}
 
-	mergeDraft(&session.Draft, patch)
-
-	// Hash password client-side never; hash here once before persisting.
-	// We treat presence of a non-bcrypt-looking PasswordHash field as a raw
-	// password the client just submitted.
-	if patch.PasswordHash != nil && *patch.PasswordHash != "" && !looksLikeBcrypt(*patch.PasswordHash) {
-		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.PasswordHash), bcrypt.DefaultCost)
-		if hashErr != nil {
-			return nil, "", fmt.Errorf("hash password: %w", hashErr)
-		}
-		hashStr := string(hash)
-		session.Draft.PasswordHash = &hashStr
-	}
-	if patch.CreatorPasswordHash != nil && *patch.CreatorPasswordHash != "" && !looksLikeBcrypt(*patch.CreatorPasswordHash) {
-		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.CreatorPasswordHash), bcrypt.DefaultCost)
-		if hashErr != nil {
-			return nil, "", fmt.Errorf("hash creator password: %w", hashErr)
-		}
-		hashStr := string(hash)
-		session.Draft.CreatorPasswordHash = &hashStr
+	if err := s.applyDraftPatch(session, patch); err != nil {
+		return nil, "", err
 	}
 
-	// Validate DOB format if present.
-	if session.Draft.DateOfBirth != nil && *session.Draft.DateOfBirth != "" {
-		if _, err := validation.ParseAndValidateDOB(*session.Draft.DateOfBirth); err != nil {
-			return nil, "", err
-		}
-	}
-
-	session.CompletedSteps = recomputeCompletedSteps(session)
 	if err := s.signupRepo.Update(session); err != nil {
 		return nil, "", fmt.Errorf("update session draft: %w", err)
 	}
@@ -589,9 +569,54 @@ func appendUnique(arr pq.StringArray, vals ...string) pq.StringArray {
 	return arr
 }
 
+// applyDraftPatch is the full client-draft application: shallow merge of
+// non-password fields via mergeDraft, bcrypt of raw passwords, DOB
+// validation, and a recompute of completedSteps. Both PatchDraft and
+// VerifyOTP go through this so the wire contracts stay equivalent — a
+// previous version of VerifyOTP called only mergeDraft, which silently
+// dropped `password` (the merger intentionally skips PasswordHash because
+// hashing must happen on the server) and left signupComplete failing
+// with "missing required fields" whenever the password rode in on the
+// verify-otp atomic body.
+func (s *SignupService) applyDraftPatch(session *models.SignupSession, patch *models.SignupDraft) error {
+	mergeDraft(&session.Draft, patch)
+
+	// Hash password server-side. We treat presence of a non-bcrypt-looking
+	// PasswordHash field as a raw password the client just submitted.
+	if patch.PasswordHash != nil && *patch.PasswordHash != "" && !looksLikeBcrypt(*patch.PasswordHash) {
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.PasswordHash), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return fmt.Errorf("hash password: %w", hashErr)
+		}
+		hashStr := string(hash)
+		session.Draft.PasswordHash = &hashStr
+	}
+	if patch.CreatorPasswordHash != nil && *patch.CreatorPasswordHash != "" && !looksLikeBcrypt(*patch.CreatorPasswordHash) {
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.CreatorPasswordHash), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return fmt.Errorf("hash creator password: %w", hashErr)
+		}
+		hashStr := string(hash)
+		session.Draft.CreatorPasswordHash = &hashStr
+	}
+
+	// Validate DOB format if present.
+	if session.Draft.DateOfBirth != nil && *session.Draft.DateOfBirth != "" {
+		if _, err := validation.ParseAndValidateDOB(*session.Draft.DateOfBirth); err != nil {
+			return err
+		}
+	}
+
+	session.CompletedSteps = recomputeCompletedSteps(session)
+	return nil
+}
+
 // mergeDraft applies patch onto base, copying only non-nil fields. Slices
 // are replaced wholesale (not appended) so the client can clear them by
 // sending an empty array.
+//
+// PasswordHash is deliberately skipped — callers must bcrypt the raw
+// password (see `applyDraftPatch` for the proper full-merge entry point).
 func mergeDraft(base, patch *models.SignupDraft) {
 	if patch.DisplayName != nil {
 		base.DisplayName = patch.DisplayName
