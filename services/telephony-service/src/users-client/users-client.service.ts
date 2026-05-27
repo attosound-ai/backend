@@ -66,6 +66,102 @@ export class UsersClientService {
     return null;
   }
 
+  /**
+   * Resolve the full set of linked account IDs for a user (representative
+   * + every managed creator under the same representative). Used by the
+   * Twilio incoming-call webhook to fan out `<Dial><Client>...</Client></Dial>`
+   * across all reachable identities for a device — without this, a PSTN
+   * call to one bridge only rings the currently-registered Voice SDK
+   * identity, dropping calls to the user's linked accounts.
+   *
+   * Fail-soft contract: on any error (timeout, network, 404, missing
+   * endpoint pre-deploy) returns a single-element array `[Number(userId)]`
+   * so the webhook keeps emitting the legacy single-client TwiML. Never
+   * throws. Caller can treat the result as the authoritative target set.
+   *
+   * Hit cache 5 min, miss cache 1 min, same TTLs as getUsernameById.
+   */
+  async getLinkedAccountIds(userId: string): Promise<number[]> {
+    const fallback = (): number[] => {
+      const n = Number(userId);
+      return Number.isFinite(n) && n > 0 ? [n] : [];
+    };
+    if (!userId) return fallback();
+
+    const cacheKey = `users:linked:${userId}`;
+    const cached = await this.cache.get<number[] | string>(cacheKey);
+    if (cached === NEGATIVE_CACHE_VALUE) return fallback();
+    if (Array.isArray(cached) && cached.length > 0) return cached;
+
+    const ids = await this.fetchLinkedAccountIds(userId);
+    if (ids && ids.length > 0) {
+      await this.cache.set(cacheKey, ids, CACHE_TTL_SECONDS);
+      return ids;
+    }
+
+    await this.cache.set(
+      cacheKey,
+      NEGATIVE_CACHE_VALUE,
+      NEGATIVE_CACHE_TTL_SECONDS,
+    );
+    return fallback();
+  }
+
+  private async fetchLinkedAccountIds(
+    userId: string,
+  ): Promise<number[] | null> {
+    if (!this.baseUrl) return null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/users/${userId}/linked-account-ids`,
+        { signal: controller.signal, headers: { Accept: "application/json" } },
+      );
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        this.logger.warn(
+          "linked-account-ids lookup non-OK for userId=%s: %d",
+          userId,
+          res.status,
+        );
+        return null;
+      }
+      const payload = (await res.json()) as unknown;
+      return this.extractLinkedIds(payload);
+    } catch (err) {
+      this.logger.warn(
+        "linked-account-ids lookup failed for userId=%s: %s",
+        userId,
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Tolerate two possible response shapes:
+   *  - `{ data: { userIds: [...] } }` (envelope used by APIResponse)
+   *  - `{ userIds: [...] }`           (raw shape)
+   * Coerce every entry to a finite positive number; drop everything else.
+   */
+  private extractLinkedIds(payload: unknown): number[] | null {
+    if (!payload || typeof payload !== "object") return null;
+    const obj = payload as Record<string, unknown>;
+    const raw =
+      (obj.userIds as unknown) ??
+      (obj.data as Record<string, unknown> | undefined)?.userIds;
+    if (!Array.isArray(raw)) return null;
+    const ids = raw
+      .map((v) => Number(v))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    return ids.length > 0 ? ids : null;
+  }
+
   private async fetchUsername(userId: string): Promise<string | null> {
     if (!this.baseUrl) return null;
 

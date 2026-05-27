@@ -29,6 +29,53 @@ func NewUserHandler(userService *services.UserService, otpServiceURL ...string) 
 	return &UserHandler{userService: userService, otpServiceURL: url}
 }
 
+// GetLinkedAccountIDs handles GET /users/:id/linked-account-ids.
+//
+// Returns the full set of user IDs in the linked account group
+// (representative + all managed creators) for a given user. Used by
+// telephony-service to fan out TwiML across every reachable Voice SDK
+// identity on a device, so a PSTN call to one bridge can ring every
+// linked account.
+//
+// Response shape: { success: true, data: { userIds: [int, ...] } }.
+// Standalone users (no representative_id, not managed) get a single-element
+// array. The requested userId is always included in the result.
+func (h *UserHandler) GetLinkedAccountIDs(c *fiber.Ctx) error {
+	idStr := c.Params("id")
+	if idStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "user ID is required",
+		})
+	}
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid user ID format",
+		})
+	}
+
+	ids, err := h.userService.GetLinkedAccountIDsForUser(id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+	if ids == nil {
+		return c.Status(fiber.StatusNotFound).JSON(models.APIResponse{
+			Success: false,
+			Error:   "user not found",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    fiber.Map{"userIds": ids},
+	})
+}
+
 // GetUser handles GET /users/:id
 func (h *UserHandler) GetUser(c *fiber.Ctx) error {
 	id := c.Params("id")

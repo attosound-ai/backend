@@ -57,7 +57,23 @@ export class WebhooksController {
       return;
     }
 
-    // Create a call record
+    // Fan-out: enumerate every linked identity (rep + managed creators)
+    // for the bridge owner. The Voice SDK on iOS can only register ONE
+    // identity at a time per device, so without fan-out a PSTN call to
+    // the inactive account's bridge dies instantly. Twilio dials all
+    // <Client> legs in parallel; only the legs whose identity is actually
+    // registered ring through. The others no-answer silently.
+    //
+    // getLinkedAccountIds is fail-soft: on any failure it returns
+    // [assignment.userId] so we degrade to the legacy single-client TwiML.
+    const linkedIds = await this.usersClient.getLinkedAccountIds(
+      assignment.userId,
+    );
+    const targets =
+      linkedIds.length > 0 ? linkedIds : [Number(assignment.userId)];
+
+    // Create a call record (attributed to the bridge owner, regardless
+    // of which linked identity ultimately answers).
     await this.callsService.createCall({
       twilioCallSid: callSid,
       fromNumber: from,
@@ -68,6 +84,7 @@ export class WebhooksController {
         fromCity: body.FromCity,
         fromState: body.FromState,
         fromCountry: body.FromCountry,
+        fanoutTargets: targets,
       },
     });
 
@@ -79,28 +96,38 @@ export class WebhooksController {
       startedAt: new Date().toISOString(),
     });
 
-    // Dial the Voice SDK client using the user's identity
+    // Single <Dial> with N <Client> children — first to answer wins, the
+    // parent dial-status fires once. N independent <Dial> elements would
+    // create N independent call SIDs with N independent callbacks.
     const webhookBaseUrl = this.config.get<string>("webhookBaseUrl");
     const dial = response.dial({
       callerId: to,
       action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
       timeout: 30,
     });
-    const client = dial.client(`user-${assignment.userId}`);
 
-    // Always set DisplayName so the receiving app's
-    // setIncomingCallContactHandleTemplate("${DisplayName}") template
-    // never renders the literal placeholder. For PSTN inbound the
-    // caller's E.164 IS the friendly identity (matches the legacy
-    // banner), so we pass it through verbatim.
-    client.parameter({
-      name: "DisplayName",
-      value: callerName?.trim() || from || "Unknown",
-    });
+    const displayName = callerName?.trim() || from || "Unknown";
+
+    for (const targetId of targets) {
+      const client = dial.client(`user-${targetId}`);
+      // DisplayName is per-<Client> so CallKit's
+      // setIncomingCallContactHandleTemplate template renders correctly
+      // regardless of which identity Twilio happens to reach first.
+      client.parameter({ name: "DisplayName", value: displayName });
+      // TargetUserId is the bridge owner (the account the caller dialled),
+      // not the SDK identity that picks up. The client uses it to
+      // auto-switch to the right account before showing CallKit.
+      client.parameter({
+        name: "TargetUserId",
+        value: String(assignment.userId),
+      });
+    }
 
     this.logger.log(
-      "Routing call %s to client user-%s",
+      "Routing call %s fan-out to %d clients (ids=%s) target=%s",
       callSid,
+      targets.length,
+      targets.join(","),
       assignment.userId,
     );
 
@@ -131,7 +158,8 @@ export class WebhooksController {
     const callSid = body.CallSid;
 
     // Extract caller userId from "client:user-{id}" identity
-    const callerUserId = from?.replace("client:", "").replace("user-", "") || "";
+    const callerUserId =
+      from?.replace("client:", "").replace("user-", "") || "";
 
     this.logger.log(
       "Outgoing call: sid=%s from=%s to=%s type=%s",
@@ -164,9 +192,8 @@ export class WebhooksController {
       // we still send DisplayName, falling back to the raw `from` so the
       // template ALWAYS resolves to something readable. (Without a
       // value, the receiver would render the literal `${DisplayName}`.)
-      const callerUsername = await this.usersClient.getUsernameById(
-        callerUserId,
-      );
+      const callerUsername =
+        await this.usersClient.getUsernameById(callerUserId);
       client.parameter({
         name: "DisplayName",
         value: callerUsername ? `@${callerUsername}` : from || "Unknown",
