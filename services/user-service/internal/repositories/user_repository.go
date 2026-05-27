@@ -285,6 +285,26 @@ func (r *UserRepository) CreateManagedCreator(
 	return creator, nil
 }
 
+// GetLinkedAccountIDs returns the full set of user IDs in the account group
+// anchored on the given representative (the anchor itself plus every managed
+// creator whose representative_id = anchor).
+//
+// Pass either the representative's own ID OR a creator's representative_id —
+// callers higher up (UserService) resolve the right anchor. Single indexed
+// query; sub-millisecond at our scale. Used by telephony-service for TwiML
+// fan-out so a PSTN call to one bridge can ring every linked identity on
+// the same device.
+func (r *UserRepository) GetLinkedAccountIDs(anchorID uint64) ([]uint64, error) {
+	var ids []uint64
+	err := r.db.Model(&models.User{}).
+		Where("id = ? OR (representative_id = ? AND is_managed_account = true)", anchorID, anchorID).
+		Pluck("id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // GetLinkedAccounts returns accounts linked to the caller.
 // If isManagedAccount is true, returns the representative via representativeID.
 // Otherwise returns all managed creators where representative_id = callerID.
