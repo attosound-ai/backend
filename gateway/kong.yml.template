@@ -248,6 +248,21 @@ services:
 # ── Global Plugins ──
 
 plugins:
+  # Strip client-supplied X-User-ID. The header is now derived strictly
+  # from a verified JWT inside each service (see ms-specific JWT
+  # middleware). Without this strip, a client could send their own JWT
+  # *plus* `X-User-ID: <victim>` and impersonate the victim on any
+  # service that read the header before verifying it against the JWT.
+  # Defense in depth: services also validate, but Kong drops the
+  # header at the edge so the in-service code never sees a
+  # client-controlled value.
+  - name: request-transformer
+    config:
+      remove:
+        headers:
+          - X-User-ID
+          - x-user-id
+
   # CORS - Allow frontend to communicate
   - name: cors
     config:
@@ -265,7 +280,6 @@ plugins:
         - Content-Type
         - Accept
         - X-Request-ID
-        - X-User-ID
         - X-Twilio-Signature
       exposed_headers:
         - X-Request-ID
