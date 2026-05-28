@@ -14,6 +14,7 @@ import { TwilioSignatureGuard } from "./guards/twilio-signature.guard";
 import { CallsService } from "../calls/calls.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
 import { UsersClientService } from "../users-client/users-client.service";
+import { PushService } from "../push/push.service";
 
 @Controller("telephony/webhooks/voice")
 @UseGuards(TwilioSignatureGuard)
@@ -25,6 +26,7 @@ export class WebhooksController {
     private readonly config: ConfigService,
     private readonly kafka: KafkaProducer,
     private readonly usersClient: UsersClientService,
+    private readonly pushService: PushService,
   ) {}
 
   /**
@@ -318,6 +320,39 @@ export class WebhooksController {
         duration: duration ?? 0,
         endedAt: new Date().toISOString(),
       });
+
+      // Missed-call fallback: when an inbound bridge call ends without
+      // being answered, send a regular APNS/FCM push to every linked
+      // account on the device so the user at least sees a missed-call
+      // notification. Without this, a Voice SDK that fails to wake the
+      // app (unregistered identity, watchdog kill, push-cred mismatch)
+      // would leave the call vanishing silently.
+      //
+      // `answeredAt` is the authoritative signal of "did the user pick
+      // up" thanks to the Bug #10 fix — if it's still null after the
+      // dial action completes, the call was genuinely missed.
+      const isMissed =
+        call.direction === "inbound" &&
+        call.answeredAt == null &&
+        (mappedStatus === "no-answer" ||
+          mappedStatus === "busy" ||
+          mappedStatus === "failed");
+      if (isMissed) {
+        const callerDisplay =
+          (call.metadata?.callerName as string | undefined)?.trim() ||
+          call.fromNumber ||
+          "Unknown";
+        const fanoutTargets = Array.isArray(call.metadata?.fanoutTargets)
+          ? (call.metadata.fanoutTargets as number[])
+          : undefined;
+        // Fire-and-forget — never block the webhook response on push delivery.
+        void this.pushService.sendMissedCallPush(
+          call.userId,
+          callerDisplay,
+          callSid,
+          fanoutTargets,
+        );
+      }
     }
 
     // Return empty TwiML (call is over)

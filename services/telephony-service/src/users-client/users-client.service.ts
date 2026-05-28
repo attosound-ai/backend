@@ -162,6 +162,70 @@ export class UsersClientService {
     return ids.length > 0 ? ids : null;
   }
 
+  /**
+   * Fetch active Expo push tokens for a user. Used by the missed-call
+   * fallback path: when an inbound dial fails to reach the Voice SDK, we
+   * send a regular APNS/FCM notification through Expo so the user still
+   * sees a "missed call from X" entry instead of the call silently
+   * vanishing.
+   *
+   * Fail-soft: on any error (network, 404, missing endpoint) returns an
+   * empty array so the caller skips sending without surfacing an error.
+   * No cache — the table is small per user and `is_active` can flip
+   * between requests (token rotation, logout), so a stale cache is worse
+   * than the extra round-trip.
+   */
+  async getActivePushTokens(
+    userId: string,
+  ): Promise<Array<{ token: string; platform: string; deviceId: string }>> {
+    if (!userId || !this.baseUrl) return [];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/users/${userId}/push-tokens`, {
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return [];
+      const payload = (await res.json()) as unknown;
+      return this.extractPushTokens(payload);
+    } catch (err) {
+      this.logger.warn(
+        "push-tokens lookup failed for userId=%s: %s",
+        userId,
+        err instanceof Error ? err.message : String(err),
+      );
+      return [];
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private extractPushTokens(
+    payload: unknown,
+  ): Array<{ token: string; platform: string; deviceId: string }> {
+    if (!payload || typeof payload !== "object") return [];
+    const obj = payload as Record<string, unknown>;
+    const raw =
+      (obj.tokens as unknown) ??
+      (obj.data as Record<string, unknown> | undefined)?.tokens;
+    if (!Array.isArray(raw)) return [];
+    const out: Array<{ token: string; platform: string; deviceId: string }> =
+      [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const token = typeof e.token === "string" ? e.token : null;
+      if (!token) continue;
+      out.push({
+        token,
+        platform: typeof e.platform === "string" ? e.platform : "",
+        deviceId: typeof e.deviceId === "string" ? e.deviceId : "",
+      });
+    }
+    return out;
+  }
+
   private async fetchUsername(userId: string): Promise<string | null> {
     if (!this.baseUrl) return null;
 

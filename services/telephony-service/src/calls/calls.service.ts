@@ -74,8 +74,26 @@ export class CallsService {
 
     call.status = status;
 
-    if (status === "in-progress" && !call.answeredAt) {
-      call.answeredAt = new Date();
+    // `answeredAt` was previously only set on `in-progress`, but Twilio's
+    // dial-action callback often delivers `completed` (or `answered`)
+    // directly without ever firing `in-progress` — particularly for the
+    // PSTN-in → `<Dial><Client>` flow used by bridge numbers. That left
+    // every successfully-answered call with `answeredAt = NULL`,
+    // breaking analytics, billing, and any "did the user pick up" check.
+    //
+    // Treat `in-progress`, `answered`, and `completed`-with-duration as
+    // answered. For the latter, back-compute the timestamp from the
+    // duration so the value reflects actual answer time rather than the
+    // callback arrival time.
+    const isAnsweredStatus =
+      status === "in-progress" ||
+      status === "answered" ||
+      (status === "completed" && duration != null && duration > 0);
+    if (isAnsweredStatus && !call.answeredAt) {
+      call.answeredAt =
+        status === "in-progress"
+          ? new Date()
+          : new Date(Date.now() - (duration ?? 0) * 1000);
     }
 
     if (
@@ -132,17 +150,15 @@ export class CallsService {
     // is actively on. The DB-stored SID is the parent PSTN/dial leg, which the
     // recipient does not own on Twilio's side, so streams.create returns 404.
     const streamCallSid = callSid;
-    const stream = await this.twilioClient
-      .calls(streamCallSid)
-      .streams.create({
-        url: streamUrl,
-        name: `capture-${streamCallSid}-${Date.now()}`,
-        track: "both_tracks",
-        "parameter1.name": "callId",
-        "parameter1.value": call.id,
-        "parameter2.name": "userId",
-        "parameter2.value": userId,
-      });
+    const stream = await this.twilioClient.calls(streamCallSid).streams.create({
+      url: streamUrl,
+      name: `capture-${streamCallSid}-${Date.now()}`,
+      track: "both_tracks",
+      "parameter1.name": "callId",
+      "parameter1.value": call.id,
+      "parameter2.name": "userId",
+      "parameter2.value": userId,
+    });
 
     this.logger.log(
       "Stream started: sid=%s call=%s",
@@ -180,11 +196,7 @@ export class CallsService {
       .calls(streamCallSid)
       .streams(streamSid)
       .update({ status: "stopped" });
-    this.logger.log(
-      "Stream stopped: sid=%s call=%s",
-      streamSid,
-      streamCallSid,
-    );
+    this.logger.log("Stream stopped: sid=%s call=%s", streamSid, streamCallSid);
   }
 
   /** Get calls for a user. */
