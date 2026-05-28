@@ -1,17 +1,23 @@
-import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
-import configuration from './config/configuration';
-import { DatabaseModule } from './database/database.module';
-import { WebhooksModule } from './webhooks/webhooks.module';
-import { TokensModule } from './tokens/tokens.module';
-import { CallsModule } from './calls/calls.module';
-import { MediaModule } from './media/media.module';
-import { KafkaModule } from './kafka/kafka.module';
-import { NumbersModule } from './numbers/numbers.module';
-import { ProjectsModule } from './projects/projects.module';
-import { CacheModule } from './cache/cache.module';
-import { OutboxModule } from './outbox/outbox.module';
-import { SignupScopeMiddleware } from './common/signup-scope.middleware';
+import {
+  MiddlewareConsumer,
+  Module,
+  NestModule,
+  RequestMethod,
+} from "@nestjs/common";
+import { ConfigModule } from "@nestjs/config";
+import configuration from "./config/configuration";
+import { DatabaseModule } from "./database/database.module";
+import { WebhooksModule } from "./webhooks/webhooks.module";
+import { TokensModule } from "./tokens/tokens.module";
+import { CallsModule } from "./calls/calls.module";
+import { MediaModule } from "./media/media.module";
+import { KafkaModule } from "./kafka/kafka.module";
+import { NumbersModule } from "./numbers/numbers.module";
+import { ProjectsModule } from "./projects/projects.module";
+import { CacheModule } from "./cache/cache.module";
+import { OutboxModule } from "./outbox/outbox.module";
+import { SignupScopeMiddleware } from "./common/signup-scope.middleware";
+import { JwtUserIdMiddleware } from "./common/jwt-user-id.middleware";
 
 @Module({
   imports: [
@@ -33,10 +39,15 @@ import { SignupScopeMiddleware } from './common/signup-scope.middleware';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
-    // Reject signup_pending tokens on every route. Twilio webhooks don't
-    // carry Authorization headers so they pass through untouched.
+    // ORDER MATTERS: JwtUserIdMiddleware runs FIRST so it can drop any
+    // client-supplied X-User-ID before SignupScopeMiddleware (which only
+    // checks scope) or any downstream controller can read it. Closes the
+    // Bug #6 impersonation vector at the in-service edge — Kong also
+    // strips inbound X-User-ID, so this is defense in depth.
     consumer
+      .apply(JwtUserIdMiddleware)
+      .forRoutes({ path: "*", method: RequestMethod.ALL })
       .apply(SignupScopeMiddleware)
-      .forRoutes({ path: '*', method: RequestMethod.ALL });
+      .forRoutes({ path: "*", method: RequestMethod.ALL });
   }
 }
