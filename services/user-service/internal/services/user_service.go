@@ -336,6 +336,16 @@ func (s *UserService) GetLinkedAccounts(userID uint64) ([]*models.User, error) {
 	return s.repo.GetLinkedAccounts(userID, user.IsManagedAccount, user.RepresentativeID)
 }
 
+// GetActivePushTokensForUser returns the list of currently-active Expo push
+// tokens registered to a given user. Used by telephony-service to deliver
+// "missed call" fallback notifications when the Twilio Voice SDK push fails
+// to reach a device (e.g., SDK unregistered, watchdog kill, push-cred
+// mismatch), so the user at least sees a regular notification rather than
+// the call disappearing silently.
+func (s *UserService) GetActivePushTokensForUser(userID uint64) ([]models.PushToken, error) {
+	return s.repo.GetActivePushTokens(userID)
+}
+
 // GetLinkedAccountIDsForUser returns the full set of linked account IDs for
 // the given user (representative + every managed creator under that
 // representative). For standalone users (no representative_id, not managed),

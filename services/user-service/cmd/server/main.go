@@ -180,6 +180,10 @@ func main() {
 	// scoped to a single id-only field so it does not leak the linkage graph
 	// via the regular profile endpoint.
 	users.Get("/:id/linked-account-ids", userHandler.GetLinkedAccountIDs)
+	// Internal/server-to-server: telephony-service consumes this to send
+	// "missed call" fallback pushes when the Voice SDK invite fails to
+	// reach the device. Same trust posture as the routes above.
+	users.Get("/:id/push-tokens", userHandler.GetPushTokens)
 
 	// ── Signup session cleanup worker ──
 	// Hourly: mark expired sessions abandoned. Grace period 24h before purge so
