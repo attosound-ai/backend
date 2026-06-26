@@ -746,6 +746,18 @@ func (s *SignupService) createManagedCreatorFromDraft(rep *models.User, d *model
 	if err != nil {
 		return nil, err
 	}
+
+	// Managed creators are real accounts, but unlike the representative they
+	// don't pass through the normal signup publish path — so emit user.created
+	// for them here too. social-service handles this event to give the account
+	// its welcome notification AND auto-follow the official ATTO SOUND account;
+	// email-service safely skips the welcome email when there is no email.
+	locale := "en"
+	if d.Locale != nil {
+		locale = *d.Locale
+	}
+	go s.publishUserCreated(managed, locale)
+
 	return &models.LinkedAccountPayload{
 		User:   managed.ToProfile(),
 		Tokens: tokens,

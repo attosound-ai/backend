@@ -46,4 +46,23 @@ impl TransformationPresets {
     pub fn reel_thumbnail_eager() -> String {
         "c_limit,w_480,h_854,f_jpg,q_auto/jpg".to_string()
     }
+
+    /// Adaptive-bitrate HLS stream (auto streaming profile).
+    /// Transcoding is heavy, so this MUST be generated asynchronously
+    /// (`eager_async=true`) — otherwise the upload request would block until
+    /// every rendition is ready. Pre-generating on upload means the first
+    /// viewer plays instantly instead of waiting for on-the-fly derivation.
+    pub fn video_streaming_eager() -> String {
+        "sp_auto/m3u8".to_string()
+    }
+
+    /// Video upload: HLS stream + first-frame thumbnail (both eager, async).
+    pub fn video_eager() -> String {
+        [Self::video_streaming_eager(), Self::video_thumbnail_eager()].join("|")
+    }
+
+    /// Reel upload: HLS stream + vertical first-frame thumbnail (both eager, async).
+    pub fn reel_eager() -> String {
+        [Self::video_streaming_eager(), Self::reel_thumbnail_eager()].join("|")
+    }
 }
