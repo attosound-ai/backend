@@ -16,6 +16,7 @@ import { NumbersModule } from "./numbers/numbers.module";
 import { ProjectsModule } from "./projects/projects.module";
 import { CacheModule } from "./cache/cache.module";
 import { OutboxModule } from "./outbox/outbox.module";
+import { AnalyticsModule } from "./analytics/analytics.module";
 import { SignupScopeMiddleware } from "./common/signup-scope.middleware";
 import { JwtUserIdMiddleware } from "./common/jwt-user-id.middleware";
 
@@ -25,6 +26,7 @@ import { JwtUserIdMiddleware } from "./common/jwt-user-id.middleware";
       isGlobal: true,
       load: [configuration],
     }),
+    AnalyticsModule,
     CacheModule,
     DatabaseModule,
     WebhooksModule,

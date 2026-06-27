@@ -15,6 +15,7 @@ import { CallsService } from "../calls/calls.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
 import { UsersClientService } from "../users-client/users-client.service";
 import { PushService } from "../push/push.service";
+import { AnalyticsService } from "../analytics/analytics.service";
 
 @Controller("telephony/webhooks/voice")
 @UseGuards(TwilioSignatureGuard)
@@ -27,6 +28,7 @@ export class WebhooksController {
     private readonly kafka: KafkaProducer,
     private readonly usersClient: UsersClientService,
     private readonly pushService: PushService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   /**
@@ -53,6 +55,11 @@ export class WebhooksController {
 
     if (!assignment) {
       this.logger.warn("No assignment found for number: %s", to);
+      this.analytics.capture(null, "backend_call_rejected_unassigned", {
+        call_sid: callSid,
+        from,
+        to,
+      });
       response.say("Sorry, this number is not currently assigned. Goodbye.");
       response.hangup();
       res.type("text/xml").send(response.toString());
@@ -132,6 +139,16 @@ export class WebhooksController {
       targets.join(","),
       assignment.userId,
     );
+
+    this.analytics.capture(assignment.userId, "backend_call_incoming", {
+      call_sid: callSid,
+      from,
+      to,
+      owner_user_id: assignment.userId,
+      fanout_targets: targets,
+      fanout_count: targets.length,
+      caller_name: callerName || null,
+    });
 
     res.type("text/xml").send(response.toString());
   }
@@ -353,6 +370,16 @@ export class WebhooksController {
           fanoutTargets,
         );
       }
+
+      this.analytics.capture(call.userId, "backend_call_dial_status", {
+        call_sid: callSid,
+        dial_status: dialStatus,
+        mapped_status: mappedStatus,
+        duration_sec: duration ?? 0,
+        direction: call.direction,
+        answered: call.answeredAt != null,
+        is_missed: isMissed,
+      });
     }
 
     // Return empty TwiML (call is over)

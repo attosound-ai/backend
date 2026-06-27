@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import Expo, { ExpoPushMessage, ExpoPushTicket } from "expo-server-sdk";
 import { UsersClientService } from "../users-client/users-client.service";
+import { AnalyticsService } from "../analytics/analytics.service";
 
 /**
  * Fallback push delivery for telephony events.
@@ -25,7 +26,10 @@ export class PushService {
   private readonly logger = new Logger(PushService.name);
   private readonly expo = new Expo();
 
-  constructor(private readonly usersClient: UsersClientService) {}
+  constructor(
+    private readonly usersClient: UsersClientService,
+    private readonly analytics: AnalyticsService,
+  ) {}
 
   /**
    * Fire-and-forget missed-call push to a user's registered devices.
@@ -97,10 +101,19 @@ export class PushService {
           "No active push tokens for missed-call recipients (sid=%s)",
           callSid,
         );
+        this.analytics.capture(recipientUserId, "backend_missed_call_push", {
+          call_sid: callSid,
+          caller: callerDisplay,
+          recipients: userIds.size,
+          messages_sent: 0,
+          no_tokens: true,
+        });
         return;
       }
 
       const chunks = this.expo.chunkPushNotifications(messages);
+      let deviceNotRegistered = 0;
+      let chunkErrors = 0;
       for (const chunk of chunks) {
         try {
           const tickets: ExpoPushTicket[] =
@@ -110,6 +123,7 @@ export class PushService {
               ticket.status === "error" &&
               ticket.details?.error === "DeviceNotRegistered"
             ) {
+              deviceNotRegistered += 1;
               this.logger.warn(
                 "Missed-call push DeviceNotRegistered (sid=%s) — token should be deactivated",
                 callSid,
@@ -117,6 +131,7 @@ export class PushService {
             }
           }
         } catch (err) {
+          chunkErrors += 1;
           this.logger.warn(
             "Missed-call push chunk failed (sid=%s): %s",
             callSid,
@@ -131,6 +146,16 @@ export class PushService {
         userIds.size,
         callSid,
       );
+
+      this.analytics.capture(recipientUserId, "backend_missed_call_push", {
+        call_sid: callSid,
+        caller: callerDisplay,
+        recipients: userIds.size,
+        messages_sent: messages.length,
+        device_not_registered: deviceNotRegistered,
+        chunk_errors: chunkErrors,
+        no_tokens: false,
+      });
     } catch (err) {
       // Outer catch is paranoia — every internal step already swallows.
       this.logger.error(
