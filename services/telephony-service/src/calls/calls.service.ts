@@ -6,6 +6,7 @@ import Twilio from "twilio";
 import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entity";
 import { Call } from "../entities/call.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
+import { AnalyticsService } from "../analytics/analytics.service";
 
 @Injectable()
 export class CallsService {
@@ -20,6 +21,7 @@ export class CallsService {
     @InjectRepository(AudioSegment)
     private readonly segmentRepo: Repository<AudioSegment>,
     private readonly config: ConfigService,
+    private readonly analytics: AnalyticsService,
   ) {
     const accountSid = this.config.get<string>("twilio.accountSid");
     const authToken = this.config.get<string>("twilio.authToken");
@@ -123,7 +125,12 @@ export class CallsService {
     let call = await this.callRepo.findOne({
       where: { twilioCallSid: callSid, userId },
     });
+    // Telemetry: did the exact-SID match miss and force the "most recent active
+    // call" fallback? A fallback attach can bind the stream to a DB row whose
+    // leg never carried the remote party — a wrong-leg cause of empty outbound.
+    let usedFallbackLookup = false;
     if (!call) {
+      usedFallbackLookup = true;
       call = await this.callRepo.findOne({
         where: [
           { userId, status: "in-progress" },
@@ -133,6 +140,11 @@ export class CallsService {
       });
     }
     if (!call) throw new NotFoundException("Call not found");
+
+    // Snapshot the DB call status BEFORE the ringing→in-progress auto-upgrade.
+    // If it wasn't already "in-progress" the leg may not have been fully
+    // bridged when capture armed — an early/wrong-leg attach signal.
+    const callStatusAtAttach = call.status;
 
     // Auto-upgrade: if the call is still "ringing" in DB (status callback delayed
     // or missing), upgrade to "in-progress" since the user clearly accepted.
@@ -150,21 +162,58 @@ export class CallsService {
     // is actively on. The DB-stored SID is the parent PSTN/dial leg, which the
     // recipient does not own on Twilio's side, so streams.create returns 404.
     const streamCallSid = callSid;
-    const stream = await this.twilioClient.calls(streamCallSid).streams.create({
-      url: streamUrl,
-      name: `capture-${streamCallSid}-${Date.now()}`,
-      track: "both_tracks",
-      "parameter1.name": "callId",
-      "parameter1.value": call.id,
-      "parameter2.name": "userId",
-      "parameter2.value": userId,
-    });
+    let stream: { sid: string };
+    try {
+      stream = await this.twilioClient.calls(streamCallSid).streams.create({
+        url: streamUrl,
+        name: `capture-${streamCallSid}-${Date.now()}`,
+        track: "both_tracks",
+        "parameter1.name": "callId",
+        "parameter1.value": call.id,
+        "parameter2.name": "userId",
+        "parameter2.value": userId,
+      });
+    } catch (err) {
+      // A failed streams.create = ZERO recording, surfaced to the user only as
+      // a generic "Recording failed" alert. Capture the Twilio error so we can
+      // tell apart a 404 (wrong leg / call already ended) from auth/region
+      // problems. This is fired BEFORE re-throwing so the existing behaviour is
+      // unchanged.
+      const e = err as { code?: number; status?: number; message?: string };
+      this.analytics.capture(userId, "backend_recording_stream_failed", {
+        call_sid: streamCallSid,
+        db_call_sid: call.twilioCallSid,
+        call_id: call.id,
+        track: "both_tracks",
+        used_fallback_lookup: usedFallbackLookup,
+        call_status_at_attach: callStatusAtAttach,
+        twilio_code: e?.code ?? null,
+        http_status: e?.status ?? null,
+        error: e?.message ?? String(err),
+      });
+      throw err;
+    }
 
     this.logger.log(
       "Stream started: sid=%s call=%s",
       stream.sid,
       streamCallSid,
     );
+
+    // The stream was accepted by Twilio. Whether BOTH tracks actually flow is
+    // confirmed later by backend_recording_started/segment from the media WS.
+    this.analytics.capture(userId, "backend_recording_stream_requested", {
+      call_sid: streamCallSid,
+      // db_call_sid differs from call_sid when the exact-SID match missed and
+      // we fell back: that divergence + used_fallback_lookup is the wrong-leg
+      // attach signature (hypothesis 2 for "remote not recorded").
+      db_call_sid: call.twilioCallSid,
+      call_id: call.id,
+      stream_sid: stream.sid,
+      track: "both_tracks",
+      used_fallback_lookup: usedFallbackLookup,
+      call_status_at_attach: callStatusAtAttach,
+    });
     return { streamSid: stream.sid };
   }
 
