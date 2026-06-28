@@ -115,7 +115,32 @@ export class WebhooksController {
       timeout: 30,
     });
 
-    const displayName = callerName?.trim() || from || "Unknown";
+    // Resolve the CALLER's @username from their number so the CallKit banner
+    // shows "@username" instead of the raw E.164. The in-app incoming screen
+    // already does this reverse lookup client-side; doing it here makes the OS
+    // banner match (and is the single ring surface in the foreground now that
+    // the app suppresses its own ring screen). Fail-soft: any miss falls back to
+    // CNAM → number → "Unknown".
+    let displayName = callerName?.trim() || from || "Unknown";
+    try {
+      const callerAssignment =
+        await this.callsService.resolveUserByPhoneNumber(from);
+      if (callerAssignment?.userId) {
+        const callerUsername = await this.usersClient.getUsernameById(
+          String(callerAssignment.userId),
+        );
+        if (callerUsername) {
+          displayName = `@${callerUsername}`;
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        "Caller @username reverse-lookup failed (sid=%s from=%s): %s",
+        callSid,
+        from,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
 
     for (const targetId of targets) {
       const client = dial.client(`user-${targetId}`);
@@ -148,6 +173,8 @@ export class WebhooksController {
       fanout_targets: targets,
       fanout_count: targets.length,
       caller_name: callerName || null,
+      display_name: displayName,
+      username_resolved: displayName.startsWith("@"),
     });
 
     res.type("text/xml").send(response.toString());
