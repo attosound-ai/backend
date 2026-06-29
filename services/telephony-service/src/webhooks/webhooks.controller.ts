@@ -115,29 +115,26 @@ export class WebhooksController {
       timeout: 30,
     });
 
-    // Resolve the CALLER's @username from their number so the CallKit banner
-    // shows "@username" instead of the raw E.164. The in-app incoming screen
-    // already does this reverse lookup client-side; doing it here makes the OS
-    // banner match (and is the single ring surface in the foreground now that
-    // the app suppresses its own ring screen). Fail-soft: any miss falls back to
-    // CNAM → number → "Unknown".
+    // The app's incoming screen shows the @username of the BRIDGE this call is
+    // FOR (the creator/owner the dialled number `to` resolves to), NOT the raw
+    // external caller — because <Dial callerId=to> makes the app's invite `from`
+    // the bridge number itself, which the app reverse-looks-up to the owner's
+    // @username. Match that on the CallKit banner (now the single ring surface):
+    // use the bridge owner's username. `assignment` is already resolved from
+    // `to` above. Fail-soft: any miss falls back to CNAM → number → "Unknown".
     let displayName = callerName?.trim() || from || "Unknown";
     try {
-      const callerAssignment =
-        await this.callsService.resolveUserByPhoneNumber(from);
-      if (callerAssignment?.userId) {
-        const callerUsername = await this.usersClient.getUsernameById(
-          String(callerAssignment.userId),
-        );
-        if (callerUsername) {
-          displayName = `@${callerUsername}`;
-        }
+      const ownerUsername = await this.usersClient.getUsernameById(
+        String(assignment.userId),
+      );
+      if (ownerUsername) {
+        displayName = `@${ownerUsername}`;
       }
     } catch (err) {
       this.logger.warn(
-        "Caller @username reverse-lookup failed (sid=%s from=%s): %s",
+        "Bridge owner @username lookup failed (sid=%s to=%s): %s",
         callSid,
-        from,
+        to,
         err instanceof Error ? err.message : String(err),
       );
     }
