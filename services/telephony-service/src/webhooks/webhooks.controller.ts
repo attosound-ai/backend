@@ -110,6 +110,18 @@ export class WebhooksController {
     // create N independent call SIDs with N independent callbacks.
     const webhookBaseUrl = this.config.get<string>("webhookBaseUrl");
     const dial = response.dial({
+      // answerOnBridge defers the inbound PSTN leg's SIP 200 OK until a
+      // <Client> leg actually answers, so Twilio replies 180/183 (ringing)
+      // to Securus until pickup and then answers + bridges in one step.
+      // Without it, Twilio answered the inbound leg IMMEDIATELY and then
+      // rang the rep — which Securus reads as "answered, then a 3rd party
+      // was bridged" = three-way call ("no three party calls allowed").
+      // This makes the inbound flow match the two outbound dials below
+      // (already answerOnBridge:true). The post-answer two-way audio+DTMF
+      // bridge is UNCHANGED, so the rep's client-side "press 1" accept
+      // (front useTwilioVoice.sendCallDigits, gated on state==='connected')
+      // still traverses the bridge to Securus exactly as before.
+      answerOnBridge: true,
       callerId: to,
       action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
       timeout: 30,
