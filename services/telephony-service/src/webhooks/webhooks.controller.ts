@@ -122,6 +122,13 @@ export class WebhooksController {
       // (front useTwilioVoice.sendCallDigits, gated on state==='connected')
       // still traverses the bridge to Securus exactly as before.
       answerOnBridge: true,
+      // <Client> (Voice SDK) legs emit NO ringback early-media, so with
+      // answerOnBridge the caller heard one connect ring then dead silence while
+      // the rep's app rang (confirmed on the live mother test). ringTone plays a
+      // continuous US ringback to the caller until the rep answers — a normal
+      // ringing call, and it removes a prolonged silence that Securus's
+      // silence/call-progress detection could itself flag.
+      ringTone: "us",
       callerId: to,
       action: `${webhookBaseUrl}/telephony/webhooks/voice/dial-status`,
       timeout: 30,
