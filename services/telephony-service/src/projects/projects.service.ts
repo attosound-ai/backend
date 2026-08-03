@@ -405,6 +405,14 @@ export class ProjectsService {
     userId: string,
     file: Express.Multer.File,
     laneIndex: number,
+    /**
+     * Explicit timeline position for the created clip, in ms. An in-call take
+     * belongs at the playhead it was performed over; without this the clip is
+     * appended after the last clip on the lane and the performance reads as
+     * detached from the track it was sung against. Undefined keeps the append
+     * behaviour, so older app builds are unaffected.
+     */
+    positionInTimeline?: number,
   ): Promise<TimelineClip> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
@@ -498,14 +506,20 @@ export class ProjectsService {
         order: { order: "ASC" },
       });
 
-      // Find position on the target lane
+      // Find position on the target lane. An explicit client position wins: an
+      // in-call take belongs at the playhead it was performed over, not appended
+      // after whatever else is on the lane.
       const laneClips = existingClips.filter((c) => c.laneIndex === laneIndex);
       const lastLaneClip = laneClips[laneClips.length - 1];
       const nextOrder = lastLaneClip ? lastLaneClip.order + 1 : 0;
-      const nextPosition = lastLaneClip
+      const appendPosition = lastLaneClip
         ? lastLaneClip.positionInTimeline +
           (lastLaneClip.endInSegment - lastLaneClip.startInSegment)
         : 0;
+      const nextPosition =
+        typeof positionInTimeline === "number" && positionInTimeline >= 0
+          ? positionInTimeline
+          : appendPosition;
 
       const clip = this.clipRepo.create({
         projectId,

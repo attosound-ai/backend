@@ -195,6 +195,12 @@ export class ProjectsController {
     @Param("id") id: string,
     @UploadedFile() file: Express.Multer.File,
     @Body("laneIndex") laneIndex: string,
+    // Optional: where on the timeline the client wants this clip. An in-call take
+    // recorded over a backing track belongs at the playhead it was performed
+    // against, not appended after the last clip on the lane. Multipart bodies are
+    // strings, hence the parse. Omitted -> unchanged append behaviour, so older
+    // clients are unaffected.
+    @Body("positionInTimeline") positionInTimeline: string,
     @Headers("x-user-id") userId: string,
     @Headers("authorization") authHeader: string,
   ) {
@@ -203,11 +209,17 @@ export class ProjectsController {
       throw new BadRequestException("No file uploaded");
     }
     const lane = laneIndex ? parseInt(laneIndex, 10) : 0;
+    const parsedPosition = positionInTimeline
+      ? parseInt(positionInTimeline, 10)
+      : NaN;
     const result = await this.projectsService.importAudioFile(
       id,
       uid,
       file,
       lane,
+      Number.isFinite(parsedPosition) && parsedPosition >= 0
+        ? parsedPosition
+        : undefined,
     );
     return { success: true, data: result };
   }
