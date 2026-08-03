@@ -90,6 +90,12 @@ export class ProjectsController {
     @Param("id") id: string,
     @Body("segmentId") segmentId: string,
     @Body("laneIndex") laneIndex: number | undefined,
+    // Optional: where on the timeline the client wants this clip. Used by
+    // in-call recording so the take lands at the PLAYHEAD (what the user was
+    // listening to) instead of being appended after the last clip on the lane,
+    // which made the recording appear detached from the track it was recorded
+    // over. Omitted -> unchanged append behaviour, so older clients are safe.
+    @Body("positionInTimeline") positionInTimeline: number | undefined,
     @Headers("x-user-id") userId: string,
     @Headers("authorization") authHeader: string,
   ) {
@@ -99,6 +105,9 @@ export class ProjectsController {
       id,
       uid,
       typeof laneIndex === "number" ? laneIndex : 0,
+      typeof positionInTimeline === "number" && positionInTimeline >= 0
+        ? positionInTimeline
+        : undefined,
     );
     return { success: true, data: segment };
   }

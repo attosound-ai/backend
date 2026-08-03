@@ -268,6 +268,38 @@ export class AudioProcessorService {
   }
 
   /**
+   * Inspect an audio file's real format.
+   *
+   * Needed because import used to decide "is this already WAV?" from the CLIENT'S
+   * mime string. A 44.1 kHz stereo file announced as `audio/wav` was therefore
+   * stored untouched while the DB recorded `sampleRate: 8000`. Downstream,
+   * `concatFiles` uses `-c copy`, which requires every clip on a lane to share an
+   * identical format, so mixing that import with 8 kHz mono call recordings
+   * produced a garbled or failed export. Probing the bytes removes the guess.
+   */
+  async probeAudio(filePath: string): Promise<{
+    sampleRate: number;
+    channels: number;
+    codecName: string;
+    durationMs: number;
+  }> {
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(filePath, (err: Error | null, metadata: any) => {
+        if (err) return reject(err);
+        const stream = (metadata?.streams ?? []).find(
+          (s: any) => s?.codec_type === "audio",
+        );
+        resolve({
+          sampleRate: Number(stream?.sample_rate ?? 0),
+          channels: Number(stream?.channels ?? 0),
+          codecName: String(stream?.codec_name ?? ""),
+          durationMs: Math.round(Number(metadata?.format?.duration ?? 0) * 1000),
+        });
+      });
+    });
+  }
+
+  /**
    * Get audio duration in milliseconds using ffprobe.
    */
   async getDurationMs(filePath: string): Promise<number> {

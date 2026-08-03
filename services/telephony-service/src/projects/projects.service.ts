@@ -12,6 +12,15 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 
+/**
+ * The project pipeline's real audio contract: 8 kHz mono PCM WAV. Twilio call
+ * recordings arrive at this rate, `convertToWav` forces it, the waveform reader
+ * assumes mono int16, and `concatFiles` exports with `-c copy`, which requires
+ * every clip on a lane to share it. Imports MUST be normalised to it or exports
+ * break. Named here so the contract is stated once instead of hardcoded.
+ */
+const TARGET_SAMPLE_RATE = 8000;
+
 @Injectable()
 export class ProjectsService {
   private readonly logger = new Logger(ProjectsService.name);
@@ -171,6 +180,14 @@ export class ProjectsService {
     projectId: string,
     userId: string,
     laneIndex: number = 0,
+    /**
+     * Explicit timeline position for the auto-created clip, in ms. When the
+     * client knows where the clip belongs (in-call recording: the playhead the
+     * user was listening at), it sends this so the take lands where it was
+     * performed. Undefined keeps the historical append-after-last-clip
+     * behaviour, so older app builds are unaffected.
+     */
+    positionInTimeline?: number,
   ): Promise<AudioSegment> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
@@ -215,10 +232,17 @@ export class ProjectsService {
     );
     const lastLaneClip = laneClips[laneClips.length - 1];
     const nextOrder = existingClips.length;
-    const nextPosition = lastLaneClip
+    // Honour an explicit position when the client sent one (in-call recording
+    // lands at the playhead it was performed over); otherwise append after the
+    // last clip on this lane, as before.
+    const appendPosition = lastLaneClip
       ? lastLaneClip.positionInTimeline +
         (lastLaneClip.endInSegment - lastLaneClip.startInSegment)
       : 0;
+    const nextPosition =
+      typeof positionInTimeline === "number" && positionInTimeline >= 0
+        ? positionInTimeline
+        : appendPosition;
 
     const clip = this.clipRepo.create({
       projectId,
@@ -395,14 +419,37 @@ export class ProjectsService {
     await fs.writeFile(tmpInput, file.buffer);
 
     try {
-      // Convert to WAV if not already
-      const isWav =
-        file.mimetype === "audio/wav" || file.mimetype === "audio/x-wav";
-      const wavPath = isWav
+      // Normalise by PROBING THE BYTES, never by trusting the client's mime.
+      // The old check (`mimetype === audio/wav`) let a 44.1 kHz stereo WAV through
+      // untouched while the row below recorded sampleRate 8000. Since `concatFiles`
+      // exports with `-c copy` (identical formats required across a lane), such an
+      // import silently corrupted exports when mixed with 8 kHz mono call
+      // recordings. It also meant `audio/vnd.wave` — the mime iOS actually sent for
+      // a real user import — fell through to a full ffmpeg resample by accident
+      // rather than by decision.
+      const probe = await this.audioProcessor
+        .probeAudio(tmpInput)
+        .catch(() => null);
+      const alreadyNormalised =
+        probe !== null &&
+        probe.sampleRate === TARGET_SAMPLE_RATE &&
+        probe.channels === 1 &&
+        probe.codecName.startsWith("pcm_");
+      const wavPath = alreadyNormalised
         ? tmpInput
         : await this.audioProcessor.convertToWav(tmpInput);
 
-      // Get duration
+      this.logger.log(
+        "Import normalise: project=%s mime=%s probed=%s skipped_ffmpeg=%s",
+        projectId,
+        file.mimetype,
+        probe
+          ? `${probe.sampleRate}Hz/${probe.channels}ch/${probe.codecName}`
+          : "probe_failed",
+        alreadyNormalised,
+      );
+
+      // Duration from the NORMALISED file (what we actually store).
       const durationMs = await this.audioProcessor.getDurationMs(wavPath);
 
       // Upload to S3
@@ -423,7 +470,12 @@ export class ProjectsService {
         endMs: durationMs,
         durationMs,
         format: "wav",
-        sampleRate: 8000,
+        // Record what was ACTUALLY stored. After the probe-then-convert above this
+        // is always the target rate, but hardcoding it was how the mismatch that
+        // corrupted exports stayed invisible.
+        sampleRate: alreadyNormalised
+          ? (probe?.sampleRate ?? TARGET_SAMPLE_RATE)
+          : TARGET_SAMPLE_RATE,
         fileSizeBytes: wavBuffer.length,
         storageBucket: bucket,
         storageKey,
