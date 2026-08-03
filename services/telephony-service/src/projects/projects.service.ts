@@ -449,8 +449,16 @@ export class ProjectsService {
         alreadyNormalised,
       );
 
-      // Duration from the NORMALISED file (what we actually store).
-      const durationMs = await this.audioProcessor.getDurationMs(wavPath);
+      // Duration from the NORMALISED file (what we actually store). Reuse the
+      // probe we already ran when the file needed no conversion — ffprobe is a
+      // PROCESS SPAWN, and on a cold container each one costs a meaningful slice
+      // of the request. Measured Aug 3: with the client now sending an
+      // already-normalised 1.2 MB file, the upload took 1.1 s and the SERVER took
+      // 5.3 s, so the tail is the bottleneck and every avoidable spawn counts.
+      const durationMs =
+        alreadyNormalised && probe && probe.durationMs > 0
+          ? probe.durationMs
+          : await this.audioProcessor.getDurationMs(wavPath);
 
       // Upload to S3
       const wavBuffer = await fs.readFile(wavPath);
