@@ -580,8 +580,13 @@ func (s *AuthService) SwitchAccount(ctx context.Context, callerID string, target
 		return nil, errors.New("target user not found")
 	}
 
-	// Authorization: accounts must be linked
-	authorized := false
+	// Authorization: accounts must be linked. Self-switch (target == caller)
+	// is allowed and idempotent: it just re-issues tokens for the account
+	// the caller already is. A client whose UI identity drifted from its
+	// token converges on retry instead of dead-ending on a 403 (Aug 1 2026:
+	// a desynced client self-switched, got "accounts are not linked", and
+	// the user was stuck unable to switch profiles).
+	authorized := target.ID == uid
 	if target.RepresentativeID != nil && *target.RepresentativeID == uid {
 		authorized = true // rep → their managed creator
 	}
