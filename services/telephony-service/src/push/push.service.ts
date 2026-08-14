@@ -75,10 +75,32 @@ export class PushService {
         ),
       );
 
+      // Dedup by push TOKEN, not by user. An Expo push token is per app
+      // INSTALL, not per account — so when several linked accounts are signed
+      // in on the SAME device (the person-merge / account-switch case) they all
+      // resolve to the SAME token. Fanning out per-account then pushed to that
+      // one token once per account, so the user saw the SAME missed-call
+      // notification twice on one device (recipients=2, messages_sent=2 in
+      // backend_missed_call_push). The token is the actual Expo delivery target
+      // and is unique per install, so collapsing on it sends exactly ONE
+      // notification per install while genuinely different devices (different
+      // installs => different tokens) each still get theirs. We deliberately do
+      // NOT key on deviceId here: it is Constants.deviceName client-side, which
+      // collides across devices sharing a default name and could wrongly drop a
+      // real device's notification — a missed notification is worse than a rare
+      // duplicate from token rotation (the stale token gets DeviceNotRegistered
+      // and is cleaned up anyway).
       const messages: ExpoPushMessage[] = [];
+      const seenTokens = new Set<string>();
+      let duplicateTokens = 0;
       for (const { userId, tokens } of tokenLists) {
         for (const t of tokens) {
           if (!Expo.isExpoPushToken(t.token)) continue;
+          if (seenTokens.has(t.token)) {
+            duplicateTokens += 1;
+            continue;
+          }
+          seenTokens.add(t.token);
           messages.push({
             to: t.token,
             title: "ATTO SOUND",
@@ -152,6 +174,10 @@ export class PushService {
         caller: callerDisplay,
         recipients: userIds.size,
         messages_sent: messages.length,
+        // Number of same-device duplicate tokens collapsed. > 0 means a user had
+        // multiple linked accounts sharing one device and would previously have
+        // received one duplicate notification per collapsed token.
+        duplicate_tokens: duplicateTokens,
         device_not_registered: deviceNotRegistered,
         chunk_errors: chunkErrors,
         no_tokens: false,
