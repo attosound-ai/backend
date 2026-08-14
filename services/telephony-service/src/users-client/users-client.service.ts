@@ -66,6 +66,166 @@ export class UsersClientService {
     return null;
   }
 
+  /**
+   * Resolve the full set of linked account IDs for a user (representative
+   * + every managed creator under the same representative). Used by the
+   * Twilio incoming-call webhook to fan out `<Dial><Client>...</Client></Dial>`
+   * across all reachable identities for a device — without this, a PSTN
+   * call to one bridge only rings the currently-registered Voice SDK
+   * identity, dropping calls to the user's linked accounts.
+   *
+   * Fail-soft contract: on any error (timeout, network, 404, missing
+   * endpoint pre-deploy) returns a single-element array `[Number(userId)]`
+   * so the webhook keeps emitting the legacy single-client TwiML. Never
+   * throws. Caller can treat the result as the authoritative target set.
+   *
+   * Hit cache 5 min, miss cache 1 min, same TTLs as getUsernameById.
+   */
+  async getLinkedAccountIds(userId: string): Promise<number[]> {
+    const fallback = (): number[] => {
+      const n = Number(userId);
+      return Number.isFinite(n) && n > 0 ? [n] : [];
+    };
+    if (!userId) return fallback();
+
+    const cacheKey = `users:linked:${userId}`;
+    const cached = await this.cache.get<number[] | string>(cacheKey);
+    if (cached === NEGATIVE_CACHE_VALUE) return fallback();
+    if (Array.isArray(cached) && cached.length > 0) return cached;
+
+    const ids = await this.fetchLinkedAccountIds(userId);
+    if (ids && ids.length > 0) {
+      await this.cache.set(cacheKey, ids, CACHE_TTL_SECONDS);
+      return ids;
+    }
+
+    await this.cache.set(
+      cacheKey,
+      NEGATIVE_CACHE_VALUE,
+      NEGATIVE_CACHE_TTL_SECONDS,
+    );
+    return fallback();
+  }
+
+  private async fetchLinkedAccountIds(
+    userId: string,
+  ): Promise<number[] | null> {
+    if (!this.baseUrl) return null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/users/${userId}/linked-account-ids`,
+        { signal: controller.signal, headers: { Accept: "application/json" } },
+      );
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        this.logger.warn(
+          "linked-account-ids lookup non-OK for userId=%s: %d",
+          userId,
+          res.status,
+        );
+        return null;
+      }
+      const payload = (await res.json()) as unknown;
+      return this.extractLinkedIds(payload);
+    } catch (err) {
+      this.logger.warn(
+        "linked-account-ids lookup failed for userId=%s: %s",
+        userId,
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Tolerate two possible response shapes:
+   *  - `{ data: { userIds: [...] } }` (envelope used by APIResponse)
+   *  - `{ userIds: [...] }`           (raw shape)
+   * Coerce every entry to a finite positive number; drop everything else.
+   */
+  private extractLinkedIds(payload: unknown): number[] | null {
+    if (!payload || typeof payload !== "object") return null;
+    const obj = payload as Record<string, unknown>;
+    const raw =
+      (obj.userIds as unknown) ??
+      (obj.data as Record<string, unknown> | undefined)?.userIds;
+    if (!Array.isArray(raw)) return null;
+    const ids = raw
+      .map((v) => Number(v))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    return ids.length > 0 ? ids : null;
+  }
+
+  /**
+   * Fetch active Expo push tokens for a user. Used by the missed-call
+   * fallback path: when an inbound dial fails to reach the Voice SDK, we
+   * send a regular APNS/FCM notification through Expo so the user still
+   * sees a "missed call from X" entry instead of the call silently
+   * vanishing.
+   *
+   * Fail-soft: on any error (network, 404, missing endpoint) returns an
+   * empty array so the caller skips sending without surfacing an error.
+   * No cache — the table is small per user and `is_active` can flip
+   * between requests (token rotation, logout), so a stale cache is worse
+   * than the extra round-trip.
+   */
+  async getActivePushTokens(
+    userId: string,
+  ): Promise<Array<{ token: string; platform: string; deviceId: string }>> {
+    if (!userId || !this.baseUrl) return [];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/users/${userId}/push-tokens`, {
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return [];
+      const payload = (await res.json()) as unknown;
+      return this.extractPushTokens(payload);
+    } catch (err) {
+      this.logger.warn(
+        "push-tokens lookup failed for userId=%s: %s",
+        userId,
+        err instanceof Error ? err.message : String(err),
+      );
+      return [];
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private extractPushTokens(
+    payload: unknown,
+  ): Array<{ token: string; platform: string; deviceId: string }> {
+    if (!payload || typeof payload !== "object") return [];
+    const obj = payload as Record<string, unknown>;
+    const raw =
+      (obj.tokens as unknown) ??
+      (obj.data as Record<string, unknown> | undefined)?.tokens;
+    if (!Array.isArray(raw)) return [];
+    const out: Array<{ token: string; platform: string; deviceId: string }> =
+      [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const token = typeof e.token === "string" ? e.token : null;
+      if (!token) continue;
+      out.push({
+        token,
+        platform: typeof e.platform === "string" ? e.platform : "",
+        deviceId: typeof e.deviceId === "string" ? e.deviceId : "",
+      });
+    }
+    return out;
+  }
+
   private async fetchUsername(userId: string): Promise<string | null> {
     if (!this.baseUrl) return null;
 

@@ -8,6 +8,12 @@ defmodule ChatService.Application do
 
   @impl true
   def start(_type, _args) do
+    # Route crash reports and Logger error/warning entries to Sentry.
+    # No-ops when :sentry dsn is nil (dev/test), so this is safe everywhere.
+    :logger.add_handler(:chat_service_sentry, Sentry.LoggerHandler, %{
+      config: %{metadata: [:file, :line], capture_log_messages: false}
+    })
+
     cassandra_nodes = Application.get_env(:chat_service, :cassandra_nodes, ["localhost:9042"])
     cassandra_keyspace = Application.get_env(:chat_service, :cassandra_keyspace, "atto_chat")
     kafka_brokers = Application.get_env(:chat_service, :kafka_brokers, [{"localhost", 9092}])
@@ -123,6 +129,26 @@ defmodule ChatService.Application do
         emoji text,
         created_at timestamp,
         PRIMARY KEY (message_id, user_id)
+      )
+      """,
+      # Dead-letter for account deletions whose chat cascade failed (see KafkaConsumer).
+      # Reprocessed by `mix chat.reprocess_failed_deletions`.
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.failed_deletions (
+        user_id text,
+        reason text,
+        attempts int,
+        failed_at timestamp,
+        PRIMARY KEY (user_id)
+      )
+      """,
+      # Resumable cursor for `mix chat.cleanup_orphans` (paging_state is an opaque blob).
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.cleanup_checkpoints (
+        job text,
+        paging_state blob,
+        updated_at timestamp,
+        PRIMARY KEY (job)
       )
       """,
       # Add new columns to messages (idempotent — Cassandra ignores if they already exist)

@@ -224,10 +224,10 @@ func (s *UserService) VerifyUser(ctx context.Context, userID string, inmateNumbe
 	verifyIDStr := strconv.FormatUint(user.ID, 10)
 	go func() {
 		eventData := map[string]interface{}{
-			"id":            verifyIDStr,
-			"username":      user.Username,
-			"inmateNumber":  inmateNumber,
-			"verified":      true,
+			"id":           verifyIDStr,
+			"username":     user.Username,
+			"inmateNumber": inmateNumber,
+			"verified":     true,
 		}
 		if err := s.producer.Publish(context.Background(), "user.verified", verifyIDStr, eventData); err != nil {
 			log.Printf("[USER] Failed to publish user.verified event: %v", err)
@@ -334,4 +334,51 @@ func (s *UserService) GetLinkedAccounts(userID uint64) ([]*models.User, error) {
 		return nil, nil
 	}
 	return s.repo.GetLinkedAccounts(userID, user.IsManagedAccount, user.RepresentativeID)
+}
+
+// GetActivePushTokensForUser returns the list of currently-active Expo push
+// tokens registered to a given user. Used by telephony-service to deliver
+// "missed call" fallback notifications when the Twilio Voice SDK push fails
+// to reach a device (e.g., SDK unregistered, watchdog kill, push-cred
+// mismatch), so the user at least sees a regular notification rather than
+// the call disappearing silently.
+func (s *UserService) GetActivePushTokensForUser(userID uint64) ([]models.PushToken, error) {
+	return s.repo.GetActivePushTokens(userID)
+}
+
+// GetLinkedAccountIDsForUser returns the full set of linked account IDs for
+// the given user (representative + every managed creator under that
+// representative). For standalone users (no representative_id, not managed),
+// returns just [userID].
+//
+// Returns (nil, nil) when the user does not exist — caller distinguishes
+// "missing" from "empty" by the nil slice. Used by telephony-service to
+// fan out TwiML across all reachable Voice SDK identities for a device.
+func (s *UserService) GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error) {
+	user, err := s.repo.FindByID(userID)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, nil
+	}
+
+	var anchorID uint64
+	if user.IsManagedAccount && user.RepresentativeID != nil {
+		anchorID = *user.RepresentativeID
+	} else {
+		anchorID = user.ID
+	}
+
+	ids, err := s.repo.GetLinkedAccountIDs(anchorID)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		// Defensive: anchor row must exist, but if Postgres returns empty
+		// for any reason we still want to honour the contract that the
+		// requested userID is always in the result.
+		return []uint64{userID}, nil
+	}
+	return ids, nil
 }

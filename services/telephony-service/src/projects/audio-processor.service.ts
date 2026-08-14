@@ -229,6 +229,29 @@ export class AudioProcessorService {
   }
 
   /**
+   * Loudness-normalize a WAV to a comfortable listening level (~-16 LUFS).
+   * The Securus line delivers very quiet audio (measured ~-34 LUFS on real
+   * recordings), so without this the user has to crank playback, which surfaces
+   * the line's noise floor ("so quiet that when we turn them up it sounds like
+   * shit"). loudnorm applies gentle leveling to a broadcast-ish target. Callers
+   * fall back to the un-normalized mix if this throws, so an export never fails
+   * over a normalization hiccup.
+   */
+  private async normalizeLoudness(
+    inputPath: string,
+    outputPath: string,
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .audioFilters("loudnorm=I=-16:TP=-1.5:LRA=11")
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+  }
+
+  /**
    * Convert any supported audio file to WAV format.
    */
   async convertToWav(inputPath: string): Promise<string> {
@@ -242,6 +265,38 @@ export class AudioProcessorService {
         .run();
     });
     return outputPath;
+  }
+
+  /**
+   * Inspect an audio file's real format.
+   *
+   * Needed because import used to decide "is this already WAV?" from the CLIENT'S
+   * mime string. A 44.1 kHz stereo file announced as `audio/wav` was therefore
+   * stored untouched while the DB recorded `sampleRate: 8000`. Downstream,
+   * `concatFiles` uses `-c copy`, which requires every clip on a lane to share an
+   * identical format, so mixing that import with 8 kHz mono call recordings
+   * produced a garbled or failed export. Probing the bytes removes the guess.
+   */
+  async probeAudio(filePath: string): Promise<{
+    sampleRate: number;
+    channels: number;
+    codecName: string;
+    durationMs: number;
+  }> {
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(filePath, (err: Error | null, metadata: any) => {
+        if (err) return reject(err);
+        const stream = (metadata?.streams ?? []).find(
+          (s: any) => s?.codec_type === "audio",
+        );
+        resolve({
+          sampleRate: Number(stream?.sample_rate ?? 0),
+          channels: Number(stream?.channels ?? 0),
+          codecName: String(stream?.codec_name ?? ""),
+          durationMs: Math.round(Number(metadata?.format?.duration ?? 0) * 1000),
+        });
+      });
+    });
   }
 
   /**
@@ -328,8 +383,24 @@ export class AudioProcessorService {
       // Mix lanes together (or just use single lane output)
       await this.mixFiles(laneFiles, tmpOutput);
 
+      // Loudness-normalize the final mix so recordings play at a comfortable
+      // level instead of the very quiet raw Securus-line level. Falls back to the
+      // un-normalized mix if normalization throws, so an export never breaks.
+      let finalOutput = tmpOutput;
+      try {
+        const normalizedOutput = join(tmpdir(), `export-norm-${randomUUID()}.wav`);
+        allTmpFiles.push(normalizedOutput);
+        await this.normalizeLoudness(tmpOutput, normalizedOutput);
+        finalOutput = normalizedOutput;
+      } catch (err) {
+        this.logger.warn(
+          "Loudness normalization failed, using un-normalized mix: %s",
+          err,
+        );
+      }
+
       // Upload to S3
-      const outputBuffer = await fs.readFile(tmpOutput);
+      const outputBuffer = await fs.readFile(finalOutput);
       const date = new Date().toISOString().slice(0, 10);
       const storageKey = `exports/${date}/${projectId}/${randomUUID()}.wav`;
 

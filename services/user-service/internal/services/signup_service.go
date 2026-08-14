@@ -138,9 +138,19 @@ func (s *SignupService) Start(
 		if identifierType == models.IdentifierEmail {
 			session.Draft.Email = &identifier
 		}
+		if locale != "" {
+			loc := locale
+			session.Draft.Locale = &loc
+		}
 		if err := s.signupRepo.Create(session); err != nil {
 			return nil, fmt.Errorf("create signup session: %w", err)
 		}
+	} else if locale != "" && (session.Draft.Locale == nil || *session.Draft.Locale == "") {
+		// Existing session being reused — backfill locale if it wasn't set yet
+		// (e.g. session created by an older client that didn't ship locale).
+		loc := locale
+		session.Draft.Locale = &loc
+		_ = s.signupRepo.Update(session)
 	}
 
 	// Trigger OTP send (best-effort, but we surface failure — the user can't
@@ -198,9 +208,15 @@ func (s *SignupService) VerifyOTP(
 	}
 
 	// Apply draft FIRST so it persists even on subsequent failure paths.
-	// Idempotent: re-sending the same draft on retry is a no-op.
+	// Idempotent: re-sending the same draft on retry is a no-op. Use the
+	// shared helper that mirrors PatchDraft (bcrypts the raw password,
+	// validates DOB, recomputes completedSteps) — a bare `mergeDraft` was
+	// silently dropping `password` because the merger intentionally skips
+	// PasswordHash (the hashing lives in the caller).
 	if draft != nil {
-		mergeDraft(&session.Draft, draft)
+		if err := s.applyDraftPatch(session, draft); err != nil {
+			return nil, fmt.Errorf("apply draft on verify-otp: %w", err)
+		}
 		if err := s.signupRepo.Update(session); err != nil {
 			return nil, fmt.Errorf("merge draft into session: %w", err)
 		}
@@ -289,36 +305,10 @@ func (s *SignupService) PatchDraft(
 		return nil, "", ErrOTPNotVerified
 	}
 
-	mergeDraft(&session.Draft, patch)
-
-	// Hash password client-side never; hash here once before persisting.
-	// We treat presence of a non-bcrypt-looking PasswordHash field as a raw
-	// password the client just submitted.
-	if patch.PasswordHash != nil && *patch.PasswordHash != "" && !looksLikeBcrypt(*patch.PasswordHash) {
-		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.PasswordHash), bcrypt.DefaultCost)
-		if hashErr != nil {
-			return nil, "", fmt.Errorf("hash password: %w", hashErr)
-		}
-		hashStr := string(hash)
-		session.Draft.PasswordHash = &hashStr
-	}
-	if patch.CreatorPasswordHash != nil && *patch.CreatorPasswordHash != "" && !looksLikeBcrypt(*patch.CreatorPasswordHash) {
-		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.CreatorPasswordHash), bcrypt.DefaultCost)
-		if hashErr != nil {
-			return nil, "", fmt.Errorf("hash creator password: %w", hashErr)
-		}
-		hashStr := string(hash)
-		session.Draft.CreatorPasswordHash = &hashStr
+	if err := s.applyDraftPatch(session, patch); err != nil {
+		return nil, "", err
 	}
 
-	// Validate DOB format if present.
-	if session.Draft.DateOfBirth != nil && *session.Draft.DateOfBirth != "" {
-		if _, err := validation.ParseAndValidateDOB(*session.Draft.DateOfBirth); err != nil {
-			return nil, "", err
-		}
-	}
-
-	session.CompletedSteps = recomputeCompletedSteps(session)
 	if err := s.signupRepo.Update(session); err != nil {
 		return nil, "", fmt.Errorf("update session draft: %w", err)
 	}
@@ -443,8 +433,15 @@ func (s *SignupService) Complete(ctx context.Context, sessionID uuid.UUID) (*Com
 		}
 	}
 
-	// Publish event and clean up the session.
-	go s.publishUserCreated(user)
+	// Publish event and clean up the session. Pass through the wizard's
+	// captured locale so downstream consumers (welcome email, push
+	// notifications, …) render in the user's language instead of falling
+	// back to whatever default they hard-code.
+	locale := ""
+	if session.Draft.Locale != nil {
+		locale = *session.Draft.Locale
+	}
+	go s.publishUserCreated(user, locale)
 	if err := s.signupRepo.Delete(session.ID); err != nil {
 		log.Printf("[SIGNUP] Failed to delete completed session %s: %v", session.ID, err)
 	}
@@ -589,9 +586,54 @@ func appendUnique(arr pq.StringArray, vals ...string) pq.StringArray {
 	return arr
 }
 
+// applyDraftPatch is the full client-draft application: shallow merge of
+// non-password fields via mergeDraft, bcrypt of raw passwords, DOB
+// validation, and a recompute of completedSteps. Both PatchDraft and
+// VerifyOTP go through this so the wire contracts stay equivalent — a
+// previous version of VerifyOTP called only mergeDraft, which silently
+// dropped `password` (the merger intentionally skips PasswordHash because
+// hashing must happen on the server) and left signupComplete failing
+// with "missing required fields" whenever the password rode in on the
+// verify-otp atomic body.
+func (s *SignupService) applyDraftPatch(session *models.SignupSession, patch *models.SignupDraft) error {
+	mergeDraft(&session.Draft, patch)
+
+	// Hash password server-side. We treat presence of a non-bcrypt-looking
+	// PasswordHash field as a raw password the client just submitted.
+	if patch.PasswordHash != nil && *patch.PasswordHash != "" && !looksLikeBcrypt(*patch.PasswordHash) {
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.PasswordHash), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return fmt.Errorf("hash password: %w", hashErr)
+		}
+		hashStr := string(hash)
+		session.Draft.PasswordHash = &hashStr
+	}
+	if patch.CreatorPasswordHash != nil && *patch.CreatorPasswordHash != "" && !looksLikeBcrypt(*patch.CreatorPasswordHash) {
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.CreatorPasswordHash), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return fmt.Errorf("hash creator password: %w", hashErr)
+		}
+		hashStr := string(hash)
+		session.Draft.CreatorPasswordHash = &hashStr
+	}
+
+	// Validate DOB format if present.
+	if session.Draft.DateOfBirth != nil && *session.Draft.DateOfBirth != "" {
+		if _, err := validation.ParseAndValidateDOB(*session.Draft.DateOfBirth); err != nil {
+			return err
+		}
+	}
+
+	session.CompletedSteps = recomputeCompletedSteps(session)
+	return nil
+}
+
 // mergeDraft applies patch onto base, copying only non-nil fields. Slices
 // are replaced wholesale (not appended) so the client can clear them by
 // sending an empty array.
+//
+// PasswordHash is deliberately skipped — callers must bcrypt the raw
+// password (see `applyDraftPatch` for the proper full-merge entry point).
 func mergeDraft(base, patch *models.SignupDraft) {
 	if patch.DisplayName != nil {
 		base.DisplayName = patch.DisplayName
@@ -704,6 +746,18 @@ func (s *SignupService) createManagedCreatorFromDraft(rep *models.User, d *model
 	if err != nil {
 		return nil, err
 	}
+
+	// Managed creators are real accounts, but unlike the representative they
+	// don't pass through the normal signup publish path — so emit user.created
+	// for them here too. social-service handles this event to give the account
+	// its welcome notification AND auto-follow the official ATTO SOUND account;
+	// email-service safely skips the welcome email when there is no email.
+	locale := "en"
+	if d.Locale != nil {
+		locale = *d.Locale
+	}
+	go s.publishUserCreated(managed, locale)
+
 	return &models.LinkedAccountPayload{
 		User:   managed.ToProfile(),
 		Tokens: tokens,
@@ -768,14 +822,18 @@ func (s *SignupService) verifyOTP(identifier string, idType models.IdentifierTyp
 	return nil
 }
 
-func (s *SignupService) publishUserCreated(user *models.User) {
+func (s *SignupService) publishUserCreated(user *models.User, locale string) {
 	idStr := fmt.Sprintf("%d", user.ID)
+	if locale == "" {
+		locale = "en"
+	}
 	eventData := map[string]interface{}{
 		"id":          idStr,
 		"username":    user.Username,
 		"email":       strVal(user.Email),
 		"displayName": user.DisplayName,
 		"role":        string(user.Role),
+		"locale":      locale,
 	}
 	if err := s.producer.Publish(context.Background(), "user.created", idStr, eventData); err != nil {
 		log.Printf("[SIGNUP] Failed to publish user.created: %v", err)
