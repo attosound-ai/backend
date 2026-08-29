@@ -92,8 +92,15 @@ export class AudioProcessorService {
         pcmData.byteLength / 2,
       );
 
-      // Compute RMS amplitudes
-      const count = Math.min(numSamples, 500);
+      // Peak envelope, the model every waveform renderer uses (audiowaveform /
+      // peaks.js / wavesurfer): the absolute PEAK per bucket, not RMS. RMS
+      // flattens transients (a vocal's consonants, drum hits) into a blurry
+      // band, which is why the editor's waveform looked featureless next to a
+      // DAW's. Peaks keep the shape. The bucket count is allowed up to 4000 so
+      // the client can precompute one dense envelope per segment and downsample
+      // it locally for any zoom level (instant zoom, no refetch); the old 500
+      // ceiling was too coarse to survive zooming in.
+      const count = Math.max(1, Math.min(numSamples, 4000));
       const windowSize = Math.floor(samples.length / count);
       if (windowSize === 0) return Array(count).fill(0);
 
@@ -101,13 +108,13 @@ export class AudioProcessorService {
       for (let i = 0; i < count; i++) {
         const start = i * windowSize;
         const end = Math.min(start + windowSize, samples.length);
-        let sumSquares = 0;
+        let peak = 0;
         for (let j = start; j < end; j++) {
-          sumSquares += samples[j] * samples[j];
+          const v = samples[j] < 0 ? -samples[j] : samples[j];
+          if (v > peak) peak = v;
         }
-        const rms = Math.sqrt(sumSquares / (end - start));
         // Normalize to 0-1 range (Int16 max = 32768)
-        amplitudes.push(Math.round((rms / 32768) * 1000) / 1000);
+        amplitudes.push(Math.round((peak / 32768) * 1000) / 1000);
       }
 
       // Cache for ~14 days with jitter
@@ -313,8 +320,60 @@ export class AudioProcessorService {
   }
 
   /**
-   * Export a project by cutting and merging clips per lane,
-   * then mixing lanes together into a single WAV.
+   * Place every clip of one lane at its ABSOLUTE timeline position and sum
+   * them into a single lane file. Gaps between clips are silence.
+   *
+   * This replaced a sequential `concat` by `order`, which ignored
+   * `positionInTimeline` entirely: a take recorded at the playhead (10s in) was
+   * exported glued to 0s, a clip dragged later on the timeline exported where
+   * it used to be, and any gap the editor showed collapsed in the file. It also
+   * makes the editor's region operations (silence / cut / insert time, which
+   * are all "leave a gap") render faithfully, with no schema change.
+   *
+   * ffmpeg graph per clip: atrim is already applied by cutSegment, so each
+   * input gets `volume` (clip gain), `afade` in+out of a few ms (kills the click
+   * a hard cut leaves at a boundary, since the client only snaps to peaks, not
+   * zero crossings) and `adelay` to its position; `amix` then sums with
+   * `normalize=0` so levels are preserved and `duration=longest` so trailing
+   * silence after the last clip is kept.
+   */
+  private async placeClipsOnLane(
+    placed: { file: string; positionMs: number; volume: number }[],
+    outputPath: string,
+  ): Promise<void> {
+    const EDGE_FADE_SEC = 0.004;
+    await new Promise<void>((resolve, reject) => {
+      const cmd = ffmpeg();
+      const chains: string[] = [];
+      placed.forEach((p, i) => {
+        cmd.input(p.file);
+        const vol = Number.isFinite(p.volume) ? Math.max(0, p.volume) : 1;
+        const delayMs = Math.max(0, Math.round(p.positionMs));
+        chains.push(
+          `[${i}:a]volume=${vol.toFixed(4)},` +
+            `afade=t=in:st=0:d=${EDGE_FADE_SEC},` +
+            `areverse,afade=t=in:st=0:d=${EDGE_FADE_SEC},areverse,` +
+            `adelay=${delayMs}:all=1[c${i}]`,
+        );
+      });
+      const mixInputs = placed.map((_, i) => `[c${i}]`).join("");
+      const filter =
+        placed.length === 1
+          ? `${chains[0].replace(`[c0]`, "[out]")}`
+          : `${chains.join(";")};${mixInputs}amix=inputs=${placed.length}:duration=longest:normalize=0[out]`;
+      cmd
+        .complexFilter(filter, "out")
+        .output(outputPath)
+        .outputOptions(["-f", "wav"])
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+  }
+
+  /**
+   * Export a project by cutting each clip, placing it at its timeline
+   * position on its lane, then mixing lanes together into a single WAV.
    */
   async exportProject(
     clips: {
@@ -323,6 +382,8 @@ export class AudioProcessorService {
       endInSegment: number;
       order: number;
       laneIndex?: number;
+      positionInTimeline?: number;
+      volume?: number;
     }[],
     projectId: string,
   ): Promise<{ downloadUrl: string; fileSizeBytes: number }> {
@@ -343,10 +404,15 @@ export class AudioProcessorService {
     const tmpOutput = join(tmpdir(), `export-${randomUUID()}.wav`);
 
     try {
-      // Process each lane: cut clips and concat sequentially
+      // Process each lane: cut every clip, then place each at its absolute
+      // timeline position (gaps = silence). Legacy rows that predate
+      // positionInTimeline (null/undefined) fall back to sequential placement
+      // by `order`, which reproduces the old concat behaviour for them only.
       for (const [, laneClips] of byLane) {
         const sortedClips = [...laneClips].sort((a, b) => a.order - b.order);
-        const cutFiles: string[] = [];
+        const placed: { file: string; positionMs: number; volume: number }[] =
+          [];
+        let sequentialCursorMs = 0;
 
         for (const clip of sortedClips) {
           const segment = await this.segmentRepo.findOne({
@@ -363,15 +429,28 @@ export class AudioProcessorService {
 
           const tmpCut = join(tmpdir(), `clip-${randomUUID()}.wav`);
           await fs.writeFile(tmpCut, cutBuffer);
-          cutFiles.push(tmpCut);
           allTmpFiles.push(tmpCut);
+
+          const hasPosition =
+            typeof clip.positionInTimeline === "number" &&
+            Number.isFinite(clip.positionInTimeline);
+          const positionMs = hasPosition
+            ? clip.positionInTimeline!
+            : sequentialCursorMs;
+          sequentialCursorMs =
+            positionMs + (clip.endInSegment - clip.startInSegment);
+
+          placed.push({
+            file: tmpCut,
+            positionMs,
+            volume: typeof clip.volume === "number" ? clip.volume : 1,
+          });
         }
 
-        if (cutFiles.length === 0) continue;
+        if (placed.length === 0) continue;
 
-        // Concat clips within this lane
         const laneOutput = join(tmpdir(), `lane-${randomUUID()}.wav`);
-        await this.concatFiles(cutFiles, laneOutput);
+        await this.placeClipsOnLane(placed, laneOutput);
         laneFiles.push(laneOutput);
         allTmpFiles.push(laneOutput);
       }
