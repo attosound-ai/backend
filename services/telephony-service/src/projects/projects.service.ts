@@ -344,8 +344,18 @@ export class ProjectsService {
     const saved = await this.clipRepo.save(entities);
 
     // Clean up orphaned segments: segments in this project with no remaining clips
+    // A clip references TWO segments once effects are applied: `segmentId`
+    // (the render it plays) and `sourceSegmentId` (the dry original it can be
+    // reverted to / re-rendered from). Detaching the original here broke
+    // "Remove effects" on the very next autosave.
     const referencedSegmentIds = [
-      ...new Set(clips.map((c) => c.segmentId)),
+      ...new Set(
+        clips.flatMap((c) =>
+          [c.segmentId, c.sourceSegmentId].filter(
+            (id): id is string => typeof id === "string" && id.length > 0,
+          ),
+        ),
+      ),
     ];
     const allSegments = await this.segmentRepo.find({
       where: { projectId },
