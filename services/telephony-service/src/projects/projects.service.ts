@@ -417,7 +417,14 @@ export class ProjectsService {
      * behaviour, so older app builds are unaffected.
      */
     positionInTimeline?: number,
-  ): Promise<TimelineClip> {
+    /**
+     * false = store the audio as a segment ONLY, no clip. Used by the
+     * non-destructive effects flow: the client renders an effected copy of a
+     * clip's audio and needs it as a segment it can point the EXISTING clip at,
+     * not a second clip on the lane. Default true keeps the import behaviour.
+     */
+    createClip = true,
+  ): Promise<TimelineClip | AudioSegment> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
     });
@@ -503,6 +510,16 @@ export class ProjectsService {
         projectId,
       });
       const savedSegment = await this.segmentRepo.save(segment);
+
+      if (!createClip) {
+        this.logger.log(
+          "Segment stored (no clip): project=%s segment=%s duration=%dms",
+          projectId,
+          savedSegment.id,
+          durationMs,
+        );
+        return savedSegment;
+      }
 
       // Create TimelineClip on specified lane
       const existingClips = await this.clipRepo.find({

@@ -201,6 +201,8 @@ export class ProjectsController {
     // strings, hence the parse. Omitted -> unchanged append behaviour, so older
     // clients are unaffected.
     @Body("positionInTimeline") positionInTimeline: string,
+    // "false" = segment only, no clip (effects renders). Anything else = clip.
+    @Body("createClip") createClip: string,
     @Headers("x-user-id") userId: string,
     @Headers("authorization") authHeader: string,
   ) {
@@ -220,6 +222,7 @@ export class ProjectsController {
       Number.isFinite(parsedPosition) && parsedPosition >= 0
         ? parsedPosition
         : undefined,
+      createClip !== "false",
     );
     return { success: true, data: result };
   }
