@@ -314,6 +314,8 @@ export class ProjectsService {
       order: number;
       volume?: number;
       laneIndex?: number;
+      sourceSegmentId?: string | null;
+      effects?: Record<string, unknown> | null;
     }[],
   ): Promise<TimelineClip[]> {
     const project = await this.projectRepo.findOne({
@@ -334,6 +336,8 @@ export class ProjectsService {
         order: clip.order,
         volume: clip.volume ?? 1.0,
         laneIndex: clip.laneIndex ?? 0,
+        sourceSegmentId: clip.sourceSegmentId ?? null,
+        effects: clip.effects ?? null,
       }),
     );
 
