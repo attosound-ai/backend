@@ -7,6 +7,9 @@ services:
   # AUTH routes → User Service (Go)
   - name: auth-service
     url: ${USER_SERVICE_URL}/auth
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: auth-routes
         paths:
@@ -23,6 +26,9 @@ services:
   # Scope enforcement happens inside user-service.
   - name: signup-service
     url: ${USER_SERVICE_URL}/signup
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: signup-routes
         paths:
@@ -40,6 +46,9 @@ services:
   # Both this and user-routes use regex (same priority 0) — order decides winner.
   - name: user-social-service
     url: ${SOCIAL_SERVICE_URL}
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: user-social-routes
         paths:
@@ -56,6 +65,9 @@ services:
   # For /follow paths the social route wins because it is defined first.
   - name: user-service
     url: ${USER_SERVICE_URL}/users
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: user-routes
         paths:
@@ -72,6 +84,9 @@ services:
   # POSTS & FEED routes → Social Service (NestJS)
   - name: posts-service
     url: ${SOCIAL_SERVICE_URL}/api/v1/posts
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: post-routes
         paths:
@@ -87,6 +102,9 @@ services:
   # CREATOR LOGOS routes → Social Service (NestJS)
   - name: creator-logos-service
     url: ${SOCIAL_SERVICE_URL}/api/v1/creator-logos
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: creator-logos-routes
         paths:
@@ -101,6 +119,9 @@ services:
   # NOTIFICATIONS routes → Social Service (NestJS)
   - name: notification-service
     url: ${SOCIAL_SERVICE_URL}/api/v1/notifications
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: notification-routes
         paths:
@@ -115,6 +136,9 @@ services:
   # MESSAGES routes → Chat Service (Elixir/Phoenix)
   - name: chat-service
     url: ${CHAT_SERVICE_URL}/api/v1/messages
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: message-routes
         paths:
@@ -131,6 +155,9 @@ services:
   # Separate service because the upstream URL must NOT include /api/v1/messages
   - name: chat-websocket
     url: ${CHAT_SERVICE_URL}
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: websocket-routes
         paths:
@@ -140,6 +167,9 @@ services:
   # MEDIA routes → Content Service (Rust)
   - name: media-service
     url: ${CONTENT_SERVICE_URL}
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: media-routes
         paths:
@@ -154,6 +184,9 @@ services:
   # CONTENT routes → Content Service (Rust)
   - name: content-service
     url: ${CONTENT_SERVICE_URL}
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: content-routes
         paths:
@@ -172,6 +205,9 @@ services:
   # middleware/admin_auth.rs).
   - name: content-admin
     url: ${CONTENT_SERVICE_URL}
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: content-admin-routes
         paths:
@@ -190,6 +226,9 @@ services:
   # content-service. Auth gate: X-Admin-Token checked inside the service.
   - name: payment-admin
     url: ${PAYMENT_SERVICE_URL}
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: payment-admin-routes
         paths:
@@ -207,6 +246,9 @@ services:
   # OTP routes → OTP Service (Go)
   - name: otp-service
     url: ${OTP_SERVICE_URL}/otp
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: otp-routes
         paths:
@@ -219,6 +261,9 @@ services:
   # PAYMENT routes → Payment Service (Python)
   - name: payment-service
     url: ${PAYMENT_SERVICE_URL}/payments
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: payment-routes
         paths:
@@ -233,6 +278,9 @@ services:
   # TELEPHONY webhooks → direct (no JWT, validated by Twilio signature)
   - name: telephony-webhooks
     url: ${TELEPHONY_SERVICE_URL}/telephony/webhooks
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: telephony-webhook-routes
         paths:
@@ -245,6 +293,9 @@ services:
   # TELEPHONY API → authenticated
   - name: telephony-service
     url: ${TELEPHONY_SERVICE_URL}/telephony
+    # A dead or stale address must fail in seconds, not hang for Kong's 60 s
+    # default while the app gives up at 15 s (Sep 19 2026 media/sign stall).
+    connect_timeout: 5000
     routes:
       - name: telephony-api-routes
         paths:
