@@ -178,6 +178,26 @@ services:
           - DELETE
           - OPTIONS
 
+  # PAYMENT ADMIN routes → Payment Service (Python). Plan catalog and
+  # business metrics. Longer path prefixes win in Kong, so these three
+  # paths route here while every other /api/v1/admin path still reaches
+  # content-service. Auth gate: X-Admin-Token checked inside the service.
+  - name: payment-admin
+    url: http://payment-service:8000
+    routes:
+      - name: payment-admin-routes
+        paths:
+          - /api/v1/admin/plans
+          - /api/v1/admin/entitlements
+          - /api/v1/admin/metrics
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+
   # OTP routes → OTP Service (Go)
   - name: otp-service
     url: http://otp-service:8000/otp

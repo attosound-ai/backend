@@ -1,17 +1,17 @@
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import plan_catalog
 from app.config import settings
 from app.kafka.producer import publish_event
 from app.models.subscription import Subscription
 from app.models.transaction import Transaction
 from app.repositories.transaction_repo import TransactionRepository
-from app.entitlements import get_entitlements
 from app.schemas.subscription import (
     CancelSubscriptionResponse,
     PendingPlanChange,
@@ -26,26 +26,8 @@ TOPIC_PAYMENT_COMPLETED = "payment.completed"
 TOPIC_PAYMENT_FAILED = "payment.failed"
 TOPIC_SUBSCRIPTION_CANCELLED = "subscription.cancelled"
 
-# Plan configuration
-PLAN_DURATIONS_DAYS: dict[str, int] = {
-    "connect_free": 36500,  # ~100 years (effectively unlimited)
-    "record": 365,
-    "record_pro": 365,
-    "connect_pro": 365,
-    # Legacy mappings (for in-flight subscriptions)
-    "free": 36500,
-    "annual": 365,
-}
-
-PLAN_PRICES: dict[str, Decimal] = {
-    "connect_free": Decimal("0.00"),
-    "record": Decimal("99.00"),
-    "record_pro": Decimal("139.00"),
-    "connect_pro": Decimal("1999.00"),
-    # Legacy
-    "free": Decimal("0.00"),
-    "annual": Decimal("99.00"),
-}
+# Plan prices, durations and entitlements come from app.plan_catalog
+# (database backed). Nothing about plans is hardcoded here anymore.
 
 
 def _txn_to_response(txn: Transaction) -> TransactionResponse:
@@ -65,7 +47,7 @@ def _txn_to_response(txn: Transaction) -> TransactionResponse:
     )
 
 
-def _sub_to_response(sub: Subscription) -> SubscriptionResponse:
+def _sub_to_response(sub: Subscription, entitlements: frozenset[str] | set[str]) -> SubscriptionResponse:
     """Convert a Subscription ORM model to an API response schema."""
     plan_str = sub.plan if isinstance(sub.plan, str) else sub.plan.value
     pending = None
@@ -82,7 +64,7 @@ def _sub_to_response(sub: Subscription) -> SubscriptionResponse:
         starts_at=sub.starts_at.isoformat() if sub.starts_at else "",
         expires_at=sub.expires_at.isoformat() if sub.expires_at else "",
         transaction_id=str(sub.transaction_id) if sub.transaction_id else None,
-        entitlements=sorted(e.value for e in get_entitlements(plan_str)),
+        entitlements=sorted(entitlements),
         pending_change=pending,
         created_at=sub.created_at.isoformat() if sub.created_at else "",
         updated_at=sub.updated_at.isoformat() if sub.updated_at else "",
@@ -95,6 +77,11 @@ class PaymentService:
     def __init__(self, session: AsyncSession) -> None:
         self.repo = TransactionRepository(session)
         self.session = session
+
+    async def _to_response(self, sub: Subscription) -> SubscriptionResponse:
+        plan_str = sub.plan if isinstance(sub.plan, str) else sub.plan.value
+        entitlements = await plan_catalog.entitlements_for(self.session, plan_str)
+        return _sub_to_response(sub, entitlements)
 
     # ── Transactions ──────────────────────────────────────────────
 
@@ -175,9 +162,9 @@ class PaymentService:
         2. If the plan has a cost, create a payment transaction.
         3. Create the new subscription record.
         """
-        price = PLAN_PRICES.get(plan, Decimal("9.99"))
-        duration_days = PLAN_DURATIONS_DAYS.get(plan, 30)
-        now = datetime.now(timezone.utc)
+        price = await plan_catalog.price_decimal(self.session, plan)
+        duration_days = await plan_catalog.duration_days(self.session, plan)
+        now = datetime.now(UTC)
 
         # Cancel existing active subscriptions
         await self.repo.deactivate_user_subscriptions(user_id)
@@ -223,7 +210,7 @@ class PaymentService:
         logger.info(
             "Subscription %s created for user %s, plan=%s", sub.id, user_id, plan
         )
-        return _sub_to_response(sub)
+        return await self._to_response(sub)
 
     async def get_active_subscription(
         self, user_id: str
@@ -239,7 +226,7 @@ class PaymentService:
         if not sub:
             return None
         sub = await materialize_pending_if_due(self.repo, sub)
-        return _sub_to_response(sub)
+        return await self._to_response(sub)
 
     async def cancel_subscription(
         self, user_id: str
@@ -283,21 +270,23 @@ class PaymentService:
                 "User %s already has active subscription %s (plan=%s), skipping free tier",
                 user_id, existing.id, existing.plan,
             )
-            return _sub_to_response(existing)
+            return await self._to_response(existing)
 
-        now = datetime.now(timezone.utc)
+        free_plan = await plan_catalog.free_plan_key(self.session)
+        duration = await plan_catalog.duration_days(self.session, free_plan)
+        now = datetime.now(UTC)
         sub = Subscription(
             id=uuid4(),
             user_id=user_id,
-            plan="connect_free",
+            plan=free_plan,
             starts_at=now,
-            expires_at=now + timedelta(days=PLAN_DURATIONS_DAYS["connect_free"]),
+            expires_at=now + timedelta(days=duration),
             status="active",
             transaction_id=None,
         )
         sub = await self.repo.create_subscription(sub)
         logger.info("Free subscription created for new user %s", user_id)
-        return _sub_to_response(sub)
+        return await self._to_response(sub)
 
     # ── Stripe webhook helpers ────────────────────────────────────
 
@@ -314,8 +303,12 @@ class PaymentService:
         event is received.  This records the transaction and activates the
         corresponding subscription.
         """
-        duration_days = PLAN_DURATIONS_DAYS.get(plan_id, 30)
-        now = datetime.now(timezone.utc)
+        # Unknown plan ids from Stripe metadata fall back to the seed paid plan.
+        if not await plan_catalog.get_plan(self.session, plan_id):
+            logger.warning("Webhook carried unknown plan %s, storing record instead", plan_id)
+            plan_id = "record"
+        duration_days = await plan_catalog.duration_days(self.session, plan_id)
+        now = datetime.now(UTC)
 
         # Cancel existing active subscriptions
         await self.repo.deactivate_user_subscriptions(user_id)
@@ -350,7 +343,7 @@ class PaymentService:
         sub = Subscription(
             id=uuid4(),
             user_id=user_id,
-            plan=plan_id if plan_id in ("connect_free", "record", "record_pro", "connect_pro") else "record",
+            plan=plan_id,
             starts_at=now,
             expires_at=now + timedelta(days=duration_days),
             status="active",
@@ -364,7 +357,7 @@ class PaymentService:
             user_id,
             plan_id,
         )
-        return _sub_to_response(sub)
+        return await self._to_response(sub)
 
     # ── Bridge number ─────────────────────────────────────────────
 

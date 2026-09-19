@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     # JWT (shared with user-service for token validation)
     jwt_secret: str = "change-me-in-production"
 
+    # Shared secret for the admin API (X-Admin-Token header). Same value as
+    # the content service uses. Empty means every admin request is refused.
+    admin_api_secret: str = ""
+
     # Twilio (bridge numbers)
     twilio_bridge_number: str = ""
 

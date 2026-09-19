@@ -12,12 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import plan_catalog
 from app.database import get_session
 from app.middleware.auth import get_current_user_id
 from app.schemas.payment import BridgeNumberResponse, CheckoutRequest, CheckoutResponse, ConfirmPaymentRequest
 from app.schemas.transaction import ApiResponse
-from app.services.payment_service import PaymentService
 from app.services import stripe_service
+from app.services.payment_service import PaymentService
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ async def checkout(
     target_user = body.for_user_id or user_id
     try:
         result = await stripe_service.create_checkout_session(
+            session,
             user_id=target_user,
             plan_id=body.plan_id,
             email=body.email,
@@ -189,7 +191,8 @@ async def confirm_payment(
     # If a paid subscription already exists, re-publish the event to retry provisioning
     # (handles cases where telephony-service failed on the first attempt).
     existing = await svc.get_active_subscription(target_user)
-    if not existing or existing.plan == "connect_free":
+    existing_price = await plan_catalog.price_cents(session, existing.plan) if existing else 0
+    if not existing or existing_price <= 0:
         await svc.create_subscription_from_webhook(
             user_id=target_user,
             plan_id=plan_id,

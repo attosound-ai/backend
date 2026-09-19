@@ -1,11 +1,19 @@
 import jwt
-from fastapi import Request, HTTPException
+from fastapi import HTTPException, Request
 
 from app.config import settings
 
 # signup_pending tokens are scoped to /signup/* on user-service. Reject them
 # anywhere else with 403 — the token is valid, the route is just out of scope.
 SCOPE_SIGNUP_PENDING = "signup_pending"
+
+# Payment paths served without a JWT.
+PUBLIC_PAYMENT_PATHS = frozenset(
+    {
+        "/payments/subscriptions/plans",
+        "/payments/subscriptions/paywall",
+    }
+)
 
 
 def _decode_token(authorization: str) -> dict:
@@ -23,10 +31,10 @@ def _decode_token(authorization: str) -> dict:
             algorithms=["HS256"],
             options={"verify_iss": False},
         )
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail="Token expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
 
     if not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Token missing subject")
@@ -105,7 +113,9 @@ class AuthMiddleware:
             req = StarletteRequest(scope, receive)
             path = req.url.path
 
-            # Enforce auth on payment routes (skip webhook, plans listing, and health).
+            # Enforce auth on payment routes (skip webhook, the public plan
+            # catalog endpoints, and health). Admin routes live under
+            # /api/v1/admin and carry their own shared secret check.
             # JWT-only: the X-User-ID fallback was removed as part of the Bug
             # #6 hardening pass. A request lacking Authorization is rejected
             # here even if it carries an X-User-ID header (which Kong already
@@ -113,7 +123,7 @@ class AuthMiddleware:
             needs_auth = (
                 path.startswith("/payments/")
                 and not path.endswith("/webhook")
-                and path != "/payments/subscriptions/plans"
+                and path not in PUBLIC_PAYMENT_PATHS
             )
             if needs_auth:
                 authorization = req.headers.get("Authorization")

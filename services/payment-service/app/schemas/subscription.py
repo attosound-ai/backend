@@ -1,7 +1,9 @@
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
+
+# Plan keys are validated against the database catalog in the routers, so the
+# request schemas only enforce the key format here.
+PLAN_KEY_PATTERN = r"^[a-z][a-z0-9_]{1,63}$"
 
 
 class CreateSubscriptionRequest(BaseModel):
@@ -9,9 +11,7 @@ class CreateSubscriptionRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    plan: Literal["connect_free", "record", "record_pro", "connect_pro"] = Field(
-        description="Subscription plan to activate"
-    )
+    plan: str = Field(pattern=PLAN_KEY_PATTERN, description="Subscription plan to activate")
     for_user_id: str | None = Field(
         default=None,
         alias="forUserId",
@@ -24,8 +24,8 @@ class UpgradeSubscriptionRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    target_plan: Literal["record", "record_pro", "connect_pro"] = Field(
-        alias="targetPlan", description="Target plan to upgrade to"
+    target_plan: str = Field(
+        alias="targetPlan", pattern=PLAN_KEY_PATTERN, description="Target plan to upgrade to"
     )
     email: str = Field(description="Customer email address")
     for_user_id: str | None = Field(
@@ -79,9 +79,7 @@ class ChangePlanRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    target_plan: Literal["connect_free", "record", "record_pro", "connect_pro"] = Field(
-        alias="targetPlan"
-    )
+    target_plan: str = Field(alias="targetPlan", pattern=PLAN_KEY_PATTERN)
     email: str = Field(default="", description="Customer email address (required for upgrades)")
 
 
