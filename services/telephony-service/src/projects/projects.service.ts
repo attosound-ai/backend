@@ -7,6 +7,32 @@ import { TimelineClip } from "../entities/timeline-clip.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
 import { AudioStorageService } from "../media/audio-storage.service";
 import { AudioProcessorService } from "./audio-processor.service";
+import { AnalyticsService } from "../analytics/analytics.service";
+
+/**
+ * Mirror of the app's lane mixer rules (front laneMixer.computeLaneEffectiveVolume)
+ * so the exported WAV matches the editor preview:
+ *   1. muted lane        -> 0
+ *   2. any lane soloed and this one is not -> 0
+ *   3. otherwise         -> clipVolume * 10^(gainDb / 20), floored to 0 below -60 dB
+ */
+type LaneMix = { gainDb?: number; muted?: boolean; solo?: boolean };
+const DB_MIN = -60;
+const dbToLinear = (db: number): number => Math.pow(10, db / 20);
+function mixVolume(
+  clipVolume: number,
+  lane: LaneMix | undefined,
+  anySolo: boolean,
+): number {
+  if (lane?.muted) return 0;
+  if (anySolo && !lane?.solo) return 0;
+  const gainDb =
+    typeof lane?.gainDb === "number" && Number.isFinite(lane.gainDb)
+      ? lane.gainDb
+      : 0;
+  const effective = Math.max(0, clipVolume) * dbToLinear(gainDb);
+  return effective < dbToLinear(DB_MIN) ? 0 : effective;
+}
 import { promises as fs } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -34,6 +60,7 @@ export class ProjectsService {
     private readonly segmentRepo: Repository<AudioSegment>,
     private readonly storageService: AudioStorageService,
     private readonly audioProcessor: AudioProcessorService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   async createProject(
@@ -405,7 +432,49 @@ export class ProjectsService {
       order: { order: "ASC" },
     });
 
-    const result = await this.audioProcessor.exportProject(clips, projectId);
+    // Fold each lane's mixer state (gain dB, mute, solo) into the per clip
+    // volume the ffmpeg graph applies. The editor preview already does exactly
+    // this; before, the export only used the raw clip volume, so lowering a
+    // lane's gain changed what the user heard while editing but not what got
+    // posted ("still loud after I turned it down", Sep 2026).
+    const lanes = (project.lanes ?? {}) as Record<string, LaneMix | undefined>;
+    const anySolo = Object.values(lanes).some((l) => l?.solo === true);
+    const mixed = clips.map((clip) => ({
+      ...clip,
+      volume: mixVolume(
+        typeof clip.volume === "number" ? clip.volume : 1,
+        lanes[String(clip.laneIndex ?? 0)],
+        anySolo,
+      ),
+    }));
+
+    const laneSummary = Object.entries(lanes).map(([idx, l]) => ({
+      lane: Number(idx),
+      gain_db: l?.gainDb ?? 0,
+      muted: l?.muted === true,
+      solo: l?.solo === true,
+      clips: clips.filter((c) => String(c.laneIndex ?? 0) === idx).length,
+    }));
+    const silenced = mixed.filter((c) => c.volume === 0).length;
+    this.logger.log(
+      `Export mix ${projectId}: clips=${clips.length} anySolo=${anySolo} silenced=${silenced} lanes=${JSON.stringify(laneSummary)}`,
+    );
+    // Same shape as the app's project_export_mix_snapshot so intent (client)
+    // and render (server) diff in one PostHog query by project_id.
+    this.analytics.capture(userId, "backend_project_export_mix", {
+      project_id: projectId,
+      clip_count: clips.length,
+      lanes: laneSummary,
+      any_solo: anySolo,
+      lanes_with_gain: laneSummary.filter((l) => l.gain_db !== 0).length,
+      clips_non_unity_volume: clips.filter(
+        (c) => typeof c.volume === "number" && c.volume !== 1,
+      ).length,
+      clips_silenced: silenced,
+      effective_volumes: mixed.map((c) => Number(c.volume.toFixed(4))),
+    });
+
+    const result = await this.audioProcessor.exportProject(mixed, projectId);
 
     // Update project status
     project.status = "exported";
