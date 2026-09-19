@@ -407,12 +407,68 @@ func (s *SignupService) Complete(ctx context.Context, sessionID uuid.UUID) (*Com
 
 	creds := &models.UserCredentials{PasswordHash: *d.PasswordHash}
 
-	if err := s.userRepo.CreateUserWithCredentials(user, creds); err != nil {
-		// Most likely cause: unique constraint race on username or phone.
-		if strings.Contains(err.Error(), "users_username") || strings.Contains(err.Error(), "duplicate key") {
-			return nil, ErrUsernameTaken
+	// A representative exists to manage a creator (an inmate with no login of
+	// their own). Persist BOTH atomically so a representative can never be left
+	// orphaned without its creator — the Sep 2026 incident, where the creator
+	// INSERT collided on idx_users_email and its failure was only logged while
+	// the representative persisted. A representative whose draft is missing the
+	// creator details is an upstream bug: fail loudly rather than create a half
+	// account.
+	var linkedAccount *models.LinkedAccountPayload
+	isRepWithCreator := user.Role == models.RoleRepresentative && d.InmateNumber != nil
+
+	if isRepWithCreator {
+		if d.CreatorUsername == nil || d.CreatorDisplayName == nil ||
+			d.CreatorPasswordHash == nil || d.InmateState == nil {
+			return nil, ErrMissingRequired
 		}
-		return nil, fmt.Errorf("create user from session: %w", err)
+		fields := &models.ManagedCreatorFields{
+			Username:         *d.CreatorUsername,
+			DisplayName:      *d.CreatorDisplayName,
+			Email:            strVal(d.CreatorEmail),
+			PhoneCountryCode: d.CreatorPhoneCountryCode,
+			PhoneNumber:      d.CreatorPhoneNumber,
+			Avatar:           d.CreatorAvatar,
+			CreatorTypes:     d.CreatorTypes,
+			CreatorGenres:    d.CreatorGenres,
+		}
+		consent := false
+		if d.ConsentToRecording != nil {
+			consent = *d.ConsentToRecording
+		}
+		creator, err := s.userRepo.CreateRepresentativeWithManagedCreator(
+			user, creds, fields, *d.CreatorPasswordHash, *d.InmateNumber, *d.InmateState, consent,
+		)
+		if err != nil {
+			if strings.Contains(err.Error(), "users_username") || strings.Contains(err.Error(), "duplicate key") {
+				return nil, ErrUsernameTaken
+			}
+			return nil, fmt.Errorf("create representative + managed creator: %w", err)
+		}
+		creatorTokens, err := s.jwtMgr.GenerateTokenPair(creator)
+		if err != nil {
+			return nil, fmt.Errorf("generate creator tokens: %w", err)
+		}
+		// Managed creators don't traverse the normal publish path; emit
+		// user.created so social-service (welcome + auto-follow) and
+		// email-service run their onboarding for the creator too.
+		creatorLocale := "en"
+		if d.Locale != nil {
+			creatorLocale = *d.Locale
+		}
+		go s.publishUserCreated(creator, creatorLocale)
+		linkedAccount = &models.LinkedAccountPayload{
+			User:   creator.ToProfile(),
+			Tokens: creatorTokens,
+		}
+	} else {
+		if err := s.userRepo.CreateUserWithCredentials(user, creds); err != nil {
+			// Most likely cause: unique constraint race on username or phone.
+			if strings.Contains(err.Error(), "users_username") || strings.Contains(err.Error(), "duplicate key") {
+				return nil, ErrUsernameTaken
+			}
+			return nil, fmt.Errorf("create user from session: %w", err)
+		}
 	}
 
 	result := &CompleteResult{User: user.ToProfile()}
@@ -423,15 +479,7 @@ func (s *SignupService) Complete(ctx context.Context, sessionID uuid.UUID) (*Com
 		return nil, fmt.Errorf("generate tokens: %w", err)
 	}
 	result.Tokens = tokens
-
-	// Optional managed creator account (representative path).
-	if user.Role == models.RoleRepresentative && d.InmateNumber != nil {
-		if linked, err := s.createManagedCreatorFromDraft(user, &d); err == nil && linked != nil {
-			result.LinkedAccount = linked
-		} else if err != nil {
-			log.Printf("[SIGNUP] Managed creator creation failed for rep %d: %v", user.ID, err)
-		}
-	}
+	result.LinkedAccount = linkedAccount
 
 	// Publish event and clean up the session. Pass through the wizard's
 	// captured locale so downstream consumers (welcome email, push
@@ -717,51 +765,6 @@ func looksLikeBcrypt(s string) bool {
 		return false
 	}
 	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
-}
-
-func (s *SignupService) createManagedCreatorFromDraft(rep *models.User, d *models.SignupDraft) (*models.LinkedAccountPayload, error) {
-	if d.CreatorUsername == nil || d.CreatorDisplayName == nil || d.CreatorPasswordHash == nil ||
-		d.InmateNumber == nil || d.InmateState == nil {
-		return nil, nil
-	}
-	fields := &models.ManagedCreatorFields{
-		Username:         *d.CreatorUsername,
-		DisplayName:      *d.CreatorDisplayName,
-		Email:            strVal(d.CreatorEmail),
-		PhoneCountryCode: d.CreatorPhoneCountryCode,
-		PhoneNumber:      d.CreatorPhoneNumber,
-		Avatar:           d.CreatorAvatar,
-		CreatorTypes:     d.CreatorTypes,
-		CreatorGenres:    d.CreatorGenres,
-	}
-	consent := false
-	if d.ConsentToRecording != nil {
-		consent = *d.ConsentToRecording
-	}
-	managed, err := s.userRepo.CreateManagedCreator(rep, fields, *d.CreatorPasswordHash, *d.InmateNumber, *d.InmateState, consent)
-	if err != nil {
-		return nil, err
-	}
-	tokens, err := s.jwtMgr.GenerateTokenPair(managed)
-	if err != nil {
-		return nil, err
-	}
-
-	// Managed creators are real accounts, but unlike the representative they
-	// don't pass through the normal signup publish path — so emit user.created
-	// for them here too. social-service handles this event to give the account
-	// its welcome notification AND auto-follow the official ATTO SOUND account;
-	// email-service safely skips the welcome email when there is no email.
-	locale := "en"
-	if d.Locale != nil {
-		locale = *d.Locale
-	}
-	go s.publishUserCreated(managed, locale)
-
-	return &models.LinkedAccountPayload{
-		User:   managed.ToProfile(),
-		Tokens: tokens,
-	}, nil
 }
 
 func (s *SignupService) sendOTP(identifier string, idType models.IdentifierType, locale string) error {
