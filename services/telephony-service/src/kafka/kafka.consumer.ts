@@ -185,12 +185,29 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     if (userIds.length === 0) return;
 
     for (const userId of userIds) {
-      // 1. Release Twilio number (in-memory lookup, doesn't depend on DB).
+      // 1. Give the number back for good. A real Twilio number is deleted
+      //    from the account (it bills while it exists); a dev placeholder
+      //    returns to the pool. Runs BEFORE the row purge below so the
+      //    provisioned row is still there to find.
       try {
-        await this.numberProvisioning.releaseNumber(userId);
-        this.logger.log(`Released Twilio number for deleted user ${userId}`);
+        const released =
+          await this.numberProvisioning.releaseNumbersForDeletedUser(userId);
+        if (released.length > 0) {
+          this.logger.log(
+            `Released ${released.join(", ")} for deleted user ${userId}`,
+          );
+          this.analytics.capture(userId, "backend_number_released_on_delete", {
+            phone_numbers: released,
+          });
+        }
       } catch (err) {
-        this.logger.warn(`No Twilio number to release for user ${userId}: ${err}`);
+        this.logger.error(
+          `Failed to release Twilio number for deleted user ${userId}: ${err}`,
+        );
+        this.analytics.capture(userId, "backend_number_release_failed", {
+          reason: err instanceof Error ? err.message : String(err),
+          trigger: "user_deleted",
+        });
       }
 
       // 2. Delete S3/MinIO audio files for this user.
