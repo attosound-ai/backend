@@ -18,10 +18,11 @@ use cloudinary::{CloudinaryClient, CloudinaryConfig};
 use config::Config;
 use grpc::ContentGrpcServer;
 use handlers::{
-    app_icon_handler, chat_wallpaper_handler, content_handler, health_handler, media_handler,
+    app_icon_handler, app_logo_handler, chat_wallpaper_handler, content_handler, health_handler,
+    media_handler,
 };
 use kafka::KafkaProducer;
-use repositories::{AppIconRepository, ChatWallpaperRepository, ContentRepository};
+use repositories::{AppIconRepository, AppLogoRepository, ChatWallpaperRepository, ContentRepository};
 use services::ContentService;
 
 #[actix_web::main]
@@ -52,6 +53,11 @@ async fn main() -> std::io::Result<()> {
     // boot. Idempotent — safe to run on every restart.
     if let Err(err) = app_icon_repo.ensure_indexes().await {
         log::error!("Failed to ensure app_icons indexes: {}", err);
+    }
+    let app_logo_repo = AppLogoRepository::new(&db);
+    // Unique `key` index so the main-logo singleton can never fork. Idempotent.
+    if let Err(err) = app_logo_repo.ensure_indexes().await {
+        log::error!("Failed to ensure app_logo indexes: {}", err);
     }
     let kafka_producer = KafkaProducer::new(&config.kafka_brokers);
     let content_service = ContentService::new(repo, kafka_producer);
@@ -91,6 +97,7 @@ async fn main() -> std::io::Result<()> {
     let service_data = web::Data::new(content_service);
     let wallpaper_repo_data = web::Data::new(wallpaper_repo);
     let app_icon_repo_data = web::Data::new(app_icon_repo);
+    let app_logo_repo_data = web::Data::new(app_logo_repo);
     let cloudinary_data = web::Data::new(cloudinary_client);
 
     info!("HTTP server listening on 0.0.0.0:{}", http_port);
@@ -101,6 +108,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(service_data.clone())
             .app_data(wallpaper_repo_data.clone())
             .app_data(app_icon_repo_data.clone())
+            .app_data(app_logo_repo_data.clone())
             .app_data(cloudinary_data.clone())
             .service(health_handler::health_check)
             .service(media_handler::sign_upload)
@@ -111,6 +119,9 @@ async fn main() -> std::io::Result<()> {
             .service(app_icon_handler::admin_list_app_icons)
             .service(app_icon_handler::admin_create_app_icon)
             .service(app_icon_handler::admin_delete_app_icon)
+            .service(app_logo_handler::get_app_logo)
+            .service(app_logo_handler::admin_get_app_logo)
+            .service(app_logo_handler::admin_set_app_logo)
             .service(content_handler::create_content)
             .service(content_handler::search_content)
             .service(content_handler::get_content)
