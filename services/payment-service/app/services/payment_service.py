@@ -359,6 +359,58 @@ class PaymentService:
         )
         return await self._to_response(sub)
 
+    async def select_plan_without_payment(self, user_id: str, plan_key: str) -> SubscriptionResponse:
+        """Switch the user to ``plan_key`` with no charge (testing period).
+
+        The caller has already checked the feature switch and that the plan is
+        active. The bridge number travels with the user: losing it on every
+        switch would strand a creator mid test, and telephony keys the number
+        by user, not by subscription. A zero amount transaction records the
+        switch so the ledger shows why a paid plan has no payment behind it.
+        """
+        current = await self.repo.get_active_subscription(user_id)
+        if current and current.plan == plan_key:
+            return await self._to_response(current)
+
+        carried_number = None
+        if current and current.bridge_number and not current.bridge_number.startswith("FAILED:"):
+            carried_number = current.bridge_number
+
+        duration_days = await plan_catalog.duration_days(self.session, plan_key)
+        now = datetime.now(UTC)
+        await self.repo.deactivate_user_subscriptions(user_id)
+
+        txn = Transaction(
+            id=uuid4(),
+            user_id=user_id,
+            amount=Decimal("0.00"),
+            currency="USD",
+            type="subscription",
+            status="completed",
+            reference_id=None,
+            description=f"Plan selected without payment (testing period): {plan_key}",
+        )
+        txn = await self.repo.create_transaction(txn)
+
+        sub = Subscription(
+            id=uuid4(),
+            user_id=user_id,
+            plan=plan_key,
+            starts_at=now,
+            expires_at=now + timedelta(days=duration_days),
+            status="active",
+            transaction_id=txn.id,
+            bridge_number=carried_number,
+        )
+        sub = await self.repo.create_subscription(sub)
+        logger.info(
+            "Plan selected without payment user=%s plan=%s previous=%s",
+            user_id,
+            plan_key,
+            current.plan if current else None,
+        )
+        return await self._to_response(sub)
+
     # ── Bridge number ─────────────────────────────────────────────
 
     async def get_bridge_number(self, user_id: str) -> tuple[str | None, str]:

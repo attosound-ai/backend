@@ -89,3 +89,16 @@ class CancelSubscriptionResponse(BaseModel):
     id: str
     status: str
     message: str
+
+
+class SelectPlanRequest(BaseModel):
+    """Request body for picking a plan with no payment (testing period)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    plan: str = Field(pattern=PLAN_KEY_PATTERN, description="Plan to switch to")
+    for_user_id: str | None = Field(
+        default=None,
+        alias="forUserId",
+        description="Optional: switch the plan of this linked creator (representatives only)",
+    )

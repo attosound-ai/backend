@@ -2,12 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import plan_catalog
+from app.config import settings
 from app.database import get_session
-from app.middleware.auth import get_current_user_id, require_creator
+from app.middleware.auth import get_current_user_id, get_current_user_role, require_creator
 from app.plan_catalog import PlanRow
 from app.schemas.subscription import (
     ChangePlanRequest,
     CreateSubscriptionRequest,
+    SelectPlanRequest,
     SubscriptionResponse,
     UpgradeSubscriptionRequest,
 )
@@ -116,6 +118,8 @@ async def get_paywall(session: AsyncSession = Depends(get_session)) -> ApiRespon
     return ApiResponse(
         success=True,
         data={
+            # The app shows its plan picker when this is on (testing period).
+            "freeSwitching": settings.free_plan_switching,
             "required": len(paid) > 0,
             "freePlan": await plan_catalog.free_plan_key(session),
             "paidFeatures": paid,
@@ -134,6 +138,36 @@ async def get_my_entitlements(
     plan = sub.plan if sub else await plan_catalog.free_plan_key(session)
     entitlements = sorted(await plan_catalog.entitlements_for(session, plan))
     return ApiResponse(success=True, data={"plan": plan, "entitlements": entitlements})
+
+
+@router.post("/me/select-plan", response_model=ApiResponse)
+async def select_plan(
+    body: SelectPlanRequest,
+    user_id: str = Depends(get_current_user_id),
+    role: str = Depends(get_current_user_role),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Pick any active plan with no payment, while the testing switch is on.
+
+    Any account may switch its own plan. A representative may switch the plan
+    of the creator it manages through `forUserId`.
+    """
+    if not settings.free_plan_switching:
+        raise HTTPException(status_code=403, detail="Plan selection without payment is turned off")
+    if body.for_user_id and body.for_user_id != user_id and role != "representative":
+        raise HTTPException(status_code=403, detail="Only a representative can switch a linked creator")
+
+    target_user = body.for_user_id or user_id
+    await _require_active_plan(session, body.plan)
+    svc = PaymentService(session)
+    sub = await svc.select_plan_without_payment(target_user, body.plan)
+    # The new plan may grant a bridge number the old one did not. Numbers are
+    # for creators only: a creator's own switch, or a representative acting
+    # for the creator it manages. A listener never gets one provisioned.
+    if role == "creator" or (role == "representative" and target_user != user_id):
+        await svc.claim_bridge_number(target_user)
+    sub_now = await svc.get_active_subscription(target_user)
+    return ApiResponse(success=True, data=(sub_now or sub).model_dump(by_alias=True, mode="json"))
 
 
 @router.post("/me/upgrade", response_model=ApiResponse)

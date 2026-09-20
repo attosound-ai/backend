@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # the content service uses. Empty means every admin request is refused.
     admin_api_secret: str = ""
 
+    # Testing period: any account may pick any active plan from its profile
+    # with no payment. Off by default so a missing variable can never give
+    # paid plans away; turn on with FREE_PLAN_SWITCHING=true.
+    free_plan_switching: bool = False
+
     # Twilio (bridge numbers)
     twilio_bridge_number: str = ""
 
