@@ -381,6 +381,44 @@ class PaymentService:
             return sub.bridge_number, "assigned"
         return None, "provisioning"
 
+    async def claim_bridge_number(self, user_id: str) -> tuple[str | None, str]:
+        """Ask for the bridge number a plan grants without a payment.
+
+        Provisioning used to hang off ``payment.completed`` alone, so when the
+        admin gives the free plan the bridge number nobody ever asked the
+        telephony service for one. This is the payment free trigger: it checks
+        the entitlement, publishes the same event, and reports the status.
+        Safe to repeat: telephony hands back the number a user already holds.
+
+        Returns ``(None, 'not_entitled')`` when the plan has no bridge number.
+        """
+        sub = await self.repo.get_active_subscription(user_id)
+        if not sub:
+            await self.create_free_subscription(user_id)
+            sub = await self.repo.get_active_subscription(user_id)
+        plan = sub.plan if sub else await plan_catalog.free_plan_key(self.session)
+        entitlements = await plan_catalog.entitlements_for(self.session, plan)
+        if "bridge_number" not in entitlements:
+            logger.info("claim_bridge_number user=%s plan=%s not entitled", user_id, plan)
+            return None, "not_entitled"
+
+        if sub and sub.bridge_number and not sub.bridge_number.startswith("FAILED:"):
+            return sub.bridge_number, "assigned"
+
+        await publish_event(
+            TOPIC_PAYMENT_COMPLETED,
+            {
+                "event_type": TOPIC_PAYMENT_COMPLETED,
+                "subscription_id": str(sub.id) if sub else "",
+                "user_id": user_id,
+                "amount": "0",
+                "currency": "USD",
+                "type": "plan_entitlement",
+            },
+        )
+        logger.info("claim_bridge_number user=%s plan=%s provisioning requested", user_id, plan)
+        return None, "provisioning"
+
     async def update_bridge_number(self, user_id: str, phone_number: str) -> None:
         """Set the bridge number on the user's active subscription.
 
