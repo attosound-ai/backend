@@ -24,4 +24,8 @@ export class UpdateProjectDto {
   @IsOptional()
   @IsObject()
   lanes?: Record<string, { name: string; color: string }>;
+
+  @IsOptional()
+  @IsObject()
+  settings?: Record<string, unknown>;
 }

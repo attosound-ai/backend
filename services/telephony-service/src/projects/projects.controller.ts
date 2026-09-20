@@ -1,3 +1,4 @@
+import type { ExportOptions } from "./project-settings";
 import {
   Controller,
   Get,
@@ -156,9 +157,36 @@ export class ProjectsController {
     @Param("id") id: string,
     @Headers("x-user-id") userId: string,
     @Headers("authorization") authHeader: string,
+    @Body() body?: ExportOptions,
   ) {
     const uid = this.resolveUserId(userId, authHeader);
-    const result = await this.projectsService.exportProject(id, uid);
+    const options = body && Object.keys(body).length > 0 ? body : undefined;
+    const result = await this.projectsService.exportProject(id, uid, options);
+    return { success: true, data: result };
+  }
+
+  /**
+   * Cover art for the exporter: a jpg or png stored next to the project's
+   * exports. Returns the storage key the export body references as coverKey.
+   */
+  @Post(":id/cover")
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: { fileSize: 8 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        cb(null, ["image/jpeg", "image/png"].includes(file.mimetype));
+      },
+    }),
+  )
+  async uploadCover(
+    @Param("id") id: string,
+    @Headers("x-user-id") userId: string,
+    @Headers("authorization") authHeader: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    const uid = this.resolveUserId(userId, authHeader);
+    if (!file) throw new BadRequestException("Image file is required");
+    const result = await this.projectsService.uploadCover(id, uid, file);
     return { success: true, data: result };
   }
 

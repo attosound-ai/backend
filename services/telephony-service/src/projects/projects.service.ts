@@ -1,6 +1,10 @@
 import { Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
+import type {
+  ExportOptions,
+  ProjectSettings,
+} from "./project-settings";
 import { QueryDeepPartialEntity } from "typeorm/query-builder/QueryPartialEntity";
 import { Project } from "../entities/project.entity";
 import { TimelineClip } from "../entities/timeline-clip.entity";
@@ -160,6 +164,7 @@ export class ProjectsService {
           pan?: number;
         }
       >;
+      settings?: ProjectSettings;
     },
   ): Promise<Project> {
     // Ownership check first.
@@ -179,6 +184,10 @@ export class ProjectsService {
     if (data.status !== undefined) patch.status = data.status;
     if (data.lanes !== undefined) {
       patch.lanes = { ...data.lanes };
+    }
+    if (data.settings !== undefined) {
+      // Merge so the app can send one section (master, exportPrefs) at a time.
+      patch.settings = { ...(existing.settings ?? {}), ...data.settings };
     }
 
     if (Object.keys(patch).length > 0) {
@@ -421,6 +430,7 @@ export class ProjectsService {
   async exportProject(
     projectId: string,
     userId: string,
+    options?: ExportOptions,
   ): Promise<{ downloadUrl: string; fileSizeBytes: number }> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
@@ -474,13 +484,56 @@ export class ProjectsService {
       effective_volumes: mixed.map((c) => Number(c.volume.toFixed(4))),
     });
 
-    const result = await this.audioProcessor.exportProject(mixed, projectId);
+    const settings = (project.settings ?? {}) as ProjectSettings;
+    const exportOptions: ExportOptions = {
+      ...(settings.exportPrefs ?? {}),
+      ...(options ?? {}),
+    };
+    if (options && Object.keys(options).length > 0) {
+      // Remember the exporter's picks for the next mixdown.
+      await this.projectRepo.update(
+        { id: projectId, userId },
+        { settings: { ...settings, exportPrefs: exportOptions } },
+      );
+    }
+    const result = await this.audioProcessor.exportProject(
+      mixed,
+      projectId,
+      settings.master,
+      exportOptions,
+      settings.automation,
+    );
 
     // Update project status
     project.status = "exported";
     await this.projectRepo.save(project);
 
     return result;
+  }
+
+  async uploadCover(
+    projectId: string,
+    userId: string,
+    file: Express.Multer.File,
+  ): Promise<{ coverKey: string }> {
+    const project = await this.projectRepo.findOne({
+      where: { id: projectId, userId },
+    });
+    if (!project) throw new NotFoundException("Project not found");
+    const ext = file.mimetype === "image/png" ? "png" : "jpg";
+    const coverKey = `exports/covers/${projectId}/${randomUUID()}.${ext}`;
+    await this.storageService.upload(coverKey, file.buffer, file.mimetype);
+    const settings = (project.settings ?? {}) as ProjectSettings;
+    await this.projectRepo.update(
+      { id: projectId, userId },
+      {
+        settings: {
+          ...settings,
+          exportPrefs: { ...(settings.exportPrefs ?? {}), coverKey },
+        },
+      },
+    );
+    return { coverKey };
   }
 
   async importAudioFile(
