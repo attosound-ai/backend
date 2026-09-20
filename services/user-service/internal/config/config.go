@@ -24,6 +24,9 @@ type Config struct {
 	JWTAccessExpiry  time.Duration
 	JWTRefreshExpiry time.Duration
 	OTPServiceURL    string
+	// AdminAPISecret gates the operator only routes (X-Admin-Token). Empty
+	// means those routes answer 503: never open by default.
+	AdminAPISecret string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -45,6 +48,7 @@ func Load() *Config {
 		JWTAccessExpiry:  parseDuration(getEnv("JWT_ACCESS_EXPIRY", "15m"), 15*time.Minute),
 		JWTRefreshExpiry: parseDuration(getEnv("JWT_REFRESH_EXPIRY", "168h"), 168*time.Hour),
 		OTPServiceURL:    getEnv("OTP_SERVICE_URL", "http://otp-service:8000"),
+		AdminAPISecret:   getEnv("ADMIN_API_SECRET", ""),
 	}
 
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
