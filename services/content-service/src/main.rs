@@ -122,6 +122,8 @@ async fn main() -> std::io::Result<()> {
             .service(app_logo_handler::get_app_logo)
             .service(app_logo_handler::admin_get_app_logo)
             .service(app_logo_handler::admin_set_app_logo)
+            .service(app_logo_handler::admin_set_splash_logo)
+            .service(app_logo_handler::admin_clear_splash_logo)
             .service(content_handler::create_content)
             .service(content_handler::search_content)
             .service(content_handler::get_content)

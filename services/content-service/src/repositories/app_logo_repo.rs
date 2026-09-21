@@ -11,6 +11,11 @@ use crate::models::AppLogo;
 /// row; the unique index below guarantees it.
 const SINGLETON_KEY: &str = "main";
 
+/// The launch splash has its own singleton. It is a separate document (not a
+/// field of the main one) so either can be set, replaced or cleared without
+/// touching the other: the header wants a wide wordmark, the splash a mark.
+const SPLASH_KEY: &str = "splash";
+
 /// Key of the small stats doc that records the highest app build we have seen.
 const STATS_KEY: &str = "build_stats";
 /// Sanity ceiling so a bogus `?appBuild=` from the public endpoint can never
@@ -122,5 +127,51 @@ impl AppLogoRepository {
         logo.ok_or_else(|| {
             mongodb::error::Error::custom("app-logo upsert returned no document".to_string())
         })
+    }
+
+    /// The splash logo, or `None` when the splash should follow the main logo.
+    pub async fn get_splash(&self) -> Result<Option<AppLogo>, mongodb::error::Error> {
+        self.collection
+            .find_one(doc! { "key": SPLASH_KEY }, None)
+            .await
+    }
+
+    /// Set the splash logo. Same document shape as the main logo; the version
+    /// fields stay empty because the splash has no baked in wordmark to avoid.
+    pub async fn set_splash(&self, image_url: &str) -> Result<AppLogo, mongodb::error::Error> {
+        let now = Utc::now();
+        let filter = doc! { "key": SPLASH_KEY };
+        let update = doc! {
+            "$set": {
+                "image_url": image_url,
+                "min_version": bson::Bson::Null,
+                "fallback_image_url": bson::Bson::Null,
+                "updated_at": bson::DateTime::from_chrono(now),
+            },
+            "$setOnInsert": {
+                "key": SPLASH_KEY,
+                "created_at": bson::DateTime::from_chrono(now),
+            },
+        };
+        self.collection
+            .update_one(
+                filter.clone(),
+                update,
+                UpdateOptions::builder().upsert(true).build(),
+            )
+            .await?;
+        let logo = self.collection.find_one(filter, None).await?;
+        logo.ok_or_else(|| {
+            mongodb::error::Error::custom("splash-logo upsert returned no document".to_string())
+        })
+    }
+
+    /// Remove the splash logo so the splash follows the main logo again.
+    pub async fn clear_splash(&self) -> Result<bool, mongodb::error::Error> {
+        let res = self
+            .collection
+            .delete_one(doc! { "key": SPLASH_KEY }, None)
+            .await?;
+        Ok(res.deleted_count > 0)
     }
 }

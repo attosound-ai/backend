@@ -1,4 +1,4 @@
-use actix_web::{get, post, web, HttpRequest, HttpResponse};
+use actix_web::{delete, get, post, web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -19,6 +19,10 @@ struct AppLogoQuery {
 #[serde(rename_all = "camelCase")]
 struct ResolvedLogoResponse {
     image_url: String,
+    /// Launch splash image when the admin set one; absent means the splash
+    /// follows `image_url`. Always optional so older builds ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    splash_image_url: Option<String>,
     updated_at: String,
 }
 
@@ -27,6 +31,8 @@ struct ResolvedLogoResponse {
 #[serde(rename_all = "camelCase")]
 struct AdminLogoResponse {
     image_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    splash_image_url: Option<String>,
     min_version: Option<i32>,
     fallback_image_url: Option<String>,
     updated_at: String,
@@ -84,13 +90,22 @@ pub async fn get_app_logo(
             }
         });
     }
+    // The splash only goes to version aware builds, like the main logo.
+    let splash = match query.app_build {
+        Some(_) => repo.get_splash().await.ok().flatten().map(|l| l.image_url),
+        None => None,
+    };
     match repo.get_current().await {
         Ok(Some(logo)) => {
             let updated_at = logo.updated_at.to_rfc3339();
             match resolve_url(&logo, query.app_build) {
                 Some(url) => HttpResponse::Ok().json(json!({
                     "success": true,
-                    "data": ResolvedLogoResponse { image_url: url, updated_at },
+                    "data": ResolvedLogoResponse {
+                        image_url: url,
+                        splash_image_url: splash,
+                        updated_at,
+                    },
                     "error": null,
                 })),
                 None => HttpResponse::Ok().json(json!({
@@ -126,11 +141,13 @@ pub async fn admin_get_app_logo(
     // Highest build seen in the wild — the dashboard shows it instead of a
     // hardcoded version, so the "latest build" hint can never go stale.
     let latest_seen_build = repo.get_max_seen_build().await.ok().flatten();
+    let splash = repo.get_splash().await.ok().flatten().map(|l| l.image_url);
     match repo.get_current().await {
         Ok(Some(logo)) => HttpResponse::Ok().json(json!({
             "success": true,
             "data": AdminLogoResponse {
                 image_url: logo.image_url,
+                splash_image_url: splash,
                 min_version: logo.min_version,
                 fallback_image_url: logo.fallback_image_url,
                 updated_at: logo.updated_at.to_rfc3339(),
@@ -181,6 +198,7 @@ pub async fn admin_set_app_logo(
             "success": true,
             "data": AdminLogoResponse {
                 image_url: logo.image_url,
+                splash_image_url: repo.get_splash().await.ok().flatten().map(|l| l.image_url),
                 min_version: logo.min_version,
                 fallback_image_url: logo.fallback_image_url,
                 updated_at: logo.updated_at.to_rfc3339(),
@@ -191,6 +209,74 @@ pub async fn admin_set_app_logo(
             log::error!("Failed to set app logo: {}", err);
             HttpResponse::InternalServerError().json(json!({
                 "success": false, "data": null, "error": "Failed to set app logo",
+            }))
+        }
+    }
+}
+
+// ── Splash logo ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSplashLogoRequest {
+    /// Already hosted URL of the launch splash image.
+    image_url: String,
+}
+
+/// `POST /api/v1/admin/app-logo/splash` sets the launch splash image on its
+/// own, leaving the header logo untouched. `X-Admin-Token` gated.
+#[post("/api/v1/admin/app-logo/splash")]
+pub async fn admin_set_splash_logo(
+    req: HttpRequest,
+    body: web::Json<SetSplashLogoRequest>,
+    repo: web::Data<AppLogoRepository>,
+) -> HttpResponse {
+    if !verify_admin_token(&req) {
+        return HttpResponse::Unauthorized().json(json!({
+            "success": false, "data": null, "error": "Unauthorized",
+        }));
+    }
+    let image_url = body.image_url.trim();
+    if image_url.is_empty() || !image_url.starts_with("https://") {
+        return HttpResponse::BadRequest().json(json!({
+            "success": false, "data": null, "error": "imageUrl must be an https URL",
+        }));
+    }
+    match repo.set_splash(image_url).await {
+        Ok(logo) => HttpResponse::Ok().json(json!({
+            "success": true,
+            "data": { "splashImageUrl": logo.image_url, "updatedAt": logo.updated_at.to_rfc3339() },
+            "error": null,
+        })),
+        Err(err) => {
+            log::error!("Failed to set splash logo: {}", err);
+            HttpResponse::InternalServerError().json(json!({
+                "success": false, "data": null, "error": "Failed to set splash logo",
+            }))
+        }
+    }
+}
+
+/// `DELETE /api/v1/admin/app-logo/splash` clears it: the splash follows the
+/// main logo again.
+#[delete("/api/v1/admin/app-logo/splash")]
+pub async fn admin_clear_splash_logo(
+    req: HttpRequest,
+    repo: web::Data<AppLogoRepository>,
+) -> HttpResponse {
+    if !verify_admin_token(&req) {
+        return HttpResponse::Unauthorized().json(json!({
+            "success": false, "data": null, "error": "Unauthorized",
+        }));
+    }
+    match repo.clear_splash().await {
+        Ok(removed) => HttpResponse::Ok().json(json!({
+            "success": true, "data": { "removed": removed }, "error": null,
+        })),
+        Err(err) => {
+            log::error!("Failed to clear splash logo: {}", err);
+            HttpResponse::InternalServerError().json(json!({
+                "success": false, "data": null, "error": "Failed to clear splash logo",
             }))
         }
     }
