@@ -215,27 +215,28 @@ func slugifyCreatorName(name string) string {
 	return slug
 }
 
-// CreateManagedCreator creates a managed creator account linked to the given representative.
-// When creatorFields is provided, creates a full account with real email, password, and credentials.
-// When creatorFields is nil, falls back to auto-generated email/username (legacy behavior).
-func (r *UserRepository) CreateManagedCreator(
-	repUser *models.User,
+// buildManagedCreator assembles (but does NOT persist) a managed creator model
+// linked to representative repID. Pure: no DB access, so it is safe to call
+// inside a transaction once the representative's ID is known.
+//
+// The unique login `email` is ALWAYS a synthesized, collision-proof address.
+// Managed creators authenticate through the representative (account switch),
+// never a real inbox, so any entered "creator email" — which for a family rep
+// is usually the rep's OWN address for an inmate with no inbox — is kept only as
+// non-unique contact metadata (CreatorEmail). Using it as the unique `email`
+// collided with the rep on idx_users_email and silently orphaned the rep
+// (Sep 2026 incident).
+func buildManagedCreator(
+	repID uint64,
 	creatorFields *models.ManagedCreatorFields,
-	passwordHash string,
 	inmateNumber, inmateState string,
 	consentToRecording bool,
-) (*models.User, error) {
-	repID := repUser.ID
-
+) *models.User {
 	var username, displayName string
-	var emailPtr, phoneCountryCode, phoneNumber, avatar *string
+	var phoneCountryCode, phoneNumber, avatar, contactEmail *string
 	var creatorTypes, creatorGenres []string
 
 	if creatorFields != nil {
-		trimmedEmail := strings.ToLower(strings.TrimSpace(creatorFields.Email))
-		if trimmedEmail != "" {
-			emailPtr = &trimmedEmail
-		}
 		username = strings.ToLower(creatorFields.Username)
 		displayName = creatorFields.DisplayName
 		phoneCountryCode = creatorFields.PhoneCountryCode
@@ -243,17 +244,21 @@ func (r *UserRepository) CreateManagedCreator(
 		avatar = creatorFields.Avatar
 		creatorTypes = creatorFields.CreatorTypes
 		creatorGenres = creatorFields.CreatorGenres
+		if trimmed := strings.ToLower(strings.TrimSpace(creatorFields.Email)); trimmed != "" {
+			contactEmail = &trimmed
+		}
 	} else {
-		// Legacy fallback: auto-generate
-		legacyEmail := fmt.Sprintf("creator_%s_%d@managed.atto", inmateNumber, repUser.ID)
-		emailPtr = &legacyEmail
+		// Legacy fallback: auto-generate a username.
 		slug := slugifyCreatorName(displayName)
 		username = fmt.Sprintf("creator_%s_%04d", slug, rand.Intn(10000))
 		displayName = inmateNumber // best-effort fallback
 	}
 
-	creator := &models.User{
-		Email:              emailPtr,
+	syntheticEmail := fmt.Sprintf("creator_%s_%d@managed.atto", inmateNumber, repID)
+
+	return &models.User{
+		Email:              &syntheticEmail,
+		CreatorEmail:       contactEmail,
 		Username:           username,
 		DisplayName:        displayName,
 		Role:               models.RoleCreator,
@@ -268,8 +273,20 @@ func (r *UserRepository) CreateManagedCreator(
 		CreatorTypes:       creatorTypes,
 		CreatorGenres:      creatorGenres,
 	}
+}
 
-	// If we have a real password, create user + credentials in a transaction
+// CreateManagedCreator creates a managed creator account linked to the given
+// representative. Standalone (non-atomic) variant kept for callers that create a
+// creator for an ALREADY-persisted representative (e.g. a repair/backfill).
+func (r *UserRepository) CreateManagedCreator(
+	repUser *models.User,
+	creatorFields *models.ManagedCreatorFields,
+	passwordHash string,
+	inmateNumber, inmateState string,
+	consentToRecording bool,
+) (*models.User, error) {
+	creator := buildManagedCreator(repUser.ID, creatorFields, inmateNumber, inmateState, consentToRecording)
+
 	if passwordHash != "" {
 		creds := &models.UserCredentials{PasswordHash: passwordHash}
 		if err := r.CreateUserWithCredentials(creator, creds); err != nil {
@@ -277,12 +294,71 @@ func (r *UserRepository) CreateManagedCreator(
 		}
 		return creator, nil
 	}
-
-	// Legacy: no credentials
 	if err := r.db.Create(creator).Error; err != nil {
 		return nil, fmt.Errorf("failed to create managed creator: %w", err)
 	}
 	return creator, nil
+}
+
+// CreateRepresentativeWithManagedCreator persists a representative (with
+// credentials) and, ATOMICALLY, the managed creator it exists to manage — in a
+// single transaction. Either both accounts land or neither does, so a
+// representative can never be left orphaned without its creator (Sep 2026
+// incident). The creator is built with the representative's real ID (known only
+// mid-transaction) so its synthesized unique email is stable.
+func (r *UserRepository) CreateRepresentativeWithManagedCreator(
+	rep *models.User,
+	repCreds *models.UserCredentials,
+	creatorFields *models.ManagedCreatorFields,
+	creatorPasswordHash string,
+	inmateNumber, inmateState string,
+	consentToRecording bool,
+) (*models.User, error) {
+	var creator *models.User
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(rep).Error; err != nil {
+			return err
+		}
+		repCreds.UserID = rep.ID
+		if err := tx.Create(repCreds).Error; err != nil {
+			return err
+		}
+		creator = buildManagedCreator(rep.ID, creatorFields, inmateNumber, inmateState, consentToRecording)
+		if err := tx.Create(creator).Error; err != nil {
+			return err
+		}
+		if creatorPasswordHash != "" {
+			creatorCreds := &models.UserCredentials{UserID: creator.ID, PasswordHash: creatorPasswordHash}
+			if err := tx.Create(creatorCreds).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to atomically create representative + managed creator: %w", err)
+	}
+	return creator, nil
+}
+
+// GetLinkedAccountIDs returns the full set of user IDs in the account group
+// anchored on the given representative (the anchor itself plus every managed
+// creator whose representative_id = anchor).
+//
+// Pass either the representative's own ID OR a creator's representative_id —
+// callers higher up (UserService) resolve the right anchor. Single indexed
+// query; sub-millisecond at our scale. Used by telephony-service for TwiML
+// fan-out so a PSTN call to one bridge can ring every linked identity on
+// the same device.
+func (r *UserRepository) GetLinkedAccountIDs(anchorID uint64) ([]uint64, error) {
+	var ids []uint64
+	err := r.db.Model(&models.User{}).
+		Where("id = ? OR (representative_id = ? AND is_managed_account = true)", anchorID, anchorID).
+		Pluck("id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // GetLinkedAccounts returns accounts linked to the caller.

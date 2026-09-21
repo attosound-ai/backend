@@ -3,6 +3,7 @@
 - POST /checkout  -- create a PaymentIntent for mobile checkout
 - POST /webhook   -- receive and validate Stripe webhook events
 - GET  /bridge-number -- return the user's assigned bridge phone number
+- POST /bridge-number/claim -- request the number a plan grants without a payment
 """
 
 import logging
@@ -12,12 +13,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import plan_catalog
 from app.database import get_session
-from app.middleware.auth import get_current_user_id
+from app.middleware.auth import get_current_user_id, get_current_user_role
 from app.schemas.payment import BridgeNumberResponse, CheckoutRequest, CheckoutResponse, ConfirmPaymentRequest
 from app.schemas.transaction import ApiResponse
-from app.services.payment_service import PaymentService
 from app.services import stripe_service
+from app.services.payment_service import PaymentService
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ async def checkout(
     target_user = body.for_user_id or user_id
     try:
         result = await stripe_service.create_checkout_session(
+            session,
             user_id=target_user,
             plan_id=body.plan_id,
             email=body.email,
@@ -189,7 +192,8 @@ async def confirm_payment(
     # If a paid subscription already exists, re-publish the event to retry provisioning
     # (handles cases where telephony-service failed on the first attempt).
     existing = await svc.get_active_subscription(target_user)
-    if not existing or existing.plan == "connect_free":
+    existing_price = await plan_catalog.price_cents(session, existing.plan) if existing else 0
+    if not existing or existing_price <= 0:
         await svc.create_subscription_from_webhook(
             user_id=target_user,
             plan_id=plan_id,
@@ -238,6 +242,45 @@ async def get_bridge_number(
     svc = PaymentService(session)
     target = for_user_id if for_user_id else user_id
     bridge_number, status = await svc.get_bridge_number(target)
+    return ApiResponse(
+        success=True,
+        data=BridgeNumberResponse(
+            bridge_number=bridge_number, status=status
+        ).model_dump(by_alias=True),
+    )
+
+
+@router.post("/bridge-number/claim", response_model=ApiResponse, status_code=200)
+async def claim_bridge_number(
+    user_id: str = Depends(get_current_user_id),
+    role: str = Depends(get_current_user_role),
+    for_user_id: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Request the bridge number when the plan grants it without a payment.
+
+    Signup calls this when the paywall is off: no payment means no
+    ``payment.completed``, and that event was the only thing that ever asked
+    telephony for a number. Creators claim their own; a representative claims
+    for the creator it manages through `for_user_id`.
+    """
+    if role == "creator":
+        target = user_id
+    elif role == "representative" and for_user_id:
+        target = for_user_id
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Bridge numbers are only available for creator accounts",
+        )
+
+    svc = PaymentService(session)
+    bridge_number, status = await svc.claim_bridge_number(target)
+    if status == "not_entitled":
+        raise HTTPException(
+            status_code=403,
+            detail="The current plan does not include a bridge number",
+        )
     return ApiResponse(
         success=True,
         data=BridgeNumberResponse(

@@ -8,6 +8,7 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { jwt as TwilioJwt } from "twilio";
+import { AnalyticsService } from "../analytics/analytics.service";
 
 const { AccessToken } = TwilioJwt;
 const { VoiceGrant } = AccessToken;
@@ -16,7 +17,10 @@ const { VoiceGrant } = AccessToken;
 export class TokensController {
   private readonly logger = new Logger(TokensController.name);
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly analytics: AnalyticsService,
+  ) {}
 
   /**
    * Generate a Twilio Access Token with a VoiceGrant for the authenticated user.
@@ -69,6 +73,12 @@ export class TokensController {
     this.logger.log(
       `Voice token generated: identity=${identity} platform=${platform || "unknown"} pushCredSid=${pushCredentialSid}`,
     );
+
+    this.analytics.capture(resolvedUserId, "backend_voice_token_issued", {
+      identity,
+      platform: platform || "unknown",
+      has_push_cred: !!pushCredentialSid,
+    });
 
     return {
       token: token.toJwt(),

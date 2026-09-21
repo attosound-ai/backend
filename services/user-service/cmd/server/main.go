@@ -86,6 +86,7 @@ func main() {
 
 	authHandler := handlers.NewAuthHandler(authService)
 	userHandler := handlers.NewUserHandler(userService, cfg.OTPServiceURL)
+	adminHandler := handlers.NewAdminHandler(userService)
 	verificationHandler := handlers.NewVerificationHandler(userService, cfg.OTPServiceURL)
 	inmateHandler := handlers.NewInmateHandler(inmateService)
 	pushTokenHandler := handlers.NewPushTokenHandler(repo)
@@ -165,6 +166,10 @@ func main() {
 	users.Put("/me/app-icon", middleware.RequireAuth(jwtMgr), appIconHandler.UpdateAppIcon)
 	users.Delete("/me/account", middleware.RequireAuth(jwtMgr), userHandler.DeleteAccount)
 
+	// Operator only (X-Admin-Token). Under /users so the gateway's existing
+	// user route carries it; registered before the parameterized routes.
+	users.Delete("/admin/:id", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.DeleteUser)
+
 	// Inmate lookup (public)
 	users.Get("/inmates/lookup", inmateHandler.LookupInmate)
 
@@ -174,6 +179,16 @@ func main() {
 	users.Get("/:id", userHandler.GetUser)
 	users.Get("/:id/followers", userHandler.GetFollowers)
 	users.Get("/:id/following", userHandler.GetFollowing)
+	// Internal/server-to-server: telephony-service uses this for TwiML fan-out.
+	// Returns { userIds: [int, ...] } — the linked account group for the
+	// given user. No JWT required (same trust posture as GET /users/:id),
+	// scoped to a single id-only field so it does not leak the linkage graph
+	// via the regular profile endpoint.
+	users.Get("/:id/linked-account-ids", userHandler.GetLinkedAccountIDs)
+	// Internal/server-to-server: telephony-service consumes this to send
+	// "missed call" fallback pushes when the Voice SDK invite fails to
+	// reach the device. Same trust posture as the routes above.
+	users.Get("/:id/push-tokens", userHandler.GetPushTokens)
 
 	// ── Signup session cleanup worker ──
 	// Hourly: mark expired sessions abandoned. Grace period 24h before purge so
@@ -219,7 +234,7 @@ func main() {
 
 	// ── Start HTTP server ──
 	log.Printf("[STARTUP] HTTP server listening on [::]:%s", cfg.HTTPPort)
-	if err := app.Listen("[::]:"+cfg.HTTPPort); err != nil {
+	if err := app.Listen("[::]:" + cfg.HTTPPort); err != nil {
 		log.Fatalf("[STARTUP] HTTP server failed: %v", err)
 	}
 }

@@ -6,6 +6,14 @@ import { AudioStorageService } from "../media/audio-storage.service";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ConfigService } from "@nestjs/config";
 import ffmpeg = require("fluent-ffmpeg");
+import {
+  encodePlan,
+  envelopeVolumeExpression,
+  masterFilterChain,
+  type EncodePlan,
+  type ExportOptions,
+  type MasterEffects,
+} from "./project-settings";
 import { Readable } from "stream";
 import { promises as fs } from "fs";
 import { tmpdir } from "os";
@@ -92,8 +100,15 @@ export class AudioProcessorService {
         pcmData.byteLength / 2,
       );
 
-      // Compute RMS amplitudes
-      const count = Math.min(numSamples, 500);
+      // Peak envelope, the model every waveform renderer uses (audiowaveform /
+      // peaks.js / wavesurfer): the absolute PEAK per bucket, not RMS. RMS
+      // flattens transients (a vocal's consonants, drum hits) into a blurry
+      // band, which is why the editor's waveform looked featureless next to a
+      // DAW's. Peaks keep the shape. The bucket count is allowed up to 4000 so
+      // the client can precompute one dense envelope per segment and downsample
+      // it locally for any zoom level (instant zoom, no refetch); the old 500
+      // ceiling was too coarse to survive zooming in.
+      const count = Math.max(1, Math.min(numSamples, 4000));
       const windowSize = Math.floor(samples.length / count);
       if (windowSize === 0) return Array(count).fill(0);
 
@@ -101,13 +116,13 @@ export class AudioProcessorService {
       for (let i = 0; i < count; i++) {
         const start = i * windowSize;
         const end = Math.min(start + windowSize, samples.length);
-        let sumSquares = 0;
+        let peak = 0;
         for (let j = start; j < end; j++) {
-          sumSquares += samples[j] * samples[j];
+          const v = samples[j] < 0 ? -samples[j] : samples[j];
+          if (v > peak) peak = v;
         }
-        const rms = Math.sqrt(sumSquares / (end - start));
         // Normalize to 0-1 range (Int16 max = 32768)
-        amplitudes.push(Math.round((rms / 32768) * 1000) / 1000);
+        amplitudes.push(Math.round((peak / 32768) * 1000) / 1000);
       }
 
       // Cache for ~14 days with jitter
@@ -229,6 +244,29 @@ export class AudioProcessorService {
   }
 
   /**
+   * Loudness-normalize a WAV to a comfortable listening level (~-16 LUFS).
+   * The Securus line delivers very quiet audio (measured ~-34 LUFS on real
+   * recordings), so without this the user has to crank playback, which surfaces
+   * the line's noise floor ("so quiet that when we turn them up it sounds like
+   * shit"). loudnorm applies gentle leveling to a broadcast-ish target. Callers
+   * fall back to the un-normalized mix if this throws, so an export never fails
+   * over a normalization hiccup.
+   */
+  private async normalizeLoudness(
+    inputPath: string,
+    outputPath: string,
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .audioFilters("loudnorm=I=-16:TP=-1.5:LRA=11")
+        .output(outputPath)
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+  }
+
+  /**
    * Convert any supported audio file to WAV format.
    */
   async convertToWav(inputPath: string): Promise<string> {
@@ -245,6 +283,38 @@ export class AudioProcessorService {
   }
 
   /**
+   * Inspect an audio file's real format.
+   *
+   * Needed because import used to decide "is this already WAV?" from the CLIENT'S
+   * mime string. A 44.1 kHz stereo file announced as `audio/wav` was therefore
+   * stored untouched while the DB recorded `sampleRate: 8000`. Downstream,
+   * `concatFiles` uses `-c copy`, which requires every clip on a lane to share an
+   * identical format, so mixing that import with 8 kHz mono call recordings
+   * produced a garbled or failed export. Probing the bytes removes the guess.
+   */
+  async probeAudio(filePath: string): Promise<{
+    sampleRate: number;
+    channels: number;
+    codecName: string;
+    durationMs: number;
+  }> {
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(filePath, (err: Error | null, metadata: any) => {
+        if (err) return reject(err);
+        const stream = (metadata?.streams ?? []).find(
+          (s: any) => s?.codec_type === "audio",
+        );
+        resolve({
+          sampleRate: Number(stream?.sample_rate ?? 0),
+          channels: Number(stream?.channels ?? 0),
+          codecName: String(stream?.codec_name ?? ""),
+          durationMs: Math.round(Number(metadata?.format?.duration ?? 0) * 1000),
+        });
+      });
+    });
+  }
+
+  /**
    * Get audio duration in milliseconds using ffprobe.
    */
   async getDurationMs(filePath: string): Promise<number> {
@@ -258,8 +328,166 @@ export class AudioProcessorService {
   }
 
   /**
-   * Export a project by cutting and merging clips per lane,
-   * then mixing lanes together into a single WAV.
+   * Place every clip of one lane at its ABSOLUTE timeline position and sum
+   * them into a single lane file. Gaps between clips are silence.
+   *
+   * This replaced a sequential `concat` by `order`, which ignored
+   * `positionInTimeline` entirely: a take recorded at the playhead (10s in) was
+   * exported glued to 0s, a clip dragged later on the timeline exported where
+   * it used to be, and any gap the editor showed collapsed in the file. It also
+   * makes the editor's region operations (silence / cut / insert time, which
+   * are all "leave a gap") render faithfully, with no schema change.
+   *
+   * ffmpeg graph per clip: atrim is already applied by cutSegment, so each
+   * input gets `volume` (clip gain), `afade` in+out of a few ms (kills the click
+   * a hard cut leaves at a boundary, since the client only snaps to peaks, not
+   * zero crossings) and `adelay` to its position; `amix` then sums with
+   * `normalize=0` so levels are preserved and `duration=longest` so trailing
+   * silence after the last clip is kept.
+   */
+  private async placeClipsOnLane(
+    placed: {
+      file: string;
+      positionMs: number;
+      volume: number;
+      volumeExpr?: string | null;
+    }[],
+    outputPath: string,
+  ): Promise<void> {
+    const EDGE_FADE_SEC = 0.004;
+    await new Promise<void>((resolve, reject) => {
+      const cmd = ffmpeg();
+      const chains: string[] = [];
+      placed.forEach((p, i) => {
+        cmd.input(p.file);
+        const vol = Number.isFinite(p.volume) ? Math.max(0, p.volume) : 1;
+        const delayMs = Math.max(0, Math.round(p.positionMs));
+        // The clip's automation envelope runs before the static clip gain,
+        // in the clip's own time base (adelay has not moved it yet).
+        const envelope = p.volumeExpr
+          ? `volume=volume='${p.volumeExpr}':eval=frame,`
+          : "";
+        chains.push(
+          `[${i}:a]${envelope}volume=${vol.toFixed(4)},` +
+            `afade=t=in:st=0:d=${EDGE_FADE_SEC},` +
+            `areverse,afade=t=in:st=0:d=${EDGE_FADE_SEC},areverse,` +
+            `adelay=${delayMs}:all=1[c${i}]`,
+        );
+      });
+      const mixInputs = placed.map((_, i) => `[c${i}]`).join("");
+      const filter =
+        placed.length === 1
+          ? `${chains[0].replace(`[c0]`, "[out]")}`
+          : `${chains.join(";")};${mixInputs}amix=inputs=${placed.length}:duration=longest:normalize=0[out]`;
+      cmd
+        .complexFilter(filter, "out")
+        .output(outputPath)
+        .outputOptions(["-f", "wav"])
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+  }
+
+  /** Run a plain audio filter chain over a WAV, writing a new WAV. */
+  private async applyFilters(
+    inputPath: string,
+    outputPath: string,
+    filters: string[],
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .audioFilters(filters)
+        .output(outputPath)
+        .outputOptions(["-f", "wav"])
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+  }
+
+  /**
+   * Encode the mixed WAV for delivery: format and quality from the exporter,
+   * optional resample and channel count, title, author and ISRC tags, and
+   * the cover picture for containers that carry one. WAV with no options
+   * is returned as is (the feed path).
+   */
+  private async encodeExport(
+    inputPath: string,
+    plan: EncodePlan,
+    options: ExportOptions | undefined,
+  ): Promise<{ tmpPath: string }> {
+    const wantsResample =
+      typeof options?.sampleRate === "number" || typeof options?.channels === "number";
+    const hasTags = !!(options?.title || options?.author || options?.isrc);
+    if (plan.extension === "wav" && !wantsResample && !hasTags) {
+      return { tmpPath: inputPath };
+    }
+    const outputPath = join(tmpdir(), `export-${randomUUID()}.${plan.extension}`);
+    let coverPath: string | null = null;
+    if (options?.coverKey && plan.supportsCover) {
+      try {
+        const response = await this.s3.send(
+          new GetObjectCommand({ Bucket: this.bucket, Key: options.coverKey }),
+        );
+        const chunks: Buffer[] = [];
+        for await (const chunk of response.Body as Readable) {
+          chunks.push(Buffer.from(chunk));
+        }
+        const cover = Buffer.concat(chunks);
+        const ext = options.coverKey.toLowerCase().endsWith(".png") ? "png" : "jpg";
+        coverPath = join(tmpdir(), `cover-${randomUUID()}.${ext}`);
+        await fs.writeFile(coverPath, cover);
+      } catch (err) {
+        this.logger.warn("Cover download failed, exporting without it: %s", err);
+        coverPath = null;
+      }
+    }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const cmd = ffmpeg(inputPath);
+        const args: string[] = [...plan.codecArgs];
+        if (typeof options?.sampleRate === "number") {
+          args.push("-ar", String(options.sampleRate));
+        }
+        if (typeof options?.channels === "number") {
+          args.push("-ac", String(options.channels));
+        }
+        if (options?.title) args.push("-metadata", `title=${options.title}`);
+        if (options?.author) args.push("-metadata", `artist=${options.author}`);
+        if (options?.isrc) args.push("-metadata", `ISRC=${options.isrc}`);
+        if (coverPath) {
+          cmd.input(coverPath);
+          args.push(
+            "-map",
+            "0:a",
+            "-map",
+            "1:v",
+            "-c:v",
+            "mjpeg",
+            "-disposition:v",
+            "attached_pic",
+          );
+          if (plan.extension === "mp3") {
+            args.push("-id3v2_version", "3");
+          }
+        }
+        cmd
+          .outputOptions(args)
+          .output(outputPath)
+          .on("end", () => resolve())
+          .on("error", (err: Error) => reject(err))
+          .run();
+      });
+    } finally {
+      if (coverPath) await fs.unlink(coverPath).catch(() => {});
+    }
+    return { tmpPath: outputPath };
+  }
+
+  /**
+   * Export a project by cutting each clip, placing it at its timeline
+   * position on its lane, then mixing lanes together into a single WAV.
    */
   async exportProject(
     clips: {
@@ -268,8 +496,14 @@ export class AudioProcessorService {
       endInSegment: number;
       order: number;
       laneIndex?: number;
+      positionInTimeline?: number;
+      volume?: number;
+      id?: string;
     }[],
     projectId: string,
+    master?: MasterEffects,
+    options?: ExportOptions,
+    automation?: Record<string, Array<[number, number]>>,
   ): Promise<{ downloadUrl: string; fileSizeBytes: number }> {
     if (clips.length === 0) {
       throw new NotFoundException("No clips to export");
@@ -288,10 +522,19 @@ export class AudioProcessorService {
     const tmpOutput = join(tmpdir(), `export-${randomUUID()}.wav`);
 
     try {
-      // Process each lane: cut clips and concat sequentially
+      // Process each lane: cut every clip, then place each at its absolute
+      // timeline position (gaps = silence). Legacy rows that predate
+      // positionInTimeline (null/undefined) fall back to sequential placement
+      // by `order`, which reproduces the old concat behaviour for them only.
       for (const [, laneClips] of byLane) {
         const sortedClips = [...laneClips].sort((a, b) => a.order - b.order);
-        const cutFiles: string[] = [];
+        const placed: {
+          file: string;
+          positionMs: number;
+          volume: number;
+          volumeExpr?: string | null;
+        }[] = [];
+        let sequentialCursorMs = 0;
 
         for (const clip of sortedClips) {
           const segment = await this.segmentRepo.findOne({
@@ -308,15 +551,32 @@ export class AudioProcessorService {
 
           const tmpCut = join(tmpdir(), `clip-${randomUUID()}.wav`);
           await fs.writeFile(tmpCut, cutBuffer);
-          cutFiles.push(tmpCut);
           allTmpFiles.push(tmpCut);
+
+          const hasPosition =
+            typeof clip.positionInTimeline === "number" &&
+            Number.isFinite(clip.positionInTimeline);
+          const positionMs = hasPosition
+            ? clip.positionInTimeline!
+            : sequentialCursorMs;
+          sequentialCursorMs =
+            positionMs + (clip.endInSegment - clip.startInSegment);
+
+          const envelope = clip.id ? automation?.[clip.id] : undefined;
+          placed.push({
+            file: tmpCut,
+            positionMs,
+            volume: typeof clip.volume === "number" ? clip.volume : 1,
+            volumeExpr: Array.isArray(envelope)
+              ? envelopeVolumeExpression(envelope)
+              : null,
+          });
         }
 
-        if (cutFiles.length === 0) continue;
+        if (placed.length === 0) continue;
 
-        // Concat clips within this lane
         const laneOutput = join(tmpdir(), `lane-${randomUUID()}.wav`);
-        await this.concatFiles(cutFiles, laneOutput);
+        await this.placeClipsOnLane(placed, laneOutput);
         laneFiles.push(laneOutput);
         allTmpFiles.push(laneOutput);
       }
@@ -328,12 +588,52 @@ export class AudioProcessorService {
       // Mix lanes together (or just use single lane output)
       await this.mixFiles(laneFiles, tmpOutput);
 
-      // Upload to S3
-      const outputBuffer = await fs.readFile(tmpOutput);
-      const date = new Date().toISOString().slice(0, 10);
-      const storageKey = `exports/${date}/${projectId}/${randomUUID()}.wav`;
+      // Loudness-normalize the final mix so recordings play at a comfortable
+      // level instead of the very quiet raw Securus-line level. Falls back to the
+      // un-normalized mix if normalization throws, so an export never breaks.
+      let finalOutput = tmpOutput;
+      try {
+        const normalizedOutput = join(tmpdir(), `export-norm-${randomUUID()}.wav`);
+        allTmpFiles.push(normalizedOutput);
+        await this.normalizeLoudness(tmpOutput, normalizedOutput);
+        finalOutput = normalizedOutput;
+      } catch (err) {
+        this.logger.warn(
+          "Loudness normalization failed, using un-normalized mix: %s",
+          err,
+        );
+      }
 
-      await this.storageService.upload(storageKey, outputBuffer);
+      // Master effects (the editor's Master Effects sheet) run on the mix
+      // bus, before loudness normalisation so the level target still holds.
+      // The pipeline is 8 kHz mono; probe rather than assume so an EQ band
+      // above Nyquist is skipped instead of failing the export.
+      const masterFilters = masterFilterChain(
+        master,
+        (await this.probeAudio(finalOutput).catch(() => null))?.sampleRate ??
+          8000,
+      );
+      if (masterFilters.length > 0) {
+        const masteredOutput = join(
+          tmpdir(),
+          `export-master-${randomUUID()}.wav`,
+        );
+        allTmpFiles.push(masteredOutput);
+        await this.applyFilters(finalOutput, masteredOutput, masterFilters);
+        finalOutput = masteredOutput;
+      }
+
+      // Encode to the exporter's format with its metadata and cover.
+      const plan = encodePlan(options);
+      const encoded = await this.encodeExport(finalOutput, plan, options);
+      if (encoded.tmpPath !== finalOutput) allTmpFiles.push(encoded.tmpPath);
+
+      // Upload to S3
+      const outputBuffer = await fs.readFile(encoded.tmpPath);
+      const date = new Date().toISOString().slice(0, 10);
+      const storageKey = `exports/${date}/${projectId}/${randomUUID()}.${plan.extension}`;
+
+      await this.storageService.upload(storageKey, outputBuffer, plan.mimeType);
 
       const downloadUrl = await this.storageService.getPresignedUrl(
         this.bucket,

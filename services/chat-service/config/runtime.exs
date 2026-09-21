@@ -1,5 +1,24 @@
 import Config
 
+# --- Telemetry (all environments when the env vars are present) ---
+# Sentry no-ops when dsn is nil; PostHog helper no-ops when api_key is nil.
+if dsn = System.get_env("SENTRY_DSN") do
+  config :sentry,
+    dsn: dsn,
+    environment_name: System.get_env("SENTRY_ENVIRONMENT") || to_string(config_env())
+end
+
+if posthog_key = System.get_env("POSTHOG_API_KEY") do
+  config :chat_service, ChatService.Telemetry.Posthog,
+    api_key: posthog_key,
+    host: System.get_env("POSTHOG_HOST") || "https://us.i.posthog.com"
+end
+
+# Read-only DSN for the user-service Postgres, consumed by `mix chat.cleanup_orphans`.
+if db_url = System.get_env("USER_SERVICE_DB_URL") do
+  config :chat_service, :user_service_db_url, db_url
+end
+
 if config_env() == :prod do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||

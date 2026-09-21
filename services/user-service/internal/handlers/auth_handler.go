@@ -374,10 +374,13 @@ func (h *AuthHandler) ForgotPassword(c *fiber.Ctx) error {
 		})
 	}
 
-	if req.Email == "" {
+	// Either `identifier` (new) or `email` (legacy) must be present.
+	// `identifier` covers managed creators who have no email of their own
+	// and need to recover via the linked representative's email.
+	if req.Email == "" && req.Identifier == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
-			Error:   "email is required",
+			Error:   "email or identifier is required",
 		})
 	}
 
@@ -386,7 +389,7 @@ func (h *AuthHandler) ForgotPassword(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
 		Data: map[string]string{
-			"message": "if this email is registered, a verification code has been sent",
+			"message": "if this account is registered, a verification code has been sent",
 		},
 	})
 }
@@ -401,10 +404,12 @@ func (h *AuthHandler) ResetPassword(c *fiber.Ctx) error {
 		})
 	}
 
-	if req.Email == "" || req.OTP == "" || req.Password == "" {
+	// Either `identifier` (new) or `email` (legacy) must be present, plus
+	// the OTP and the new password.
+	if (req.Email == "" && req.Identifier == "") || req.OTP == "" || req.Password == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
-			Error:   "email, otp, and password are required",
+			Error:   "email/identifier, otp, and password are required",
 		})
 	}
 	if len(req.Password) < 8 {

@@ -30,16 +30,13 @@ export class AuthGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<Request>();
 
-    // First check X-User-ID header (internal service-to-service calls)
-    const headerUserId = request.headers['x-user-id'] as string;
-    if (headerUserId) {
-      (request as any).userId = headerUserId;
-      (request as any).userRole =
-        (request.headers['x-user-role'] as string) || 'user';
-      return true;
-    }
-
-    // Otherwise validate JWT from Authorization header
+    // JWT is the only trust path (Bug #6 hardening). The X-User-ID
+    // header used to be accepted as a fallback for "internal
+    // service-to-service" calls, but in practice clients could (and did)
+    // set it to any value — a private-network defense is not a security
+    // boundary on its own. Kong strips the header at the edge anyway
+    // so a request reaching this guard with X-User-ID has come from
+    // somewhere bypassing the gateway and should NOT be trusted.
     const authHeader = request.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
       throw new UnauthorizedException('Missing authentication');

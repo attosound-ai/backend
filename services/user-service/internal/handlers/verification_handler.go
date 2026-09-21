@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/atto-sound/user-service/internal/middleware"
@@ -17,10 +18,10 @@ import (
 
 // VerificationHandler handles representative verification via OTP.
 type VerificationHandler struct {
-	userService        *services.UserService
-	otpServiceURL      string
-	httpClient         *http.Client
-	bypassCode         string // Dev-only: accept this code without calling OTP service
+	userService   *services.UserService
+	otpServiceURL string
+	httpClient    *http.Client
+	bypassCode    string // Dev-only: accept this code without calling OTP service
 }
 
 // NewVerificationHandler creates a new VerificationHandler.
@@ -45,6 +46,21 @@ type verifyOTPRequest struct {
 	Code        string `json:"code"`
 }
 
+// placeholderBridgePrefix marks the numbers telephony hands out in dev mode.
+// They are Twilio magic numbers: no SMS can ever reach them.
+const placeholderBridgePrefix = "+1500555"
+
+// skipVerificationSend says why an OTP must NOT be sent, or "" to send it.
+func skipVerificationSend(role, bridgePhone string) string {
+	if role != "representative" {
+		return "role_" + role + "_does_not_verify"
+	}
+	if strings.HasPrefix(bridgePhone, placeholderBridgePrefix) {
+		return "placeholder_bridge_number"
+	}
+	return ""
+}
+
 // SendVerificationOTP handles POST /users/me/verification/send-otp.
 // It forwards the OTP send request to the OTP microservice.
 func (h *VerificationHandler) SendVerificationOTP(c *fiber.Ctx) error {
@@ -61,6 +77,18 @@ func (h *VerificationHandler) SendVerificationOTP(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
 			Error:   "bridgePhone is required",
+		})
+	}
+
+	// Only an unverified representative verifies. App builds up to 198 fire
+	// this for EVERY signed in account on every feed mount (the hook ran before
+	// the banner's role check), which was 253 failed SMS sends in three weeks.
+	// Answer those with a quiet success instead of texting anyone.
+	if reason := skipVerificationSend(claims.Role, req.BridgePhone); reason != "" {
+		log.Printf("[VERIFICATION] Send skipped for user %s: %s", claims.UserID, reason)
+		return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+			Success: true,
+			Data:    map[string]string{"message": "Verification not required", "skipped": reason},
 		})
 	}
 

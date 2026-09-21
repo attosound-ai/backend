@@ -158,11 +158,11 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
           "user.deleted" ->
             data = payload["data"] || payload
             user_ids = data["userIds"] || []
-            Logger.info("Deleting chat data for users: #{inspect(user_ids)}")
+            Logger.info("Processing user.deleted for: #{inspect(user_ids)}")
 
-            for uid <- user_ids do
-              ChatService.Conversations.ConversationService.delete_all_for_user(uid)
-            end
+            # brod forces us to ACK, so a failed cascade must NOT vanish silently:
+            # retry briefly, then dead-letter (topic + table + Sentry) before ACK.
+            Enum.each(user_ids, &process_user_deletion/1)
 
           _ ->
             nil
@@ -173,5 +173,64 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
     end
 
     {:ok, :ack, state}
+  end
+
+  # --- user.deleted cascade with retry + dead-letter ---
+
+  @max_inline_attempts 2
+  @inline_backoff_ms 200
+
+  defp process_user_deletion(user_id) do
+    user_id = to_string(user_id)
+
+    case attempt_delete(user_id, 1) do
+      {:ok, summary} ->
+        ChatService.Telemetry.Audit.log(:user_deletion_completed, summary)
+
+      {:error, reason, partial} ->
+        send_to_dlq(user_id, reason, partial)
+    end
+  end
+
+  # One quick inline retry; serious retries are delegated to the DLQ reprocessor
+  # so we never block this partition for long.
+  defp attempt_delete(user_id, attempt) do
+    case ChatService.Conversations.AccountDeletion.delete_all_for_user(user_id) do
+      {:ok, summary} ->
+        {:ok, summary}
+
+      {:error, _reason, _partial} when attempt < @max_inline_attempts ->
+        Process.sleep(@inline_backoff_ms)
+        attempt_delete(user_id, attempt + 1)
+
+      {:error, reason, partial} ->
+        {:error, reason, partial}
+    end
+  end
+
+  defp send_to_dlq(user_id, reason, partial) do
+    Logger.error("user.deleted cascade failed for #{user_id}: #{inspect(reason)} — routing to DLQ")
+
+    ChatService.KafkaProducer.produce("user.deleted.dlq", user_id, %{
+      "userId" => user_id,
+      "reason" => inspect(reason),
+      "partial" => inspect(partial),
+      "failed_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+    })
+
+    ChatService.Repo.execute_prepared(
+      "INSERT INTO failed_deletions (user_id, reason, attempts, failed_at) VALUES (?, ?, ?, ?)",
+      %{
+        "user_id" => {"text", user_id},
+        "reason" => {"text", inspect(reason)},
+        "attempts" => {"int", @max_inline_attempts},
+        "failed_at" => {"timestamp", DateTime.utc_now()}
+      }
+    )
+
+    Sentry.capture_message("user.deleted chat cascade routed to DLQ",
+      level: :error,
+      extra: %{user_id: user_id, reason: inspect(reason)}
+    )
   end
 end

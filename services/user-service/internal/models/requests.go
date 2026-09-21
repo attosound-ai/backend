@@ -34,10 +34,10 @@ type PreRegisterRequest struct {
 
 // ManagedCreatorFields holds the account details for creating a real creator account.
 type ManagedCreatorFields struct {
-	Email            string  `json:"email" validate:"required,email"`
-	Password         string  `json:"password" validate:"required,min=8"`
-	Username         string  `json:"username" validate:"required,min=3,max=50"`
-	DisplayName      string  `json:"displayName" validate:"required,min=1,max=100"`
+	Email            string   `json:"email" validate:"required,email"`
+	Password         string   `json:"password" validate:"required,min=8"`
+	Username         string   `json:"username" validate:"required,min=3,max=50"`
+	DisplayName      string   `json:"displayName" validate:"required,min=1,max=100"`
 	PhoneCountryCode *string  `json:"phoneCountryCode,omitempty"`
 	PhoneNumber      *string  `json:"phoneNumber,omitempty"`
 	Avatar           *string  `json:"avatar,omitempty"`
@@ -50,7 +50,7 @@ type CompleteRegistrationRequest struct {
 	Role                 string                `json:"role" validate:"required,oneof=creator representative listener"`
 	InmateNumber         *string               `json:"inmateNumber,omitempty"`
 	RepresentativeFields *RepresentativeFields `json:"representativeFields,omitempty"`
-	ManagedCreatorFields *ManagedCreatorFields  `json:"managedCreatorFields,omitempty"`
+	ManagedCreatorFields *ManagedCreatorFields `json:"managedCreatorFields,omitempty"`
 }
 
 // UpdateProfileRequest is the DTO for updating user profile fields.
@@ -134,21 +134,21 @@ type CompleteRegistrationResponse struct {
 
 // UserProfile is the public-facing user data returned in API responses.
 type UserProfile struct {
-	ID                 uint64  `json:"id"`
-	Username           string  `json:"username"`
-	Email              string  `json:"email"`
-	PhoneCountryCode   *string `json:"phoneCountryCode,omitempty"`
-	PhoneNumber        *string `json:"phoneNumber,omitempty"`
-	DisplayName        string  `json:"displayName"`
-	Avatar             *string `json:"avatar,omitempty"`
-	Bio                *string `json:"bio,omitempty"`
-	Role               string  `json:"role"`
-	InmateNumber       *string `json:"inmateNumber,omitempty"`
-	CreatorName        *string `json:"creatorName,omitempty"`
-	InmateState        *string `json:"inmateState,omitempty"`
-	Relationship       *string `json:"relationship,omitempty"`
-	ConsentToRecording *bool   `json:"consentToRecording,omitempty"`
-	CreatorEmail       *string `json:"creatorEmail,omitempty"`
+	ID                 uint64   `json:"id"`
+	Username           string   `json:"username"`
+	Email              string   `json:"email"`
+	PhoneCountryCode   *string  `json:"phoneCountryCode,omitempty"`
+	PhoneNumber        *string  `json:"phoneNumber,omitempty"`
+	DisplayName        string   `json:"displayName"`
+	Avatar             *string  `json:"avatar,omitempty"`
+	Bio                *string  `json:"bio,omitempty"`
+	Role               string   `json:"role"`
+	InmateNumber       *string  `json:"inmateNumber,omitempty"`
+	CreatorName        *string  `json:"creatorName,omitempty"`
+	InmateState        *string  `json:"inmateState,omitempty"`
+	Relationship       *string  `json:"relationship,omitempty"`
+	ConsentToRecording *bool    `json:"consentToRecording,omitempty"`
+	CreatorEmail       *string  `json:"creatorEmail,omitempty"`
 	CreatorPhone       *string  `json:"creatorPhone,omitempty"`
 	CreatorTypes       []string `json:"creatorTypes,omitempty"`
 	CreatorGenres      []string `json:"creatorGenres,omitempty"`
@@ -164,28 +164,40 @@ type UserProfile struct {
 	Location         *string `json:"location,omitempty"`
 	RecordLabel      *string `json:"recordLabel,omitempty"`
 	BookingEmail     *string `json:"bookingEmail,omitempty"`
-	ProfileVerified    bool     `json:"profileVerified"`
-	TwoFactorEnabled   bool   `json:"twoFactorEnabled"`
-	TwoFactorMethod    string `json:"twoFactorMethod"`
-	RepresentativeID   *uint64 `json:"representativeId,omitempty"`
-	IsManagedAccount   bool    `json:"isManagedAccount"`
-	FollowersCount     int64   `json:"followersCount"`
-	FollowingCount     int64   `json:"followingCount"`
-	PostsCount         int64   `json:"postsCount"`
-	CreatedAt          string  `json:"createdAt"`
+	ProfileVerified  bool    `json:"profileVerified"`
+	TwoFactorEnabled bool    `json:"twoFactorEnabled"`
+	TwoFactorMethod  string  `json:"twoFactorMethod"`
+	RepresentativeID *uint64 `json:"representativeId,omitempty"`
+	IsManagedAccount bool    `json:"isManagedAccount"`
+	FollowersCount   int64   `json:"followersCount"`
+	FollowingCount   int64   `json:"followingCount"`
+	PostsCount       int64   `json:"postsCount"`
+	CreatedAt        string  `json:"createdAt"`
 }
 
 // ForgotPasswordRequest initiates the password reset flow.
+//
+// Accepts either `email` (legacy field, kept for backwards compat with
+// older clients) or `identifier` (new field — username for managed
+// creators who have no email of their own, or an email for everyone
+// else). At least one must be provided. For managed creators we route
+// the OTP to the linked representative's email; see auth_service.go.
 type ForgotPasswordRequest struct {
-	Email  string `json:"email" validate:"required,email"`
-	Locale string `json:"locale,omitempty"`
+	Email      string `json:"email,omitempty" validate:"omitempty,email"`
+	Identifier string `json:"identifier,omitempty"`
+	Locale     string `json:"locale,omitempty"`
 }
 
 // ResetPasswordRequest sets a new password after OTP verification.
+//
+// Same identifier semantics as ForgotPasswordRequest. The OTP is verified
+// against whichever email actually received it (the user's own, or the
+// linked representative's for managed creators).
 type ResetPasswordRequest struct {
-	Email    string `json:"email" validate:"required,email"`
-	OTP      string `json:"otp" validate:"required,len=6"`
-	Password string `json:"password" validate:"required,min=8"`
+	Email      string `json:"email,omitempty" validate:"omitempty,email"`
+	Identifier string `json:"identifier,omitempty"`
+	OTP        string `json:"otp" validate:"required,len=6"`
+	Password   string `json:"password" validate:"required,min=8"`
 }
 
 // InmateLookupResponse holds parsed inmate data from a state DOC website.
@@ -240,16 +252,16 @@ func (u *User) ToProfile() *UserProfile {
 		CreatorPhone:       u.CreatorPhone,
 		CreatorTypes:       u.CreatorTypes,
 		CreatorGenres:      u.CreatorGenres,
-		SocialInstagram:   u.SocialInstagram,
-		SocialTiktok:      u.SocialTiktok,
-		SocialYoutube:     u.SocialYoutube,
-		SocialSoundcloud:  u.SocialSoundcloud,
-		SocialSpotify:     u.SocialSpotify,
-		SocialTwitter:     u.SocialTwitter,
-		Website:           u.Website,
-		Location:          u.Location,
-		RecordLabel:       u.RecordLabel,
-		BookingEmail:      u.BookingEmail,
+		SocialInstagram:    u.SocialInstagram,
+		SocialTiktok:       u.SocialTiktok,
+		SocialYoutube:      u.SocialYoutube,
+		SocialSoundcloud:   u.SocialSoundcloud,
+		SocialSpotify:      u.SocialSpotify,
+		SocialTwitter:      u.SocialTwitter,
+		Website:            u.Website,
+		Location:           u.Location,
+		RecordLabel:        u.RecordLabel,
+		BookingEmail:       u.BookingEmail,
 		ProfileVerified:    u.ProfileVerified,
 		FollowersCount:     u.FollowersCount,
 		FollowingCount:     u.FollowingCount,

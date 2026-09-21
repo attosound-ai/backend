@@ -29,6 +29,109 @@ func NewUserHandler(userService *services.UserService, otpServiceURL ...string) 
 	return &UserHandler{userService: userService, otpServiceURL: url}
 }
 
+// GetPushTokens handles GET /users/:id/push-tokens.
+//
+// Returns the active Expo push tokens registered for the user, so
+// telephony-service can fall back to a regular APNS/FCM push when an
+// incoming-call invite fails to reach the Voice SDK (no answer / unreachable
+// device). Same trust posture as GET /users/:id/linked-account-ids —
+// consumed only on the private network, no JWT required.
+//
+// Response shape: { success: true, data: { tokens: [{token, platform,
+// deviceId}, ...] } }.
+func (h *UserHandler) GetPushTokens(c *fiber.Ctx) error {
+	idStr := c.Params("id")
+	if idStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "user ID is required",
+		})
+	}
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid user ID format",
+		})
+	}
+
+	tokens, err := h.userService.GetActivePushTokensForUser(id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	// Project to a minimal, stable shape so internal callers don't depend on
+	// the GORM model.
+	type pushTokenResp struct {
+		Token    string `json:"token"`
+		Platform string `json:"platform"`
+		DeviceID string `json:"deviceId"`
+	}
+	resp := make([]pushTokenResp, 0, len(tokens))
+	for _, t := range tokens {
+		resp = append(resp, pushTokenResp{
+			Token:    t.Token,
+			Platform: t.Platform,
+			DeviceID: t.DeviceID,
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    fiber.Map{"tokens": resp},
+	})
+}
+
+// GetLinkedAccountIDs handles GET /users/:id/linked-account-ids.
+//
+// Returns the full set of user IDs in the linked account group
+// (representative + all managed creators) for a given user. Used by
+// telephony-service to fan out TwiML across every reachable Voice SDK
+// identity on a device, so a PSTN call to one bridge can ring every
+// linked account.
+//
+// Response shape: { success: true, data: { userIds: [int, ...] } }.
+// Standalone users (no representative_id, not managed) get a single-element
+// array. The requested userId is always included in the result.
+func (h *UserHandler) GetLinkedAccountIDs(c *fiber.Ctx) error {
+	idStr := c.Params("id")
+	if idStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "user ID is required",
+		})
+	}
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "invalid user ID format",
+		})
+	}
+
+	ids, err := h.userService.GetLinkedAccountIDsForUser(id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+	if ids == nil {
+		return c.Status(fiber.StatusNotFound).JSON(models.APIResponse{
+			Success: false,
+			Error:   "user not found",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
+		Success: true,
+		Data:    fiber.Map{"userIds": ids},
+	})
+}
+
 // GetUser handles GET /users/:id
 func (h *UserHandler) GetUser(c *fiber.Ctx) error {
 	id := c.Params("id")

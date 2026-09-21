@@ -374,64 +374,17 @@ defmodule ChatService.Conversations.ConversationService do
 
   @doc """
   Delete all conversations and their messages for a user (account deletion).
+
+  Delegates to `ChatService.Conversations.AccountDeletion`, which is robust
+  (per-step error capture), idempotent, also cleans up reactions, and emits
+  telemetry. Kept for backward compatibility; new callers should use the
+  primitive directly to get the structured `{:ok, summary} | {:error, reason,
+  partial}` result.
   """
   def delete_all_for_user(user_id) do
-    # Get all conversations + participant_ids for this user
-    query = """
-    SELECT conversation_id, participant_id FROM conversations WHERE user_id = ?
-    """
-
-    params = %{"user_id" => {"text", user_id}}
-
-    case Repo.execute_prepared(query, params) do
-      {:ok, result} ->
-        rows = if is_list(result), do: result, else: Enum.to_list(result)
-
-        for row <- rows do
-          conv_id = row["conversation_id"]
-          participant_id = row["participant_id"]
-
-          if conv_id do
-            # Delete messages for this conversation
-            delete_msgs = "DELETE FROM messages WHERE conversation_id = ?"
-            Repo.execute_prepared(delete_msgs, %{"conversation_id" => {"uuid", conv_id}})
-
-            # Delete the other participant's copy of this conversation.
-            # Cassandra PK is (user_id, updated_at, conversation_id) — must find
-            # the exact updated_at to delete specific rows.
-            if participant_id do
-              find_other = "SELECT updated_at, conversation_id FROM conversations WHERE user_id = ?"
-              case Repo.execute_prepared(find_other, %{"user_id" => {"text", to_string(participant_id)}}) do
-                {:ok, other_rows} ->
-                  other_rows
-                  |> Enum.to_list()
-                  |> Enum.filter(fn r -> to_string(r["conversation_id"]) == to_string(conv_id) end)
-                  |> Enum.each(fn r ->
-                    Repo.execute_prepared(
-                      "DELETE FROM conversations WHERE user_id = ? AND updated_at = ? AND conversation_id = ?",
-                      %{
-                        "user_id" => {"text", to_string(participant_id)},
-                        "updated_at" => {"timestamp", r["updated_at"]},
-                        "conversation_id" => {"uuid", to_string(conv_id)}
-                      }
-                    )
-                  end)
-                _ -> :ok
-              end
-            end
-          end
-        end
-
-        # Delete all conversations for the deleted user
-        delete_convs = "DELETE FROM conversations WHERE user_id = ?"
-        Repo.execute_prepared(delete_convs, %{"user_id" => {"text", user_id}})
-
-        Logger.info("Deleted chat data for user #{user_id}: #{length(rows)} conversations (both sides)")
-        :ok
-
-      {:error, reason} ->
-        Logger.error("Failed to delete chat data for user #{user_id}: #{inspect(reason)}")
-        {:error, reason}
+    case ChatService.Conversations.AccountDeletion.delete_all_for_user(user_id) do
+      {:ok, _summary} -> :ok
+      {:error, reason, _partial} -> {:error, reason}
     end
   end
 end

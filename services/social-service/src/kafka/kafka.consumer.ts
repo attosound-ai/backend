@@ -12,6 +12,10 @@ import { RedisClientProvider } from "../redis/redis-client.provider";
 import { PrismaService } from "../prisma/prisma.service";
 import { PushService } from "../push/push.service";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
+import {
+  officialFollowLog,
+  errorFields,
+} from "../common/telemetry/official-follow.telemetry";
 
 @Injectable()
 export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
@@ -165,6 +169,117 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     });
 
     this.logger.log(`Welcome notification created for user ${userId}`);
+
+    await this.autoFollowOfficialAccount(userId);
+  }
+
+  /**
+   * Make every new user follow the official ATTO SOUND account (id from the
+   * OFFICIAL_ACCOUNT_ID env) so its posts reach them via the normal
+   * content.published fan-out (feed entry + new_post notification + push).
+   *
+   * This is a SILENT edge: unlike FollowsService.follow() we deliberately do
+   * NOT create a "follow" notification or send a push — otherwise the official
+   * account would be spammed with one "X started following you" per signup.
+   *
+   * Idempotent: `createMany({ skipDuplicates: true })` makes a redelivered
+   * user.created event (Kafka is at-least-once) a no-op instead of a crash.
+   * No-op when OFFICIAL_ACCOUNT_ID is unset, or for the official account itself.
+   */
+  private async autoFollowOfficialAccount(userId: string): Promise<void> {
+    const officialId = process.env.OFFICIAL_ACCOUNT_ID;
+
+    // The whole feature silently no-ops when the env is missing — that's the
+    // single most likely "why is nobody following ATTO?" prod cause, so make it
+    // LOUD (warn) instead of an invisible early return.
+    if (!officialId) {
+      this.logger.warn(
+        officialFollowLog("signup_auto_follow.skipped_unconfigured", "warn", {
+          userId,
+          remediation:
+            "Set OFFICIAL_ACCOUNT_ID (the ATTO account's numeric user id, e.g. 152) in the social-service environment, then redeploy.",
+        }),
+      );
+      return;
+    }
+    if (userId === officialId) {
+      this.logger.debug(
+        officialFollowLog("signup_auto_follow.skipped_self", "debug", {
+          userId,
+          officialId,
+          outcome: "skipped",
+        }),
+      );
+      return;
+    }
+
+    const startedAt = Date.now();
+    try {
+      const { count } = await this.prisma.follow.createMany({
+        data: [{ followerId: userId, followingId: officialId }],
+        skipDuplicates: true,
+      });
+
+      if (count === 0) {
+        // Idempotent: redelivered user.created (Kafka is at-least-once) or a
+        // user the backfill already covered. Not a failure.
+        this.logger.debug(
+          officialFollowLog("signup_auto_follow.already_following", "debug", {
+            userId,
+            officialId,
+            outcome: "duplicate",
+            durationMs: Date.now() - startedAt,
+          }),
+        );
+        return;
+      }
+
+      // Keep the official account's followers SET warm so a post published
+      // within the cache's 1h TTL fans out to this brand-new follower too.
+      // Best-effort — the DB row above is the source of truth and the cache
+      // re-materializes from it on the next cold read.
+      let cacheWarmed = true;
+      try {
+        await this.followGraph.addEdge(userId, officialId);
+      } catch (err) {
+        cacheWarmed = false;
+        this.logger.warn(
+          officialFollowLog("signup_auto_follow.cache_warm_failed", "warn", {
+            userId,
+            officialId,
+            outcome: "created",
+            ...errorFields(err),
+            remediation:
+              "Non-fatal: the DB follow edge exists; the Redis follow-graph set self-heals on its next cold read (1h TTL). Investigate Redis only if many of these appear together.",
+          }),
+        );
+      }
+
+      this.logger.log(
+        officialFollowLog("signup_auto_follow.success", "log", {
+          userId,
+          officialId,
+          outcome: "created",
+          cacheWarmed,
+          durationMs: Date.now() - startedAt,
+        }),
+      );
+    } catch (err) {
+      // The edge was NOT created — this user will NOT receive ATTO's posts via
+      // fan-out. There is no Kafka retry for this branch (the welcome
+      // notification already committed), so this log is the only signal.
+      this.logger.error(
+        officialFollowLog("signup_auto_follow.db_failed", "error", {
+          userId,
+          officialId,
+          outcome: "error",
+          durationMs: Date.now() - startedAt,
+          ...errorFields(err),
+          remediation:
+            "User did NOT auto-follow ATTO. Re-run scripts/backfill-official-follows.ts (idempotent) to repair this and any other missed users.",
+        }),
+      );
+    }
   }
 
   /**

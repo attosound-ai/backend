@@ -1,16 +1,55 @@
 import { Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
+import type {
+  ExportOptions,
+  ProjectSettings,
+} from "./project-settings";
 import { QueryDeepPartialEntity } from "typeorm/query-builder/QueryPartialEntity";
 import { Project } from "../entities/project.entity";
 import { TimelineClip } from "../entities/timeline-clip.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
 import { AudioStorageService } from "../media/audio-storage.service";
 import { AudioProcessorService } from "./audio-processor.service";
+import { AnalyticsService } from "../analytics/analytics.service";
+
+/**
+ * Mirror of the app's lane mixer rules (front laneMixer.computeLaneEffectiveVolume)
+ * so the exported WAV matches the editor preview:
+ *   1. muted lane        -> 0
+ *   2. any lane soloed and this one is not -> 0
+ *   3. otherwise         -> clipVolume * 10^(gainDb / 20), floored to 0 below -60 dB
+ */
+type LaneMix = { gainDb?: number; muted?: boolean; solo?: boolean };
+const DB_MIN = -60;
+const dbToLinear = (db: number): number => Math.pow(10, db / 20);
+function mixVolume(
+  clipVolume: number,
+  lane: LaneMix | undefined,
+  anySolo: boolean,
+): number {
+  if (lane?.muted) return 0;
+  if (anySolo && !lane?.solo) return 0;
+  const gainDb =
+    typeof lane?.gainDb === "number" && Number.isFinite(lane.gainDb)
+      ? lane.gainDb
+      : 0;
+  const effective = Math.max(0, clipVolume) * dbToLinear(gainDb);
+  return effective < dbToLinear(DB_MIN) ? 0 : effective;
+}
 import { promises as fs } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
+
+/**
+ * The project pipeline's real audio contract: 8 kHz mono PCM WAV. Twilio call
+ * recordings arrive at this rate, `convertToWav` forces it, the waveform reader
+ * assumes mono int16, and `concatFiles` exports with `-c copy`, which requires
+ * every clip on a lane to share it. Imports MUST be normalised to it or exports
+ * break. Named here so the contract is stated once instead of hardcoded.
+ */
+const TARGET_SAMPLE_RATE = 8000;
 
 @Injectable()
 export class ProjectsService {
@@ -25,6 +64,7 @@ export class ProjectsService {
     private readonly segmentRepo: Repository<AudioSegment>,
     private readonly storageService: AudioStorageService,
     private readonly audioProcessor: AudioProcessorService,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   async createProject(
@@ -124,6 +164,7 @@ export class ProjectsService {
           pan?: number;
         }
       >;
+      settings?: ProjectSettings;
     },
   ): Promise<Project> {
     // Ownership check first.
@@ -143,6 +184,10 @@ export class ProjectsService {
     if (data.status !== undefined) patch.status = data.status;
     if (data.lanes !== undefined) {
       patch.lanes = { ...data.lanes };
+    }
+    if (data.settings !== undefined) {
+      // Merge so the app can send one section (master, exportPrefs) at a time.
+      patch.settings = { ...(existing.settings ?? {}), ...data.settings };
     }
 
     if (Object.keys(patch).length > 0) {
@@ -171,6 +216,14 @@ export class ProjectsService {
     projectId: string,
     userId: string,
     laneIndex: number = 0,
+    /**
+     * Explicit timeline position for the auto-created clip, in ms. When the
+     * client knows where the clip belongs (in-call recording: the playhead the
+     * user was listening at), it sends this so the take lands where it was
+     * performed. Undefined keeps the historical append-after-last-clip
+     * behaviour, so older app builds are unaffected.
+     */
+    positionInTimeline?: number,
   ): Promise<AudioSegment> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
@@ -215,10 +268,17 @@ export class ProjectsService {
     );
     const lastLaneClip = laneClips[laneClips.length - 1];
     const nextOrder = existingClips.length;
-    const nextPosition = lastLaneClip
+    // Honour an explicit position when the client sent one (in-call recording
+    // lands at the playhead it was performed over); otherwise append after the
+    // last clip on this lane, as before.
+    const appendPosition = lastLaneClip
       ? lastLaneClip.positionInTimeline +
         (lastLaneClip.endInSegment - lastLaneClip.startInSegment)
       : 0;
+    const nextPosition =
+      typeof positionInTimeline === "number" && positionInTimeline >= 0
+        ? positionInTimeline
+        : appendPosition;
 
     const clip = this.clipRepo.create({
       projectId,
@@ -290,6 +350,8 @@ export class ProjectsService {
       order: number;
       volume?: number;
       laneIndex?: number;
+      sourceSegmentId?: string | null;
+      effects?: Record<string, unknown> | null;
     }[],
   ): Promise<TimelineClip[]> {
     const project = await this.projectRepo.findOne({
@@ -310,14 +372,26 @@ export class ProjectsService {
         order: clip.order,
         volume: clip.volume ?? 1.0,
         laneIndex: clip.laneIndex ?? 0,
+        sourceSegmentId: clip.sourceSegmentId ?? null,
+        effects: clip.effects ?? null,
       }),
     );
 
     const saved = await this.clipRepo.save(entities);
 
     // Clean up orphaned segments: segments in this project with no remaining clips
+    // A clip references TWO segments once effects are applied: `segmentId`
+    // (the render it plays) and `sourceSegmentId` (the dry original it can be
+    // reverted to / re-rendered from). Detaching the original here broke
+    // "Remove effects" on the very next autosave.
     const referencedSegmentIds = [
-      ...new Set(clips.map((c) => c.segmentId)),
+      ...new Set(
+        clips.flatMap((c) =>
+          [c.segmentId, c.sourceSegmentId].filter(
+            (id): id is string => typeof id === "string" && id.length > 0,
+          ),
+        ),
+      ),
     ];
     const allSegments = await this.segmentRepo.find({
       where: { projectId },
@@ -356,6 +430,7 @@ export class ProjectsService {
   async exportProject(
     projectId: string,
     userId: string,
+    options?: ExportOptions,
   ): Promise<{ downloadUrl: string; fileSizeBytes: number }> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
@@ -367,7 +442,67 @@ export class ProjectsService {
       order: { order: "ASC" },
     });
 
-    const result = await this.audioProcessor.exportProject(clips, projectId);
+    // Fold each lane's mixer state (gain dB, mute, solo) into the per clip
+    // volume the ffmpeg graph applies. The editor preview already does exactly
+    // this; before, the export only used the raw clip volume, so lowering a
+    // lane's gain changed what the user heard while editing but not what got
+    // posted ("still loud after I turned it down", Sep 2026).
+    const lanes = (project.lanes ?? {}) as Record<string, LaneMix | undefined>;
+    const anySolo = Object.values(lanes).some((l) => l?.solo === true);
+    const mixed = clips.map((clip) => ({
+      ...clip,
+      volume: mixVolume(
+        typeof clip.volume === "number" ? clip.volume : 1,
+        lanes[String(clip.laneIndex ?? 0)],
+        anySolo,
+      ),
+    }));
+
+    const laneSummary = Object.entries(lanes).map(([idx, l]) => ({
+      lane: Number(idx),
+      gain_db: l?.gainDb ?? 0,
+      muted: l?.muted === true,
+      solo: l?.solo === true,
+      clips: clips.filter((c) => String(c.laneIndex ?? 0) === idx).length,
+    }));
+    const silenced = mixed.filter((c) => c.volume === 0).length;
+    this.logger.log(
+      `Export mix ${projectId}: clips=${clips.length} anySolo=${anySolo} silenced=${silenced} lanes=${JSON.stringify(laneSummary)}`,
+    );
+    // Same shape as the app's project_export_mix_snapshot so intent (client)
+    // and render (server) diff in one PostHog query by project_id.
+    this.analytics.capture(userId, "backend_project_export_mix", {
+      project_id: projectId,
+      clip_count: clips.length,
+      lanes: laneSummary,
+      any_solo: anySolo,
+      lanes_with_gain: laneSummary.filter((l) => l.gain_db !== 0).length,
+      clips_non_unity_volume: clips.filter(
+        (c) => typeof c.volume === "number" && c.volume !== 1,
+      ).length,
+      clips_silenced: silenced,
+      effective_volumes: mixed.map((c) => Number(c.volume.toFixed(4))),
+    });
+
+    const settings = (project.settings ?? {}) as ProjectSettings;
+    const exportOptions: ExportOptions = {
+      ...(settings.exportPrefs ?? {}),
+      ...(options ?? {}),
+    };
+    if (options && Object.keys(options).length > 0) {
+      // Remember the exporter's picks for the next mixdown.
+      await this.projectRepo.update(
+        { id: projectId, userId },
+        { settings: { ...settings, exportPrefs: exportOptions } },
+      );
+    }
+    const result = await this.audioProcessor.exportProject(
+      mixed,
+      projectId,
+      settings.master,
+      exportOptions,
+      settings.automation,
+    );
 
     // Update project status
     project.status = "exported";
@@ -376,12 +511,52 @@ export class ProjectsService {
     return result;
   }
 
+  async uploadCover(
+    projectId: string,
+    userId: string,
+    file: Express.Multer.File,
+  ): Promise<{ coverKey: string }> {
+    const project = await this.projectRepo.findOne({
+      where: { id: projectId, userId },
+    });
+    if (!project) throw new NotFoundException("Project not found");
+    const ext = file.mimetype === "image/png" ? "png" : "jpg";
+    const coverKey = `exports/covers/${projectId}/${randomUUID()}.${ext}`;
+    await this.storageService.upload(coverKey, file.buffer, file.mimetype);
+    const settings = (project.settings ?? {}) as ProjectSettings;
+    await this.projectRepo.update(
+      { id: projectId, userId },
+      {
+        settings: {
+          ...settings,
+          exportPrefs: { ...(settings.exportPrefs ?? {}), coverKey },
+        },
+      },
+    );
+    return { coverKey };
+  }
+
   async importAudioFile(
     projectId: string,
     userId: string,
     file: Express.Multer.File,
     laneIndex: number,
-  ): Promise<TimelineClip> {
+    /**
+     * Explicit timeline position for the created clip, in ms. An in-call take
+     * belongs at the playhead it was performed over; without this the clip is
+     * appended after the last clip on the lane and the performance reads as
+     * detached from the track it was sung against. Undefined keeps the append
+     * behaviour, so older app builds are unaffected.
+     */
+    positionInTimeline?: number,
+    /**
+     * false = store the audio as a segment ONLY, no clip. Used by the
+     * non-destructive effects flow: the client renders an effected copy of a
+     * clip's audio and needs it as a segment it can point the EXISTING clip at,
+     * not a second clip on the lane. Default true keeps the import behaviour.
+     */
+    createClip = true,
+  ): Promise<TimelineClip | AudioSegment> {
     const project = await this.projectRepo.findOne({
       where: { id: projectId, userId },
     });
@@ -395,15 +570,46 @@ export class ProjectsService {
     await fs.writeFile(tmpInput, file.buffer);
 
     try {
-      // Convert to WAV if not already
-      const isWav =
-        file.mimetype === "audio/wav" || file.mimetype === "audio/x-wav";
-      const wavPath = isWav
+      // Normalise by PROBING THE BYTES, never by trusting the client's mime.
+      // The old check (`mimetype === audio/wav`) let a 44.1 kHz stereo WAV through
+      // untouched while the row below recorded sampleRate 8000. Since `concatFiles`
+      // exports with `-c copy` (identical formats required across a lane), such an
+      // import silently corrupted exports when mixed with 8 kHz mono call
+      // recordings. It also meant `audio/vnd.wave` — the mime iOS actually sent for
+      // a real user import — fell through to a full ffmpeg resample by accident
+      // rather than by decision.
+      const probe = await this.audioProcessor
+        .probeAudio(tmpInput)
+        .catch(() => null);
+      const alreadyNormalised =
+        probe !== null &&
+        probe.sampleRate === TARGET_SAMPLE_RATE &&
+        probe.channels === 1 &&
+        probe.codecName.startsWith("pcm_");
+      const wavPath = alreadyNormalised
         ? tmpInput
         : await this.audioProcessor.convertToWav(tmpInput);
 
-      // Get duration
-      const durationMs = await this.audioProcessor.getDurationMs(wavPath);
+      this.logger.log(
+        "Import normalise: project=%s mime=%s probed=%s skipped_ffmpeg=%s",
+        projectId,
+        file.mimetype,
+        probe
+          ? `${probe.sampleRate}Hz/${probe.channels}ch/${probe.codecName}`
+          : "probe_failed",
+        alreadyNormalised,
+      );
+
+      // Duration from the NORMALISED file (what we actually store). Reuse the
+      // probe we already ran when the file needed no conversion — ffprobe is a
+      // PROCESS SPAWN, and on a cold container each one costs a meaningful slice
+      // of the request. Measured Aug 3: with the client now sending an
+      // already-normalised 1.2 MB file, the upload took 1.1 s and the SERVER took
+      // 5.3 s, so the tail is the bottleneck and every avoidable spawn counts.
+      const durationMs =
+        alreadyNormalised && probe && probe.durationMs > 0
+          ? probe.durationMs
+          : await this.audioProcessor.getDurationMs(wavPath);
 
       // Upload to S3
       const wavBuffer = await fs.readFile(wavPath);
@@ -423,7 +629,12 @@ export class ProjectsService {
         endMs: durationMs,
         durationMs,
         format: "wav",
-        sampleRate: 8000,
+        // Record what was ACTUALLY stored. After the probe-then-convert above this
+        // is always the target rate, but hardcoding it was how the mismatch that
+        // corrupted exports stayed invisible.
+        sampleRate: alreadyNormalised
+          ? (probe?.sampleRate ?? TARGET_SAMPLE_RATE)
+          : TARGET_SAMPLE_RATE,
         fileSizeBytes: wavBuffer.length,
         storageBucket: bucket,
         storageKey,
@@ -432,20 +643,36 @@ export class ProjectsService {
       });
       const savedSegment = await this.segmentRepo.save(segment);
 
+      if (!createClip) {
+        this.logger.log(
+          "Segment stored (no clip): project=%s segment=%s duration=%dms",
+          projectId,
+          savedSegment.id,
+          durationMs,
+        );
+        return savedSegment;
+      }
+
       // Create TimelineClip on specified lane
       const existingClips = await this.clipRepo.find({
         where: { projectId },
         order: { order: "ASC" },
       });
 
-      // Find position on the target lane
+      // Find position on the target lane. An explicit client position wins: an
+      // in-call take belongs at the playhead it was performed over, not appended
+      // after whatever else is on the lane.
       const laneClips = existingClips.filter((c) => c.laneIndex === laneIndex);
       const lastLaneClip = laneClips[laneClips.length - 1];
       const nextOrder = lastLaneClip ? lastLaneClip.order + 1 : 0;
-      const nextPosition = lastLaneClip
+      const appendPosition = lastLaneClip
         ? lastLaneClip.positionInTimeline +
           (lastLaneClip.endInSegment - lastLaneClip.startInSegment)
         : 0;
+      const nextPosition =
+        typeof positionInTimeline === "number" && positionInTimeline >= 0
+          ? positionInTimeline
+          : appendPosition;
 
       const clip = this.clipRepo.create({
         projectId,

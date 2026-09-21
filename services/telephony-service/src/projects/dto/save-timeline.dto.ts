@@ -4,6 +4,7 @@ import {
   IsInt,
   IsOptional,
   IsNumber,
+  IsObject,
   ValidateNested,
   Min,
 } from "class-validator";
@@ -37,6 +38,16 @@ export class TimelineClipDto {
   @IsInt()
   @Min(0)
   laneIndex?: number;
+
+  /** Dry original when `segmentId` is an effects render (see entity). */
+  @IsOptional()
+  @IsString()
+  sourceSegmentId?: string | null;
+
+  /** Effect chain that produced the rendered segment (opaque client JSON). */
+  @IsOptional()
+  @IsObject()
+  effects?: Record<string, unknown> | null;
 }
 
 export class SaveTimelineDto {

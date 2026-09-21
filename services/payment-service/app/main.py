@@ -12,12 +12,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.database import engine
+from app.database import async_session, engine
 from app.grpc.server import serve_grpc, stop_grpc
 from app.kafka.consumer import start_consumer, stop_consumer
 from app.kafka.producer import stop_producer
 from app.middleware.auth import AuthMiddleware
 from app.models import Base
+from app.plan_seed import migrate_plan_column, seed_plans_if_empty
+from app.routers.admin import router as admin_router
 from app.routers.health import router as health_router
 from app.routers.payments import router as payments_router
 from app.routers.subscriptions import router as subscriptions_router
@@ -52,7 +54,15 @@ async def lifespan(_app: FastAPI):
             "ALTER TABLE subscriptions "
             "ADD COLUMN IF NOT EXISTS pending_plan_applies_at TIMESTAMPTZ"
         ))
+        # subscriptions.plan used to be a Postgres enum; the plan catalog
+        # needs a plain string so admin created plans can be assigned.
+        await migrate_plan_column(conn)
     logger.info("Database tables ensured")
+
+    # First boot on an existing database: copy the hardcoded plans into the
+    # plans table. Never overwrites rows that are already there.
+    async with async_session() as session:
+        await seed_plans_if_empty(session)
 
     # Start gRPC server
     await serve_grpc()
@@ -97,6 +107,7 @@ app.include_router(health_router)
 app.include_router(payments_router)
 app.include_router(transactions_router)
 app.include_router(subscriptions_router)
+app.include_router(admin_router)
 
 
 # ── Global exception handler ─────────────────────────────────────
