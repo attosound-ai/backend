@@ -36,12 +36,12 @@ const i18n: Record<Locale, Strings> = {
     preview: "Representative instructions — Atto",
     hello: (n) => `Hi, ${n}!`,
     intro:
-      "Thanks for signing up as a representative on Atto. Here are the steps to activate the profile of your artist/loved one:",
+      "Thanks for signing up as a representative on Atto. Here are the steps to activate the profile of your creator/loved one:",
     step1Title: "Take photos",
     step1DescPrefix: "Take ",
     step1DescPhotosCount: "6-7 photographs",
     step1DescSuffix:
-      " of the artist/inmate from different angles: front, left profile, right profile, three-quarter, and full body. Photos should have good lighting and a neutral background.",
+      " of the creator/inmate from different angles: front, left profile, right profile, three-quarter, and full body. Photos should have good lighting and a neutral background.",
     step2Title: "Send photos by postal mail",
     step2Desc: "Mail the printed photos to the following address:",
     step3Title: "Wait for processing",
@@ -59,12 +59,12 @@ const i18n: Record<Locale, Strings> = {
     preview: "Instrucciones para representantes — Atto",
     hello: (n) => `¡Hola, ${n}!`,
     intro:
-      "Gracias por registrarte como representante en Atto. Aquí tienes los pasos para activar el perfil de tu artista/ser querido:",
+      "Gracias por registrarte como representante en Atto. Aquí tienes los pasos para activar el perfil de tu creador/ser querido:",
     step1Title: "Tomar fotos",
     step1DescPrefix: "Toma ",
     step1DescPhotosCount: "6-7 fotografías",
     step1DescSuffix:
-      " del artista/recluso desde diferentes ángulos: frontal, perfil izquierdo, perfil derecho, tres cuartos, y cuerpo completo. Las fotos deben tener buena iluminación y fondo neutro.",
+      " del creador/recluso desde diferentes ángulos: frontal, perfil izquierdo, perfil derecho, tres cuartos, y cuerpo completo. Las fotos deben tener buena iluminación y fondo neutro.",
     step2Title: "Enviar fotos por correo postal",
     step2Desc: "Envía las fotos impresas a la siguiente dirección:",
     step3Title: "Esperar procesamiento",
@@ -83,12 +83,12 @@ const i18n: Record<Locale, Strings> = {
     preview: "Instruções para representantes — Atto",
     hello: (n) => `Olá, ${n}!`,
     intro:
-      "Obrigado por se cadastrar como representante no Atto. Aqui estão os passos para ativar o perfil do seu artista/ente querido:",
+      "Obrigado por se cadastrar como representante no Atto. Aqui estão os passos para ativar o perfil do seu criador/ente querido:",
     step1Title: "Tirar fotos",
     step1DescPrefix: "Tire ",
     step1DescPhotosCount: "6-7 fotografias",
     step1DescSuffix:
-      " do artista/recluso em diferentes ângulos: frontal, perfil esquerdo, perfil direito, três quartos e corpo inteiro. As fotos devem ter boa iluminação e fundo neutro.",
+      " do criador/recluso em diferentes ângulos: frontal, perfil esquerdo, perfil direito, três quartos e corpo inteiro. As fotos devem ter boa iluminação e fundo neutro.",
     step2Title: "Enviar fotos pelo correio",
     step2Desc: "Envie as fotos impressas para o seguinte endereço:",
     step3Title: "Aguardar o processamento",

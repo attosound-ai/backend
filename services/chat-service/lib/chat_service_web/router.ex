@@ -19,6 +19,9 @@ defmodule ChatServiceWeb.Router do
     post "/messages/conversations", ConversationController, :create
     get "/messages/:chat_id", MessageController, :index
     get "/messages/:chat_id/threads/:thread_id", MessageController, :thread
+    get "/messages/:chat_id/pinned", MessageController, :pinned
+    post "/messages/:chat_id/:message_id/pin", MessageController, :pin
+    delete "/messages/:chat_id/:message_id/pin", MessageController, :unpin
     post "/messages/:chat_id/read", MessageController, :mark_read
     patch "/messages/:chat_id/:message_id", MessageController, :update
     delete "/messages/:chat_id/:message_id", MessageController, :delete

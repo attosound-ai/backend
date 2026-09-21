@@ -48,8 +48,8 @@ const i18n: Record<Locale, Record<WelcomeEmailProps["role"], Strings>> = {
       hello: (n) => `Hi, ${n}!`,
       greeting: "Welcome to a new music experience!",
       description:
-        "Discover unique artists, listen to stories that inspire, and join a community that connects through music.",
-      cta: "Discover artists",
+        "Discover unique creators, listen to stories that inspire, and join a community that connects through music.",
+      cta: "Discover creators",
       footer:
         "If you have any questions, just reply to this email and we'll help.",
     },
@@ -80,8 +80,8 @@ const i18n: Record<Locale, Record<WelcomeEmailProps["role"], Strings>> = {
       hello: (n) => `¡Hola, ${n}!`,
       greeting: "¡Bienvenido a una nueva experiencia musical!",
       description:
-        "Descubre artistas únicos, escucha historias que inspiran y forma parte de una comunidad que conecta a través de la música.",
-      cta: "Descubre artistas",
+        "Descubre creadores únicos, escucha historias que inspiran y forma parte de una comunidad que conecta a través de la música.",
+      cta: "Descubre creadores",
       footer:
         "Si tienes alguna pregunta, responde a este correo y te ayudaremos.",
     },
@@ -112,8 +112,8 @@ const i18n: Record<Locale, Record<WelcomeEmailProps["role"], Strings>> = {
       hello: (n) => `Olá, ${n}!`,
       greeting: "Bem-vindo a uma nova experiência musical!",
       description:
-        "Descubra artistas únicos, ouça histórias que inspiram e faça parte de uma comunidade que se conecta pela música.",
-      cta: "Descobrir artistas",
+        "Descubra criadores únicos, ouça histórias que inspiram e faça parte de uma comunidade que se conecta pela música.",
+      cta: "Descobrir criadores",
       footer:
         "Se tiver dúvidas, responda a este e-mail e te ajudaremos.",
     },

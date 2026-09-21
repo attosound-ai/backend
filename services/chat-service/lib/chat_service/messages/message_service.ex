@@ -420,6 +420,96 @@ defmodule ChatService.Messages.MessageService do
     end
   end
 
+  @doc """
+  Pin a message in a conversation (Telegram and WhatsApp keep a bar with it
+  under the header). Both participants of a private chat may pin, and the
+  pinned set lives in its own table so the bar costs one small read.
+  """
+  def pin_message(conversation_id, message_id, user_id) do
+    now = DateTime.utc_now()
+
+    insert = """
+    INSERT INTO pinned_messages (conversation_id, message_id, pinned_by, pinned_at)
+    VALUES (?, ?, ?, ?)
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id},
+      "pinned_by" => {"text", to_string(user_id)},
+      "pinned_at" => {"timestamp", now}
+    }
+
+    with {:ok, _} <- Repo.execute_prepared(insert, params),
+         {:ok, message} <- get_message(conversation_id, message_id) do
+      payload = %{
+        conversation_id: conversation_id,
+        message_id: message_id,
+        pinned_by: to_string(user_id),
+        pinned_at: DateTime.to_iso8601(now),
+        message: Message.to_map(message)
+      }
+
+      broadcast_event(conversation_id, :message_pinned, payload)
+      {:ok, payload}
+    end
+  end
+
+  @doc """
+  Remove a message from the pinned set.
+  """
+  def unpin_message(conversation_id, message_id, user_id) do
+    query = """
+    DELETE FROM pinned_messages WHERE conversation_id = ? AND message_id = ?
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id}
+    }
+
+    with {:ok, _} <- Repo.execute_prepared(query, params) do
+      payload = %{
+        conversation_id: conversation_id,
+        message_id: message_id,
+        unpinned_by: to_string(user_id)
+      }
+
+      broadcast_event(conversation_id, :message_unpinned, payload)
+      {:ok, payload}
+    end
+  end
+
+  @doc """
+  Every pinned message of a conversation, newest first. Rows whose message is
+  gone (deleted for everyone) are dropped, so the bar never points nowhere.
+  """
+  def get_pinned_messages(conversation_id) do
+    query = """
+    SELECT message_id, pinned_by, pinned_at FROM pinned_messages
+    WHERE conversation_id = ?
+    """
+
+    params = %{"conversation_id" => {"uuid", conversation_id}}
+
+    with {:ok, page} <- Repo.execute_prepared(query, params) do
+      messages =
+        page
+        |> Enum.to_list()
+        |> Enum.map(&to_string(&1["message_id"]))
+        |> Enum.flat_map(fn id ->
+          case get_message(conversation_id, id) do
+            {:ok, %Message{is_deleted: true}} -> []
+            {:ok, msg} -> [msg]
+            _ -> []
+          end
+        end)
+        |> Enum.sort_by(& &1.created_at, {:desc, DateTime})
+
+      {:ok, messages}
+    end
+  end
+
   defp index_thread_message(conversation_id, thread_id, message_id, now) do
     query = """
     INSERT INTO thread_messages (conversation_id, thread_id, message_id, created_at)
