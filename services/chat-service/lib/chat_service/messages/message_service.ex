@@ -36,10 +36,12 @@ defmodule ChatService.Messages.MessageService do
     reply_to_id = Keyword.get(opts, :reply_to_id)
     reply_to_content = Keyword.get(opts, :reply_to_content)
     reply_to_sender = Keyword.get(opts, :reply_to_sender)
+    metadata = Keyword.get(opts, :metadata)
+    thread_id = Keyword.get(opts, :thread_id)
 
     query = """
-    INSERT INTO messages (conversation_id, message_id, sender_id, content, content_type, is_read, created_at, reply_to_id, reply_to_content, reply_to_sender)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (conversation_id, message_id, sender_id, content, content_type, is_read, created_at, reply_to_id, reply_to_content, reply_to_sender, metadata, thread_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     params = %{
@@ -52,7 +54,9 @@ defmodule ChatService.Messages.MessageService do
       "created_at" => {"timestamp", now},
       "reply_to_id" => {"text", reply_to_id || ""},
       "reply_to_content" => {"text", reply_to_content || ""},
-      "reply_to_sender" => {"text", reply_to_sender || ""}
+      "reply_to_sender" => {"text", reply_to_sender || ""},
+      "metadata" => {"text", Message.encode_metadata(metadata)},
+      "thread_id" => {"text", thread_id || ""}
     }
 
     case Repo.execute_prepared(query, params) do
@@ -67,10 +71,20 @@ defmodule ChatService.Messages.MessageService do
           reply_to_id: reply_to_id,
           reply_to_content: reply_to_content,
           reply_to_sender: reply_to_sender,
+          metadata: Message.decode_metadata(metadata),
+          thread_id: thread_id,
           created_at: now
         }
 
-        ConversationService.update_last_message(conversation_id, sender_id, content, now)
+        if thread_id, do: index_thread_message(conversation_id, thread_id, message_id, now)
+
+        # Media messages carry JSON in `content`; the list shows a type label.
+        ConversationService.update_last_message(
+          conversation_id,
+          sender_id,
+          preview_for(content, content_type, thread_id),
+          now
+        )
 
         broadcast_message(conversation_id, message)
         recipient_id = Keyword.get(opts, :recipient_id)
@@ -353,4 +367,79 @@ defmodule ChatService.Messages.MessageService do
 
   defp format_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
   defp format_datetime(other), do: to_string(other)
+
+  @doc """
+  One message by id.
+  """
+  def get_message(conversation_id, message_id) do
+    query = "SELECT * FROM messages WHERE conversation_id = ? AND message_id = ?"
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id}
+    }
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, page} ->
+        case Enum.to_list(page) do
+          [row | _] -> {:ok, Message.from_row(row)}
+          [] -> {:error, :not_found}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Messages of one thread (Slack style), oldest first, including the root.
+  """
+  def get_thread_messages(conversation_id, thread_id) do
+    query = """
+    SELECT message_id FROM thread_messages WHERE conversation_id = ? AND thread_id = ?
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "thread_id" => {"text", thread_id}
+    }
+
+    with {:ok, page} <- Repo.execute_prepared(query, params) do
+      ids = [thread_id | Enum.map(page, & to_string(&1["message_id"]))] |> Enum.uniq()
+
+      messages =
+        ids
+        |> Enum.map(fn id -> get_message(conversation_id, id) end)
+        |> Enum.flat_map(fn
+          {:ok, msg} -> [msg]
+          _ -> []
+        end)
+        |> Enum.sort_by(& &1.created_at, {:asc, DateTime})
+
+      {:ok, messages}
+    end
+  end
+
+  defp index_thread_message(conversation_id, thread_id, message_id, now) do
+    query = """
+    INSERT INTO thread_messages (conversation_id, thread_id, message_id, created_at)
+    VALUES (?, ?, ?, ?)
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "thread_id" => {"text", thread_id},
+      "message_id" => {"timeuuid", message_id},
+      "created_at" => {"timestamp", now}
+    }
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, _} -> :ok
+      {:error, reason} -> Logger.error("thread index failed: #{inspect(reason)}")
+    end
+  end
+
+  defp preview_for(content, "text", nil), do: content
+  defp preview_for(content, "text", _thread), do: "[thread] " <> content
+  defp preview_for(_content, content_type, _thread), do: "[" <> content_type <> "]"
 end

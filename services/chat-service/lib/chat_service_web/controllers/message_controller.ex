@@ -43,6 +43,30 @@ defmodule ChatServiceWeb.MessageController do
   end
 
   @doc """
+  GET /api/v1/messages/:chat_id/threads/:thread_id
+
+  Slack style thread: the root message plus every reply that was sent with
+  this thread id, oldest first.
+  """
+  def thread(conn, %{"chat_id" => conversation_id, "thread_id" => thread_id}) do
+    user_id = conn.assigns.user_id
+
+    with {:ok, _conversation} <- ConversationService.find_conversation(user_id, conversation_id),
+         {:ok, messages} <- MessageService.get_thread_messages(conversation_id, thread_id) do
+      conn
+      |> put_view(ChatServiceWeb.MessageView)
+      |> render("index.json", messages: messages, next_cursor: nil, has_more: false)
+    else
+      {:error, :not_found} ->
+        conn |> put_status(404) |> json(%{success: false, data: nil, error: "Conversation not found"})
+
+      {:error, reason} ->
+        Logger.error("Failed to load thread #{thread_id}: #{inspect(reason)}")
+        conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to load thread"})
+    end
+  end
+
+  @doc """
   POST /api/v1/messages
   Send a new message.
 
@@ -75,7 +99,17 @@ defmodule ChatServiceWeb.MessageController do
         # conversation first, so this should never trip in normal flows).
         case ConversationService.find_conversation(user_id, conversation_id) do
           {:ok, _conversation} ->
-            case MessageService.send_message(user_id, conversation_id, content, content_type) do
+            opts =
+              [
+                metadata: params["metadata"],
+                thread_id: blank_to_nil(params["threadId"]),
+                reply_to_id: blank_to_nil(params["replyToId"]),
+                reply_to_content: params["replyToContent"],
+                reply_to_sender: params["replyToSender"]
+              ]
+              |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+            case MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
               {:ok, message} ->
                 conn
                 |> put_status(201)
@@ -214,4 +248,8 @@ defmodule ChatServiceWeb.MessageController do
   end
 
   defp maybe_add_limit(opts, _params), do: opts
+
+  defp blank_to_nil(nil), do: nil
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
 end

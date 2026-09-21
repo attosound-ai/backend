@@ -159,7 +159,19 @@ defmodule ChatService.Application do
       "ALTER TABLE #{keyspace}.messages ADD reply_to_content text",
       "ALTER TABLE #{keyspace}.messages ADD reply_to_sender text",
       "ALTER TABLE #{keyspace}.messages ADD deleted_at timestamp",
-      "ALTER TABLE #{keyspace}.messages ADD deleted_by text"
+      "ALTER TABLE #{keyspace}.messages ADD deleted_by text",
+      # Sep 2026: media and effects metadata (JSON) and Slack style threads.
+      "ALTER TABLE #{keyspace}.messages ADD metadata text",
+      "ALTER TABLE #{keyspace}.messages ADD thread_id text",
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.thread_messages (
+        conversation_id uuid,
+        thread_id text,
+        message_id timeuuid,
+        created_at timestamp,
+        PRIMARY KEY ((conversation_id, thread_id), message_id)
+      ) WITH CLUSTERING ORDER BY (message_id ASC)
+      """
     ]
 
     Enum.each(statements, fn stmt ->

@@ -102,8 +102,12 @@ defmodule ChatServiceWeb.ChatChannel do
         []
       end
 
+    extra_opts =
+      [metadata: payload["metadata"], thread_id: payload["thread_id"]]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) or v == "" end)
+
     with {:ok, conversation} <- ConversationService.find_conversation(user_id, conversation_id),
-         opts <- [recipient_id: conversation.participant_id] ++ reply_opts,
+         opts <- [recipient_id: conversation.participant_id] ++ reply_opts ++ extra_opts,
          {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
       message_map = Message.to_map(message)
       broadcast!(socket, "new_message", message_map)
