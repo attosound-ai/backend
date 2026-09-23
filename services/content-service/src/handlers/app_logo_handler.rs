@@ -4,7 +4,8 @@ use serde_json::json;
 
 use crate::middleware::admin_auth::verify_admin_token;
 use crate::models::AppLogo;
-use crate::repositories::AppLogoRepository;
+use crate::repositories::{AppLogoRepository, AppSettingsRepository};
+use super::app_settings_handler::{FEED_MENU_KEY, SPLASH_SCALE_KEY};
 
 /// Query params for the public endpoint. The app passes its own build number so
 /// the server can target logos by version.
@@ -23,6 +24,12 @@ struct ResolvedLogoResponse {
     /// follows `image_url`. Always optional so older builds ignore it.
     #[serde(skip_serializing_if = "Option::is_none")]
     splash_image_url: Option<String>,
+    /// Admin edited feed menu (order, labels, icons, hidden); absent = app default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feed_menu: Option<serde_json::Value>,
+    /// Launch mark width as a fraction of the screen; absent = app default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    splash_scale: Option<f64>,
     updated_at: String,
 }
 
@@ -79,7 +86,21 @@ fn resolve_url(logo: &AppLogo, app_build: Option<i32>) -> Option<String> {
 pub async fn get_app_logo(
     query: web::Query<AppLogoQuery>,
     repo: web::Data<AppLogoRepository>,
+    settings: web::Data<AppSettingsRepository>,
 ) -> HttpResponse {
+    // Settings ride along with the logo: one request per launch carries both.
+    let feed_menu = settings.get(FEED_MENU_KEY).await.unwrap_or_else(|err| {
+        log::warn!("Failed to read feed menu setting: {}", err);
+        None
+    });
+    let splash_scale = settings
+        .get(SPLASH_SCALE_KEY)
+        .await
+        .unwrap_or_else(|err| {
+            log::warn!("Failed to read splash scale setting: {}", err);
+            None
+        })
+        .and_then(|v| v.as_f64());
     // Record the highest build we see so the admin hint stays truthful without
     // any hardcoded version. Fire-and-forget: never blocks or fails the read.
     if let Some(build) = query.app_build {
@@ -104,6 +125,8 @@ pub async fn get_app_logo(
                     "data": ResolvedLogoResponse {
                         image_url: url,
                         splash_image_url: splash,
+                        feed_menu,
+                        splash_scale,
                         updated_at,
                     },
                     "error": null,
