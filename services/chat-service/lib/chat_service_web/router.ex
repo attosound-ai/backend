@@ -17,8 +17,12 @@ defmodule ChatServiceWeb.Router do
 
     get "/messages/conversations", ConversationController, :index
     post "/messages/conversations", ConversationController, :create
+    # Before the :chat_id route, which would otherwise swallow "threads".
+    get "/messages/threads", MessageController, :threads
     get "/messages/:chat_id", MessageController, :index
     get "/messages/:chat_id/threads/:thread_id", MessageController, :thread
+    post "/messages/:chat_id/threads/:thread_id/read", MessageController, :thread_read
+    post "/messages/:chat_id/threads/:thread_id/follow", MessageController, :thread_follow
     get "/messages/:chat_id/pinned", MessageController, :pinned
     post "/messages/:chat_id/:message_id/pin", MessageController, :pin
     delete "/messages/:chat_id/:message_id/pin", MessageController, :unpin

@@ -11,6 +11,7 @@ defmodule ChatService.Messages.MessageService do
   alias ChatService.Messages.Persistence
   alias ChatService.Messages.EventPublisher
   alias ChatService.Messages.ReactionCleaner
+  alias ChatService.Messages.ThreadInbox
   alias ChatService.Conversations.ConversationService
   alias ChatService.Reactions.ReactionService
   alias ChatService.KafkaProducer
@@ -76,7 +77,19 @@ defmodule ChatService.Messages.MessageService do
           created_at: now
         }
 
-        if thread_id, do: index_thread_message(conversation_id, thread_id, message_id, now)
+        if thread_id do
+          index_thread_message(conversation_id, thread_id, message_id, now)
+          # The inbox row is written after the index so its reply count, which
+          # is counted rather than incremented, already sees this reply.
+          ThreadInbox.index_reply(
+            conversation_id,
+            thread_id,
+            sender_id,
+            root_preview(conversation_id, thread_id),
+            preview_for(content, content_type, nil),
+            now
+          )
+        end
 
         # Media messages carry JSON in `content`; the list shows a type label.
         ConversationService.update_last_message(
@@ -526,6 +539,14 @@ defmodule ChatService.Messages.MessageService do
     case Repo.execute_prepared(query, params) do
       {:ok, _} -> :ok
       {:error, reason} -> Logger.error("thread index failed: #{inspect(reason)}")
+    end
+  end
+
+  # The first line of the message that started the thread, for the inbox row.
+  defp root_preview(conversation_id, thread_id) do
+    case get_message(conversation_id, thread_id) do
+      {:ok, message} -> preview_for(message.content, message.content_type, nil)
+      _ -> ""
     end
   end
 

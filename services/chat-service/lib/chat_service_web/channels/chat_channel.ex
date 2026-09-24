@@ -154,17 +154,22 @@ defmodule ChatServiceWeb.ChatChannel do
 
   Broadcasts typing status to all other participants in the channel.
   """
-  def handle_in("typing", %{"is_typing" => is_typing}, socket) do
+  def handle_in("typing", %{"is_typing" => is_typing} = payload, socket) do
     user_id = socket.assigns.user_id
     conversation_id = socket.assigns.conversation_id
+    # Slack shows "typing" inside the thread, not in the channel, so the
+    # indicator carries the thread it belongs to. Absent for the main chat,
+    # which is what every older client sends.
+    thread_id = payload["thread_id"]
 
     Logger.info(
-      "[TYPING] user=#{user_id} conv=#{conversation_id} is_typing=#{is_typing}"
+      "[TYPING] user=#{user_id} conv=#{conversation_id} is_typing=#{is_typing} thread=#{thread_id || "-"}"
     )
 
     broadcast_from!(socket, "typing", %{
       user_id: user_id,
-      is_typing: is_typing
+      is_typing: is_typing,
+      thread_id: thread_id
     })
 
     {:noreply, socket}

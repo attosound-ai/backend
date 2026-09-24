@@ -171,6 +171,35 @@ defmodule ChatService.Application do
         created_at timestamp,
         PRIMARY KEY ((conversation_id, thread_id), message_id)
       ) WITH CLUSTERING ORDER BY (message_id ASC)
+      """,
+      # Sep 2026: the threads inbox. One row per (user, thread) on both
+      # sides, so "Threads" costs a single partition read per user, and the
+      # unread count and the follow flag live on the server instead of on one
+      # device. See ChatService.Messages.ThreadInbox.
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.threads_by_user (
+        user_id text,
+        thread_id text,
+        conversation_id uuid,
+        participant_id text,
+        participant_name text,
+        root_preview text,
+        reply_preview text,
+        reply_count int,
+        last_reply_at timestamp,
+        last_reply_sender_id text,
+        PRIMARY KEY (user_id, thread_id)
+      )
+      """,
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.thread_state (
+        user_id text,
+        thread_id text,
+        read_count int,
+        following boolean,
+        updated_at timestamp,
+        PRIMARY KEY (user_id, thread_id)
+      )
       """
     ]
 
