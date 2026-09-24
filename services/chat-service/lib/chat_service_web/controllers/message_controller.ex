@@ -21,6 +21,7 @@ defmodule ChatServiceWeb.MessageController do
       []
       |> maybe_add_before(params)
       |> maybe_add_limit(params)
+      |> maybe_add_since(conn.assigns[:user_id], chat_id)
 
     case MessageService.get_messages(chat_id, opts) do
       {:ok, %{messages: messages, reactions: reactions, next_cursor: next_cursor, has_more: has_more}} ->
@@ -357,6 +358,17 @@ defmodule ChatServiceWeb.MessageController do
       following: thread.following,
       last_reply_at: thread.last_reply_at && DateTime.to_iso8601(thread.last_reply_at)
     }
+  end
+
+  # A reader who deleted this chat only sees what arrived after they did.
+  # Their own row carries the stamp; anyone else's read is untouched.
+  defp maybe_add_since(opts, nil, _chat_id), do: opts
+
+  defp maybe_add_since(opts, user_id, chat_id) do
+    case ConversationService.find_conversation(user_id, chat_id) do
+      {:ok, %{cleared_at: %DateTime{} = at}} -> Keyword.put(opts, :since, at)
+      _ -> opts
+    end
   end
 
   defp maybe_add_before(opts, %{"before" => before}) when is_binary(before) and before != "" do

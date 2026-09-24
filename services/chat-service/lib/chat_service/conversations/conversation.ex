@@ -15,7 +15,13 @@ defmodule ChatService.Conversations.Conversation do
     :last_message,
     :last_message_at,
     :unread_count,
-    :updated_at
+    :updated_at,
+    # Deleted from this user's list. The row survives so the other side can
+    # still reach them and the conversation keeps its id.
+    :hidden,
+    # Everything sent before this is gone for this user, even after a new
+    # message brings the chat back.
+    :cleared_at
   ]
 
   @type t :: %__MODULE__{
@@ -26,7 +32,9 @@ defmodule ChatService.Conversations.Conversation do
           last_message: String.t() | nil,
           last_message_at: DateTime.t() | nil,
           unread_count: integer(),
-          updated_at: DateTime.t() | nil
+          updated_at: DateTime.t() | nil,
+          hidden: boolean(),
+          cleared_at: DateTime.t() | nil
         }
 
   @doc """
@@ -41,7 +49,9 @@ defmodule ChatService.Conversations.Conversation do
       last_message: row["last_message"],
       last_message_at: row["last_message_at"],
       unread_count: row["unread_count"] || 0,
-      updated_at: row["updated_at"]
+      updated_at: row["updated_at"],
+      hidden: row["hidden"] == true,
+      cleared_at: row["cleared_at"]
     }
   end
 

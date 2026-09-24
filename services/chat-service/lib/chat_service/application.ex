@@ -163,6 +163,12 @@ defmodule ChatService.Application do
       # Sep 2026: media and effects metadata (JSON) and Slack style threads.
       "ALTER TABLE #{keyspace}.messages ADD metadata text",
       "ALTER TABLE #{keyspace}.messages ADD thread_id text",
+      # Sep 2026: deleting a chat from the list. The row stays so the other
+      # side can still reach this user and the conversation keeps its id; it
+      # is hidden from the list, and `cleared_at` keeps the history that was
+      # deleted out of the thread even after a new message brings it back.
+      "ALTER TABLE #{keyspace}.conversations ADD hidden boolean",
+      "ALTER TABLE #{keyspace}.conversations ADD cleared_at timestamp",
       """
       CREATE TABLE IF NOT EXISTS #{keyspace}.thread_messages (
         conversation_id uuid,

@@ -17,6 +17,7 @@ defmodule ChatServiceWeb.Router do
 
     get "/messages/conversations", ConversationController, :index
     post "/messages/conversations", ConversationController, :create
+    delete "/messages/conversations/:conversation_id", ConversationController, :delete
     # Before the :chat_id route, which would otherwise swallow "threads".
     get "/messages/threads", MessageController, :threads
     get "/messages/:chat_id", MessageController, :index

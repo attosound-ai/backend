@@ -127,6 +127,31 @@ defmodule ChatService.Messages.ThreadInbox do
     mark_read(user_id, thread_id, count_replies(conversation_id, thread_id))
   end
 
+  @doc """
+  Drop every thread of one conversation from this user's inbox. Called when
+  they delete the chat: the threads belong to messages they no longer have.
+  """
+  def forget_conversation(user_id, conversation_id) do
+    query = "SELECT thread_id, conversation_id FROM threads_by_user WHERE user_id = ?"
+
+    with {:ok, rows} <- Repo.execute_prepared(query, %{"user_id" => {"text", to_string(user_id)}}) do
+      rows
+      |> Enum.to_list()
+      |> Enum.filter(fn row -> to_string(row["conversation_id"]) == to_string(conversation_id) end)
+      |> Enum.each(fn row ->
+        Repo.execute_prepared(
+          "DELETE FROM threads_by_user WHERE user_id = ? AND thread_id = ?",
+          %{
+            "user_id" => {"text", to_string(user_id)},
+            "thread_id" => {"text", to_string(row["thread_id"])}
+          }
+        )
+      end)
+
+      :ok
+    end
+  end
+
   @doc "Follow or unfollow a thread. Unfollowing silences its unread count."
   def set_following(user_id, thread_id, following) do
     write_state(user_id, thread_id, following: following)

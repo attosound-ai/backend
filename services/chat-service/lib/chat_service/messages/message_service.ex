@@ -121,13 +121,21 @@ defmodule ChatService.Messages.MessageService do
     before = Keyword.get(opts, :before)
     limit = Keyword.get(opts, :limit, @default_limit)
     limit = min(limit, 100)
+    # A reader who deleted this chat only sees what arrived after they did.
+    # The bound is inlined because it is a timestamp this service wrote, and
+    # maxTimeuuid needs a literal to take part in the clustering range.
+    since =
+      case Keyword.get(opts, :since) do
+        %DateTime{} = at -> " AND message_id > maxTimeuuid('#{DateTime.to_iso8601(at)}')"
+        _ -> ""
+      end
 
     {query, params} =
       if before do
         {
           """
           SELECT * FROM messages
-          WHERE conversation_id = ? AND message_id < ?
+          WHERE conversation_id = ? AND message_id < ?#{since}
           ORDER BY message_id DESC
           LIMIT ?
           """,
@@ -141,7 +149,7 @@ defmodule ChatService.Messages.MessageService do
         {
           """
           SELECT * FROM messages
-          WHERE conversation_id = ?
+          WHERE conversation_id = ?#{since}
           ORDER BY message_id DESC
           LIMIT ?
           """,
