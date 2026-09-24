@@ -12,9 +12,9 @@ defmodule ChatService.Messages.ThreadInbox do
   partition per user and a write is a plain upsert with no clustering key to
   rewrite:
 
-    * `threads_by_user` — one row per thread the user takes part in, carrying
+    * `threads_by_user`, one row per thread the user takes part in, carrying
       what the inbox row needs to draw itself without touching `messages`.
-    * `thread_state` — how many replies the user has read and whether they
+    * `thread_state`, how many replies the user has read and whether they
       follow the thread. Unread is `reply_count - read_count`, never negative.
 
   Membership grows on its own: sending the reply adds the sender, and the root
