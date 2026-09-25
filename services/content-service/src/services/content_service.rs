@@ -58,12 +58,27 @@ impl ContentService {
         created.id = Some(inserted_id);
 
         // Publish to Kafka
+        // The people the caption tags ride with the event, so social-service
+        // can tell each of them without reading the post back (Instagram style
+        // tagging, Sep 2026). Absent when nobody was tagged.
+        let tagged_user_ids: Vec<String> = created
+            .metadata
+            .get("taggedUserIds")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|part| part.trim().to_string())
+                    .filter(|part| !part.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let event = serde_json::json!({
             "content_id": inserted_id.to_hex(),
             "author_id": &created.author_id,
             "content_type": &created.content_type,
             "title": &created.title,
             "created_at": created.created_at.to_rfc3339(),
+            "tagged_user_ids": tagged_user_ids,
         });
         self.kafka
             .publish(

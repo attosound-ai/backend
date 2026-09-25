@@ -360,6 +360,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     content_id: string;
     author_id: string;
     created_at: string;
+    tagged_user_ids?: string[];
   }): Promise<void> {
     this.logger.log(
       `Processing content.published for content ${data.content_id} by ${data.author_id}`,
@@ -395,6 +396,50 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `Content ${data.content_id} fanned out to ${followerIds.length} followers`,
     );
+
+    // Whoever the caption tags hears about it whether or not they follow the
+    // author, which is the whole point of being tagged (Instagram style
+    // tagging, Sep 2026). The author tagging themselves is dropped.
+    const taggedIds = Array.from(
+      new Set((data.tagged_user_ids ?? []).map(String).filter(Boolean)),
+    ).filter((id) => id !== String(data.author_id));
+
+    if (taggedIds.length > 0) {
+      this.prisma.notification
+        .createMany({
+          data: taggedIds.map((recipientId) => ({
+            recipientId,
+            type: "mention",
+            actorId: data.author_id,
+            referenceId: data.content_id,
+            isRead: false,
+          })),
+        })
+        .catch((err) =>
+          this.logger.error(
+            `Failed to create mention notifications for content ${data.content_id}: ${err.message}`,
+          ),
+        );
+
+      this.grpcClients
+        .getUser(data.author_id)
+        .then((author) =>
+          this.pushService.sendPushBulk(
+            taggedIds,
+            "mention",
+            data.author_id,
+            author?.username || "Someone",
+            data.content_id,
+          ),
+        )
+        .catch((err) =>
+          this.logger.error(`Bulk push for mention failed: ${err.message}`),
+        );
+
+      this.logger.log(
+        `Content ${data.content_id} tagged ${taggedIds.length} people`,
+      );
+    }
 
     // Notify each follower that someone they follow just posted.
     // Bulk insert + bulk push are fire-and-forget so a slow notification
