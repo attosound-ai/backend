@@ -3,10 +3,22 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::middleware::admin_auth::verify_admin_token;
-use crate::repositories::AppSettingsRepository;
+use crate::repositories::{AppLogoRepository, AppSettingsRepository};
 
 pub const FEED_MENU_KEY: &str = "feed_menu";
 pub const SPLASH_SCALE_KEY: &str = "splash_scale";
+/// Builds below this number must update before they can be used. Absent or 0
+/// means nobody is blocked, which is the safe default: a setting that locks
+/// everyone out must never be the result of a missing value.
+pub const MIN_BUILD_KEY: &str = "min_build";
+/// What the blocking screen says. Optional; the app has its own wording.
+pub const UPDATE_COPY_KEY: &str = "update_copy";
+
+/// A guard against the worst mistake this feature allows: typing a build that
+/// does not exist yet locks every user out with no way back, and it cannot be
+/// undone from the app. The dashboard shows the highest build ever seen and
+/// this refuses anything far beyond it.
+const MIN_BUILD_MAX_AHEAD: i64 = 5;
 
 /// The menu entries the app knows how to act on. An item with any other key
 /// is rejected here, because the app would have nothing to open for it.
@@ -41,6 +53,20 @@ fn bad_request(msg: String) -> HttpResponse {
     HttpResponse::BadRequest().json(json!({
         "success": false, "data": null, "error": msg,
     }))
+}
+
+/// The minimum build, sane or nothing. Zero and negatives clear the gate.
+pub fn validate_min_build(value: i64, highest_seen: i64) -> Result<i64, String> {
+    if value <= 0 {
+        return Ok(0);
+    }
+    if highest_seen > 0 && value > highest_seen + MIN_BUILD_MAX_AHEAD {
+        return Err(format!(
+            "build {} does not exist yet: the highest build ever seen is {}. Forcing it would lock every user out with no way back.",
+            value, highest_seen
+        ));
+    }
+    Ok(value)
 }
 
 /// Validates the feed menu: an array of `{key, label?, icon?, hidden?}` with
@@ -116,12 +142,18 @@ pub fn validate_splash_scale(value: f64) -> Result<f64, String> {
 pub async fn admin_get_app_settings(
     req: HttpRequest,
     repo: web::Data<AppSettingsRepository>,
+    logos: web::Data<AppLogoRepository>,
 ) -> HttpResponse {
     if !verify_admin_token(&req) {
         return unauthorized();
     }
     let feed_menu = repo.get(FEED_MENU_KEY).await;
     let splash_scale = repo.get(SPLASH_SCALE_KEY).await;
+    let min_build = repo.get(MIN_BUILD_KEY).await.ok().flatten().and_then(|v| v.as_i64());
+    let update_copy = repo.get(UPDATE_COPY_KEY).await.ok().flatten();
+    // El build más alto que se ha visto jamás. Es lo que evita que alguien
+    // escriba un número que no existe y deje a todo el mundo fuera.
+    let highest_seen = logos.get_max_seen_build().await.ok().flatten();
     match (feed_menu, splash_scale) {
         (Ok(menu), Ok(scale)) => HttpResponse::Ok().json(json!({
             "success": true,
@@ -132,6 +164,10 @@ pub async fn admin_get_app_settings(
                 "menuIcons": FEED_MENU_ICONS,
                 "splashScaleMin": SPLASH_SCALE_MIN,
                 "splashScaleMax": SPLASH_SCALE_MAX,
+                "minBuild": min_build.unwrap_or(0),
+                "updateCopy": update_copy,
+                "highestSeenBuild": highest_seen,
+                "minBuildMaxAhead": MIN_BUILD_MAX_AHEAD,
             },
             "error": null,
         })),
@@ -243,4 +279,140 @@ pub async fn admin_clear_splash_scale(
             }))
         }
     }
+}
+
+
+// ── Forced update ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct SetMinBuildRequest {
+    build: i64,
+}
+
+/// `PUT /api/v1/admin/app-settings/min-build`: builds below this must update.
+#[put("/api/v1/admin/app-settings/min-build")]
+pub async fn admin_set_min_build(
+    req: HttpRequest,
+    body: web::Json<SetMinBuildRequest>,
+    repo: web::Data<AppSettingsRepository>,
+    logos: web::Data<AppLogoRepository>,
+) -> HttpResponse {
+    if !verify_admin_token(&req) {
+        return unauthorized();
+    }
+    let highest = logos.get_max_seen_build().await.ok().flatten().unwrap_or(0) as i64;
+    let build = match validate_min_build(body.build, highest) {
+        Ok(v) => v,
+        Err(msg) => return bad_request(msg),
+    };
+    match repo.set(MIN_BUILD_KEY, json!(build)).await {
+        Ok(v) => HttpResponse::Ok()
+            .json(json!({ "success": true, "data": { "minBuild": v }, "error": null })),
+        Err(err) => {
+            log::error!("Failed to set min build: {}", err);
+            HttpResponse::InternalServerError().json(json!({
+                "success": false, "data": null, "error": "Failed to save minimum build",
+            }))
+        }
+    }
+}
+
+/// `DELETE /api/v1/admin/app-settings/min-build`: nobody is blocked again.
+#[delete("/api/v1/admin/app-settings/min-build")]
+pub async fn admin_clear_min_build(
+    req: HttpRequest,
+    repo: web::Data<AppSettingsRepository>,
+) -> HttpResponse {
+    if !verify_admin_token(&req) {
+        return unauthorized();
+    }
+    match repo.set(MIN_BUILD_KEY, json!(0)).await {
+        Ok(_) => HttpResponse::Ok()
+            .json(json!({ "success": true, "data": { "minBuild": 0 }, "error": null })),
+        Err(err) => {
+            log::error!("Failed to clear min build: {}", err);
+            HttpResponse::InternalServerError().json(json!({
+                "success": false, "data": null, "error": "Failed to clear minimum build",
+            }))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SetUpdateCopyRequest {
+    title: Option<String>,
+    message: Option<String>,
+    button: Option<String>,
+    url: Option<String>,
+}
+
+fn trim_limited(v: Option<String>, max: usize) -> Option<String> {
+    v.map(|s| s.trim().chars().take(max).collect::<String>())
+        .filter(|s| !s.is_empty())
+}
+
+/// `PUT /api/v1/admin/app-settings/update-copy`: what the blocking screen says.
+#[put("/api/v1/admin/app-settings/update-copy")]
+pub async fn admin_set_update_copy(
+    req: HttpRequest,
+    body: web::Json<SetUpdateCopyRequest>,
+    repo: web::Data<AppSettingsRepository>,
+) -> HttpResponse {
+    if !verify_admin_token(&req) {
+        return unauthorized();
+    }
+    let body = body.into_inner();
+    let url = trim_limited(body.url, 300);
+    if let Some(u) = &url {
+        if !(u.starts_with("https://") || u.starts_with("itms-")) {
+            return bad_request("the link must start with https:// or itms-".to_string());
+        }
+    }
+    let copy = json!({
+        "title": trim_limited(body.title, 60),
+        "message": trim_limited(body.message, 240),
+        "button": trim_limited(body.button, 30),
+        "url": url,
+    });
+    match repo.set(UPDATE_COPY_KEY, copy).await {
+        Ok(v) => HttpResponse::Ok()
+            .json(json!({ "success": true, "data": { "updateCopy": v }, "error": null })),
+        Err(err) => {
+            log::error!("Failed to set update copy: {}", err);
+            HttpResponse::InternalServerError().json(json!({
+                "success": false, "data": null, "error": "Failed to save the update wording",
+            }))
+        }
+    }
+}
+
+/// `GET /api/v1/content/app-release`
+///
+/// Public, and deliberately its OWN endpoint rather than riding along with the
+/// logo: the logo response is `data: null` whenever no logo is configured, and
+/// a gate that blocks the whole app must never depend on an unrelated setting
+/// being present. Answers in one small read and is safe to call on every
+/// launch and resume.
+#[get("/api/v1/content/app-release")]
+pub async fn get_app_release(
+    repo: web::Data<AppSettingsRepository>,
+) -> HttpResponse {
+    let min_build = repo
+        .get(MIN_BUILD_KEY)
+        .await
+        .unwrap_or_else(|err| {
+            log::warn!("Failed to read min build: {}", err);
+            None
+        })
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let copy = repo.get(UPDATE_COPY_KEY).await.unwrap_or_else(|err| {
+        log::warn!("Failed to read update copy: {}", err);
+        None
+    });
+    HttpResponse::Ok().json(json!({
+        "success": true,
+        "data": { "minBuild": min_build, "copy": copy },
+        "error": null,
+    }))
 }
