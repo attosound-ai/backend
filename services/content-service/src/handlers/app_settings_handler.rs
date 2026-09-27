@@ -416,3 +416,36 @@ pub async fn get_app_release(
         "error": null,
     }))
 }
+
+#[cfg(test)]
+mod tests_min_build {
+    use super::*;
+
+    // El error que no tiene vuelta atrás: fijar un build que no existe deja a
+    // todo el mundo fuera, y desde dentro del bloqueo no se puede deshacer.
+    #[test]
+    fn rechaza_un_build_que_todavia_no_existe() {
+        let err = validate_min_build(500, 224).unwrap_err();
+        assert!(err.contains("does not exist yet"), "{}", err);
+        assert!(err.contains("224"), "{}", err);
+    }
+
+    #[test]
+    fn acepta_el_build_mas_alto_visto_y_un_margen_corto() {
+        assert_eq!(validate_min_build(224, 224).unwrap(), 224);
+        assert_eq!(validate_min_build(229, 224).unwrap(), 229);
+    }
+
+    #[test]
+    fn cero_y_negativos_levantan_el_bloqueo() {
+        assert_eq!(validate_min_build(0, 224).unwrap(), 0);
+        assert_eq!(validate_min_build(-3, 224).unwrap(), 0);
+    }
+
+    // Sin ningún build visto no hay con qué comparar, así que no se inventa un
+    // límite: se confía en quien escribe, que es lo único honesto ahí.
+    #[test]
+    fn sin_referencia_no_se_impone_un_limite() {
+        assert_eq!(validate_min_build(9000, 0).unwrap(), 9000);
+    }
+}
