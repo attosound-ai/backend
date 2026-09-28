@@ -54,12 +54,33 @@ export class AudioProcessorService {
    * Generate waveform amplitude data from an audio segment.
    * Downloads WAV from S3, computes RMS amplitudes per window.
    */
+  /**
+   * Peak envelope of a segment, optionally of a WINDOW inside it.
+   *
+   * El rango existe porque un número fijo de picos para el segmento entero se
+   * queda sin detalle en cuanto el audio es largo: con 2000 cubos, 35 minutos
+   * dan 1,05 segundos por cubo, y al ampliar la vista a doce segundos quedan
+   * once puntos para toda la pantalla. Eso es lo que hacía que una onda larga
+   * se dibujara como una rampa y una recta (cliente, 27 de septiembre de 2026).
+   *
+   * `fromRatio` y `toRatio` van de 0 a 1 sobre la duración del segmento, que es
+   * como el cliente ya razona los recortes, y así esto no depende de conocer la
+   * frecuencia de muestreo ni la duración exacta.
+   */
   async generateWaveformData(
     segmentId: string,
     numSamples: number,
+    fromRatio = 0,
+    toRatio = 1,
   ): Promise<number[]> {
-    // Check Redis cache first (waveforms are immutable)
-    const cacheKey = `telephony:waveform:${segmentId}:${numSamples}`;
+    // Ventana saneada: dentro de 0..1, ordenada, y nunca vacía.
+    const desde = Math.min(Math.max(Number.isFinite(fromRatio) ? fromRatio : 0, 0), 1);
+    const hastaCrudo = Math.min(Math.max(Number.isFinite(toRatio) ? toRatio : 1, 0), 1);
+    const hasta = hastaCrudo > desde ? hastaCrudo : 1;
+    // La clave incluye la ventana redondeada a seis decimales: dos peticiones
+    // del mismo tramo comparten caché, y una de otro tramo no lo pisa.
+    const ventana = desde === 0 && hasta === 1 ? "full" : `${desde.toFixed(6)}-${hasta.toFixed(6)}`;
+    const cacheKey = `telephony:waveform:${segmentId}:${numSamples}:${ventana}`;
     const cached = await this.cache.get<number[]>(cacheKey);
     if (cached) return cached;
 
@@ -108,14 +129,23 @@ export class AudioProcessorService {
       // the client can precompute one dense envelope per segment and downsample
       // it locally for any zoom level (instant zoom, no refetch); the old 500
       // ceiling was too coarse to survive zooming in.
-      const count = Math.max(1, Math.min(numSamples, 4000));
-      const windowSize = Math.floor(samples.length / count);
+      // El techo era 4000, que en un audio de 35 minutos deja medio segundo por
+      // cubo: al ampliar la vista la onda se convertía en una recta. 24000 son
+      // 87 ms por cubo en ese mismo archivo y unos 120 KB de números, que se
+      // piden una vez y se cachean catorce días.
+      const count = Math.max(1, Math.min(numSamples, 24000));
+      // Solo el tramo pedido. Con la ventana completa esto es exactamente lo
+      // que se hacía antes.
+      const inicio = Math.floor(desde * samples.length);
+      const fin = Math.max(inicio + 1, Math.floor(hasta * samples.length));
+      const total = fin - inicio;
+      const windowSize = Math.floor(total / count);
       if (windowSize === 0) return Array(count).fill(0);
 
       const amplitudes: number[] = [];
       for (let i = 0; i < count; i++) {
-        const start = i * windowSize;
-        const end = Math.min(start + windowSize, samples.length);
+        const start = inicio + i * windowSize;
+        const end = Math.min(start + windowSize, fin);
         let peak = 0;
         for (let j = start; j < end; j++) {
           const v = samples[j] < 0 ? -samples[j] : samples[j];

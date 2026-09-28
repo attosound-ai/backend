@@ -423,8 +423,18 @@ export class ProjectsService {
     return saved;
   }
 
-  async getWaveformData(segmentId: string, samples: number): Promise<number[]> {
-    return this.audioProcessor.generateWaveformData(segmentId, samples);
+  async getWaveformData(
+    segmentId: string,
+    samples: number,
+    fromRatio = 0,
+    toRatio = 1,
+  ): Promise<number[]> {
+    return this.audioProcessor.generateWaveformData(
+      segmentId,
+      samples,
+      fromRatio,
+      toRatio,
+    );
   }
 
   async exportProject(
