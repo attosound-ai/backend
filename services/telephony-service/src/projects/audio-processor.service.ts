@@ -20,6 +20,14 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { CacheService } from "../cache/cache.service";
+import {
+  leerCabeceraWav,
+  rangoDeBytes,
+  lectorDeFotogramas,
+  picosDeMuestras,
+  tamanoDeContentRange,
+  type CabeceraWav,
+} from "./wav-window";
 
 @Injectable()
 export class AudioProcessorService {
@@ -67,6 +75,99 @@ export class AudioProcessorService {
    * como el cliente ya razona los recortes, y así esto no depende de conocer la
    * frecuencia de muestreo ni la duración exacta.
    */
+  /** Un stream de S3, entero, en memoria. */
+  private async leerStream(body: unknown): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of body as Readable) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * La cabecera del WAV y el tamaño del objeto, con una petición de los
+   * primeros kilobytes. Se cachea por segmento porque no cambia nunca y la
+   * pide cada ventana.
+   */
+  private async cabeceraDe(
+    segment: AudioSegment,
+  ): Promise<{ cab: CabeceraWav; totalBytes: number } | null> {
+    const key = `telephony:wavhead:v1:${segment.id}`;
+    const cached = await this.cache.get<{ cab: CabeceraWav; totalBytes: number } | "no">(key);
+    if (cached) return cached === "no" ? null : cached;
+
+    try {
+      const res = await this.s3.send(
+        new GetObjectCommand({
+          Bucket: segment.storageBucket,
+          Key: segment.storageKey,
+          Range: "bytes=0-8191",
+        }),
+      );
+      const head = await this.leerStream(res.Body);
+      const cab = leerCabeceraWav(head);
+      const totalBytes =
+        tamanoDeContentRange(res.ContentRange) ??
+        (typeof res.ContentLength === "number" && head.length < 8192
+          ? res.ContentLength
+          : null);
+      if (!cab || !totalBytes) {
+        await this.cache.set(key, "no", this.cache.jitterTtl(86400));
+        return null;
+      }
+      const info = { cab, totalBytes };
+      await this.cache.set(key, info, this.cache.jitterTtl(14 * 86400));
+      return info;
+    } catch (error) {
+      this.logger.debug(
+        "No se pudo leer la cabecera del segmento %s: %s",
+        segment.id,
+        error,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Los picos de una ventana leyendo SOLO sus bytes.
+   *
+   * Devuelve null cuando el archivo no se deja leer por rango (no es un WAV de
+   * PCM entero, o el almacenamiento no sirve rangos), y entonces el que llama
+   * se baja el objeto entero como toda la vida.
+   */
+  private async picosPorRango(
+    segment: AudioSegment,
+    desde: number,
+    hasta: number,
+    pedidos: number,
+  ): Promise<number[] | null> {
+    const info = await this.cabeceraDe(segment);
+    if (!info) return null;
+    const rango = rangoDeBytes(info.cab, info.totalBytes, desde, hasta);
+    if (!rango) return null;
+
+    try {
+      const res = await this.s3.send(
+        new GetObjectCommand({
+          Bucket: segment.storageBucket,
+          Key: segment.storageKey,
+          Range: `bytes=${rango.start}-${rango.end}`,
+        }),
+      );
+      const buf = await this.leerStream(res.Body);
+      if (buf.length < 2) return null;
+      const lector = lectorDeFotogramas(buf, info.cab);
+      const count = Math.max(1, Math.min(pedidos, 24000));
+      const picos = picosDeMuestras(lector.leer, lector.frames, count, lector.maximo);
+      return picos.length > 0 ? picos : null;
+    } catch (error) {
+      this.logger.debug(
+        "Lectura por rango fallida en el segmento %s: %s",
+        segment.id,
+        error,
+      );
+      return null;
+    }
+  }
+
   async generateWaveformData(
     segmentId: string,
     numSamples: number,
@@ -92,6 +193,21 @@ export class AudioProcessorService {
     const tmpFile = join(tmpdir(), `waveform-${randomUUID()}.wav`);
 
     try {
+      // Por rango, y SOLO cuando se pide una ventana: es la diferencia entre
+      // bajarse los doscientos megas del segmento o los veinte kilobytes que
+      // se van a dibujar. La envolvente completa, que es la que pide todo el
+      // mundo al abrir el editor, sigue por el camino de siempre a propósito:
+      // esto es un añadido para el zoom profundo y no tiene por qué cambiar ni
+      // un pico de lo que ya se dibuja hoy. Si el archivo no se deja leer por
+      // rango, la ventana también cae al camino completo.
+      if (ventana !== "full") {
+        const porRango = await this.picosPorRango(segment, desde, hasta, numSamples);
+        if (porRango) {
+          await this.cache.set(cacheKey, porRango, this.cache.jitterTtl(14 * 86400));
+          return porRango;
+        }
+      }
+
       // Download from S3
       const response = await this.s3.send(
         new GetObjectCommand({
@@ -139,21 +255,15 @@ export class AudioProcessorService {
       const inicio = Math.floor(desde * samples.length);
       const fin = Math.max(inicio + 1, Math.floor(hasta * samples.length));
       const total = fin - inicio;
-      const windowSize = Math.floor(total / count);
-      if (windowSize === 0) return Array(count).fill(0);
-
-      const amplitudes: number[] = [];
-      for (let i = 0; i < count; i++) {
-        const start = inicio + i * windowSize;
-        const end = Math.min(start + windowSize, fin);
-        let peak = 0;
-        for (let j = start; j < end; j++) {
-          const v = samples[j] < 0 ? -samples[j] : samples[j];
-          if (v > peak) peak = v;
-        }
-        // Normalize to 0-1 range (Int16 max = 32768)
-        amplitudes.push(Math.round((peak / 32768) * 1000) / 1000);
-      }
+      // Nunca más cubos que muestras: pedir 2000 picos de 500 muestras daba
+      // cubos de cero muestras y devolvía una onda plana, que es justo lo que
+      // pasaba al ampliar mucho una ventana corta.
+      const amplitudes = picosDeMuestras(
+        (i) => samples[inicio + i],
+        total,
+        count,
+        32768,
+      );
 
       // Cache for ~14 days with jitter
       await this.cache.set(cacheKey, amplitudes, this.cache.jitterTtl(14 * 86400));
