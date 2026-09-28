@@ -9,6 +9,8 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/atto-sound/user-service/internal/models"
+	"github.com/atto-sound/user-service/internal/repositories"
+	"github.com/atto-sound/user-service/internal/services"
 )
 
 // accountAdmin is the slice of UserService the operator routes need. An
@@ -16,6 +18,7 @@ import (
 type accountAdmin interface {
 	GetUserByID(ctx context.Context, id string) (*models.UserProfile, error)
 	DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool) error
+	ListUsersForAdmin(f repositories.AdminUserFilter) (*services.AdminUserList, error)
 }
 
 // AdminHandler serves operator only routes. Every route is mounted behind
@@ -100,4 +103,74 @@ func (h *AdminHandler) DeleteUser(c *fiber.Ctx) error {
 			"deleteLinked":  deleteLinked,
 		},
 	})
+}
+
+// ListUsers handles GET /users/admin.
+//
+// La lista de quién se ha registrado, que hasta ahora solo se podía mirar
+// entrando a la base de datos. Paginada y ordenada por fecha de alta
+// descendente, con búsqueda por nombre de usuario, nombre visible, correo,
+// teléfono o nombre de creador, y filtro por rol.
+//
+// Tope duro de 200 por página en el repositorio: esta ruta la sirve el mismo
+// proceso que atiende el login de toda la app, y una página sin tope sería una
+// forma de tumbarlo desde fuera si el token se filtrara.
+func (h *AdminHandler) ListUsers(c *fiber.Ctx) error {
+	filtro := repositories.AdminUserFilter{
+		Search: strings.TrimSpace(c.Query("search")),
+		Role:   strings.ToLower(strings.TrimSpace(c.Query("role"))),
+	}
+
+	switch filtro.Role {
+	case "", string(models.RoleCreator), string(models.RoleRepresentative), string(models.RoleListener):
+		// vale
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "role must be creator, representative or listener",
+		})
+	}
+
+	if raw := strings.TrimSpace(c.Query("managed")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+				Success: false,
+				Error:   "managed must be true or false",
+			})
+		}
+		filtro.Managed = &parsed
+	}
+
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+				Success: false,
+				Error:   "limit must be a positive number",
+			})
+		}
+		filtro.Limit = n
+	}
+	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+				Success: false,
+				Error:   "offset must be zero or more",
+			})
+		}
+		filtro.Offset = n
+	}
+
+	list, err := h.accounts.ListUsersForAdmin(filtro)
+	if err != nil {
+		log.Printf("[ADMIN] list users failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+
+	return c.JSON(models.APIResponse{Success: true, Data: list})
 }

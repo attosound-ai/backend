@@ -168,6 +168,7 @@ func main() {
 
 	// Operator only (X-Admin-Token). Under /users so the gateway's existing
 	// user route carries it; registered before the parameterized routes.
+	users.Get("/admin", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListUsers)
 	users.Delete("/admin/:id", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.DeleteUser)
 
 	// Inmate lookup (public)

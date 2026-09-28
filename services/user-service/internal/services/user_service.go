@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"time"
 
 	"github.com/atto-sound/user-service/internal/kafka"
 	"github.com/atto-sound/user-service/internal/models"
@@ -381,4 +382,106 @@ func (s *UserService) GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error
 		return []uint64{userID}, nil
 	}
 	return ids, nil
+}
+
+// AdminUserRow es una fila de la lista de operador: lo justo para identificar
+// una cuenta y saber cómo entró, sin arrastrar la ficha entera.
+type AdminUserRow struct {
+	ID               uint64     `json:"id"`
+	Username         string     `json:"username"`
+	DisplayName      string     `json:"displayName"`
+	Email            *string    `json:"email,omitempty"`
+	Phone            *string    `json:"phone,omitempty"`
+	Role             string     `json:"role"`
+	CreatorName      *string    `json:"creatorName,omitempty"`
+	Avatar           *string    `json:"avatar,omitempty"`
+	Location         *string    `json:"location,omitempty"`
+	ProfileVerified  bool       `json:"profileVerified"`
+	IsManagedAccount bool       `json:"isManagedAccount"`
+	RepresentativeID *uint64    `json:"representativeId,omitempty"`
+	FollowersCount   int64      `json:"followersCount"`
+	PostsCount       int64      `json:"postsCount"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	LastSeenAt       *time.Time `json:"lastSeenAt,omitempty"`
+}
+
+// AdminUserList es la respuesta completa de la lista.
+type AdminUserList struct {
+	Users     []AdminUserRow   `json:"users"`
+	Total     int64            `json:"total"`
+	Limit     int              `json:"limit"`
+	Offset    int              `json:"offset"`
+	ByRole    map[string]int64 `json:"byRole"`
+	Truncated bool             `json:"truncated"`
+}
+
+// telefonoCompleto junta prefijo y número para que la lista muestre uno solo.
+func telefonoCompleto(cc, number *string) *string {
+	if number == nil || *number == "" {
+		return nil
+	}
+	if cc == nil || *cc == "" {
+		return number
+	}
+	full := *cc + *number
+	return &full
+}
+
+// ListUsersForAdmin devuelve la página pedida de usuarios registrados.
+func (s *UserService) ListUsersForAdmin(
+	f repositories.AdminUserFilter,
+) (*AdminUserList, error) {
+	users, total, err := s.repo.ListForAdmin(f)
+	if err != nil {
+		log.Printf("[ADMIN] list users failed: %v", err)
+		return nil, errors.New("could not list users")
+	}
+
+	rows := make([]AdminUserRow, 0, len(users))
+	for i := range users {
+		u := &users[i]
+		rows = append(rows, AdminUserRow{
+			ID:               u.ID,
+			Username:         u.Username,
+			DisplayName:      u.DisplayName,
+			Email:            u.Email,
+			Phone:            telefonoCompleto(u.PhoneCountryCode, u.PhoneNumber),
+			Role:             string(u.Role),
+			CreatorName:      u.CreatorName,
+			Avatar:           u.Avatar,
+			Location:         u.Location,
+			ProfileVerified:  u.ProfileVerified,
+			IsManagedAccount: u.IsManagedAccount,
+			RepresentativeID: u.RepresentativeID,
+			FollowersCount:   u.FollowersCount,
+			PostsCount:       u.PostsCount,
+			CreatedAt:        u.CreatedAt,
+		})
+	}
+
+	// El recuento por rol es del total, no de la página: es la cabecera de la
+	// pantalla y tiene que decir cuántos hay, no cuántos se ven.
+	byRole, err := s.repo.CountUsersByRole()
+	if err != nil {
+		// Que falle el resumen no puede tumbar la lista.
+		log.Printf("[ADMIN] count by role failed: %v", err)
+		byRole = map[string]int64{}
+	}
+
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	return &AdminUserList{
+		Users:     rows,
+		Total:     total,
+		Limit:     limit,
+		Offset:    f.Offset,
+		ByRole:    byRole,
+		Truncated: int64(f.Offset+len(rows)) < total,
+	}, nil
 }

@@ -624,3 +624,81 @@ func (r *UserRepository) PurgeAllUserData(userIDs []uint64) error {
 		return nil
 	})
 }
+
+// AdminUserFilter es lo que el panel de operador puede pedir de la lista.
+type AdminUserFilter struct {
+	// Busca por nombre de usuario, nombre visible, correo o teléfono.
+	Search string
+	// Vacío = todos. Si no, 'creator', 'representative' o 'listener'.
+	Role string
+	// Solo cuentas gestionadas, solo no gestionadas, o todas (nil).
+	Managed *bool
+	Limit   int
+	Offset  int
+}
+
+// ListForAdmin devuelve una página de usuarios registrados y el total que
+// cumple el filtro.
+//
+// Ordenada por fecha de alta descendente porque la pregunta que responde esta
+// pantalla es "quién se ha registrado", no "cómo se llaman". El total va
+// aparte de la página para que la paginación sepa cuántas quedan sin traerse
+// todas las filas.
+func (r *UserRepository) ListForAdmin(f AdminUserFilter) ([]models.User, int64, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	q := r.db.Model(&models.User{})
+	if s := strings.TrimSpace(f.Search); s != "" {
+		pattern := "%" + s + "%"
+		q = q.Where(
+			"username ILIKE ? OR display_name ILIKE ? OR email ILIKE ? OR phone_number ILIKE ? OR creator_name ILIKE ?",
+			pattern, pattern, pattern, pattern, pattern,
+		)
+	}
+	if role := strings.TrimSpace(f.Role); role != "" {
+		q = q.Where("role = ?", role)
+	}
+	if f.Managed != nil {
+		q = q.Where("is_managed_account = ?", *f.Managed)
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	var users []models.User
+	err := q.Order("created_at DESC").Limit(limit).Offset(offset).Find(&users).Error
+	return users, total, err
+}
+
+// CountUsersByRole devuelve cuántas cuentas hay de cada rol, para la cabecera
+// de la lista. Una consulta agrupada en vez de una por rol.
+func (r *UserRepository) CountUsersByRole() (map[string]int64, error) {
+	type fila struct {
+		Role  string
+		Total int64
+	}
+	var filas []fila
+	if err := r.db.Model(&models.User{}).
+		Select("role, COUNT(*) AS total").
+		Group("role").
+		Scan(&filas).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(filas))
+	for _, f := range filas {
+		out[f.Role] = f.Total
+	}
+	return out, nil
+}

@@ -10,6 +10,8 @@ import (
 
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
+	"github.com/atto-sound/user-service/internal/repositories"
+	"github.com/atto-sound/user-service/internal/services"
 )
 
 type fakeAccounts struct {
@@ -18,6 +20,9 @@ type fakeAccounts struct {
 	deletedID   uint64
 	deletedLink bool
 	deleteCalls int
+	listFilter  repositories.AdminUserFilter
+	listErr     error
+	listCalls   int
 }
 
 func (f *fakeAccounts) GetUserByID(_ context.Context, id string) (*models.UserProfile, error) {
@@ -35,11 +40,27 @@ func (f *fakeAccounts) DeleteAccount(_ context.Context, userID uint64, deleteLin
 	return f.deleteErr
 }
 
+func (f *fakeAccounts) ListUsersForAdmin(
+	filter repositories.AdminUserFilter,
+) (*services.AdminUserList, error) {
+	f.listCalls++
+	f.listFilter = filter
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return &services.AdminUserList{
+		Users: []services.AdminUserRow{{ID: 266, Username: "arami"}},
+		Total: 1,
+		Limit: 50,
+	}, nil
+}
+
 const testSecret = "s3cret-operator-token"
 
 func newAdminApp(f *fakeAccounts, secret string) *fiber.App {
 	app := fiber.New()
 	h := NewAdminHandler(f)
+	app.Get("/users/admin", middleware.RequireAdminToken(secret), h.ListUsers)
 	app.Delete("/users/admin/:id", middleware.RequireAdminToken(secret), h.DeleteUser)
 	return app
 }
@@ -157,5 +178,87 @@ func TestAdminDelete_SurfacesServiceFailure(t *testing.T) {
 	app := newAdminApp(f, testSecret)
 	if got := do(t, app, "/users/admin/266?username=arami", testSecret); got != 500 {
 		t.Fatalf("status = %d, want 500", got)
+	}
+}
+
+
+// La lista es de operador: sin el token no existe, y lo que llega por la query
+// no puede convertirse en una consulta cualquiera.
+func listar(t *testing.T, app *fiber.App, target, token string) int {
+	t.Helper()
+	req := httptest.NewRequest("GET", target, nil)
+	if token != "" {
+		req.Header.Set(middleware.AdminTokenHeader, token)
+	}
+	res, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return res.StatusCode
+}
+
+func TestListUsersNeedsTheToken(t *testing.T) {
+	f := accounts()
+	app := newAdminApp(f, testSecret)
+	if got := listar(t, app, "/users/admin", ""); got != fiber.StatusUnauthorized {
+		t.Fatalf("sin token esperaba 401, dio %d", got)
+	}
+	if got := listar(t, app, "/users/admin", "otro"); got != fiber.StatusUnauthorized {
+		t.Fatalf("con token equivocado esperaba 401, dio %d", got)
+	}
+	if f.listCalls != 0 {
+		t.Fatalf("no debía llegar al servicio, llegó %d veces", f.listCalls)
+	}
+}
+
+func TestListUsersPasaElFiltro(t *testing.T) {
+	f := accounts()
+	app := newAdminApp(f, testSecret)
+	got := listar(t, app, "/users/admin?search=ara&role=creator&managed=true&limit=10&offset=20", testSecret)
+	if got != fiber.StatusOK {
+		t.Fatalf("esperaba 200, dio %d", got)
+	}
+	if f.listFilter.Search != "ara" || f.listFilter.Role != "creator" {
+		t.Fatalf("filtro mal pasado: %+v", f.listFilter)
+	}
+	if f.listFilter.Managed == nil || !*f.listFilter.Managed {
+		t.Fatalf("managed mal pasado: %+v", f.listFilter.Managed)
+	}
+	if f.listFilter.Limit != 10 || f.listFilter.Offset != 20 {
+		t.Fatalf("paginación mal pasada: %+v", f.listFilter)
+	}
+}
+
+func TestListUsersRechazaLoQueNoEntiende(t *testing.T) {
+	casos := []string{
+		"/users/admin?role=administrador",
+		"/users/admin?managed=quizá",
+		"/users/admin?limit=0",
+		"/users/admin?limit=-5",
+		"/users/admin?offset=-1",
+	}
+	for _, caso := range casos {
+		f := accounts()
+		app := newAdminApp(f, testSecret)
+		if got := listar(t, app, caso, testSecret); got != fiber.StatusBadRequest {
+			t.Fatalf("%s: esperaba 400, dio %d", caso, got)
+		}
+		if f.listCalls != 0 {
+			t.Fatalf("%s: no debía consultar nada", caso)
+		}
+	}
+}
+
+func TestListUsersSinFiltroSirveLaPrimeraPagina(t *testing.T) {
+	f := accounts()
+	app := newAdminApp(f, testSecret)
+	if got := listar(t, app, "/users/admin", testSecret); got != fiber.StatusOK {
+		t.Fatalf("esperaba 200, dio %d", got)
+	}
+	if f.listCalls != 1 {
+		t.Fatalf("esperaba una consulta, hubo %d", f.listCalls)
+	}
+	if f.listFilter.Limit != 0 || f.listFilter.Offset != 0 {
+		t.Fatalf("sin query el filtro va vacío y lo decide el repositorio: %+v", f.listFilter)
 	}
 }
