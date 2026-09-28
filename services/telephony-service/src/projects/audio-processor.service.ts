@@ -154,6 +154,20 @@ export class AudioProcessorService {
       );
       const buf = await this.leerStream(res.Body);
       if (buf.length < 2) return null;
+      // Si el almacenamiento ignorase la cabecera Range y devolviera el objeto
+      // entero, lo de abajo dibujaría el segmento completo dentro del hueco de
+      // la ventana: una onda falsa, y sin error por ninguna parte. Un byte de
+      // más ya delata que no se respetó el rango.
+      const pedidos = rango.end - rango.start + 1;
+      if (buf.length > pedidos) {
+        this.logger.warn(
+          "El almacenamiento no respetó el rango en el segmento %s (%d bytes pedidos, %d recibidos)",
+          segment.id,
+          pedidos,
+          buf.length,
+        );
+        return null;
+      }
       const lector = lectorDeFotogramas(buf, info.cab);
       const count = Math.max(1, Math.min(pedidos, 24000));
       const picos = picosDeMuestras(lector.leer, lector.frames, count, lector.maximo);
