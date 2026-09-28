@@ -195,7 +195,10 @@ export class AudioProcessorService {
     // La clave incluye la ventana redondeada a seis decimales: dos peticiones
     // del mismo tramo comparten caché, y una de otro tramo no lo pisa.
     const ventana = desde === 0 && hasta === 1 ? "full" : `${desde.toFixed(6)}-${hasta.toFixed(6)}`;
-    const cacheKey = `telephony:waveform:${segmentId}:${numSamples}:${ventana}`;
+    // v2: la caché dura catorce días, así que sin cambiar la clave el arreglo
+    // del pico fantasma no se vería en ningún audio ya dibujado. Recalcular
+    // cuesta una lectura por segmento y solo la primera vez.
+    const cacheKey = `telephony:waveform:v2:${segmentId}:${numSamples}:${ventana}`;
     const cached = await this.cache.get<number[]>(cacheKey);
     if (cached) return cached;
 
