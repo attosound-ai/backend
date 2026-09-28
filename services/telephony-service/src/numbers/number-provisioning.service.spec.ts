@@ -253,4 +253,81 @@ describe("NumberProvisioningService", () => {
       });
     });
   });
+
+  describe("releaseNumbersForDeletedUser", () => {
+    const userId = "user-999";
+
+    it("deletes a real number from Twilio and marks the row released", async () => {
+      const manager = { save: jest.fn(), update: jest.fn() };
+      dataSource.transaction.mockImplementation(async (fn: any) => fn(manager));
+      const held = {
+        twilioNumberSid: "PNreal",
+        phoneNumber: "+16812932367",
+        userId,
+        status: "assigned",
+      } as ProvisionedNumber;
+      (numberRepo as any).find = jest.fn().mockResolvedValue([held]);
+
+      const released = await service.releaseNumbersForDeletedUser(userId);
+
+      expect(released).toEqual(["+16812932367"]);
+      expect(twilioNumbers.release).toHaveBeenCalledWith("PNreal");
+      expect(held.status).toBe("released");
+      expect(held.releasedAt).toBeInstanceOf(Date);
+      expect(manager.update).toHaveBeenCalledWith(
+        PhoneNumberAssignment,
+        { phoneNumber: "+16812932367" },
+        { status: "inactive" },
+      );
+      expect(outbox.enqueue).toHaveBeenCalledWith(
+        manager,
+        "number.released",
+        "phone_number",
+        userId,
+        { userId, phoneNumber: "+16812932367", deletedFromTwilio: true },
+      );
+    });
+
+    it("returns a dev placeholder to the pool without touching Twilio", async () => {
+      const manager = { save: jest.fn(), update: jest.fn() };
+      dataSource.transaction.mockImplementation(async (fn: any) => fn(manager));
+      const held = {
+        twilioNumberSid: "PNfake",
+        phoneNumber: "+15005551234",
+        userId,
+        status: "assigned",
+      } as ProvisionedNumber;
+      (numberRepo as any).find = jest.fn().mockResolvedValue([held]);
+      numberRepo.findOne.mockResolvedValue(held);
+
+      const released = await service.releaseNumbersForDeletedUser(userId);
+
+      expect(released).toEqual(["+15005551234"]);
+      expect(twilioNumbers.release).not.toHaveBeenCalled();
+      expect(held.status).toBe("available");
+    });
+
+    it("keeps the row assigned when Twilio refuses, so it can be retried", async () => {
+      const held = {
+        twilioNumberSid: "PNreal",
+        phoneNumber: "+18605550000",
+        userId,
+        status: "assigned",
+      } as ProvisionedNumber;
+      (numberRepo as any).find = jest.fn().mockResolvedValue([held]);
+      twilioNumbers.release.mockRejectedValue(new Error("twilio down"));
+
+      await expect(service.releaseNumbersForDeletedUser(userId)).rejects.toThrow(
+        "twilio down",
+      );
+      expect(held.status).toBe("assigned");
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it("is a no op for a user without numbers", async () => {
+      (numberRepo as any).find = jest.fn().mockResolvedValue([]);
+      await expect(service.releaseNumbersForDeletedUser(userId)).resolves.toEqual([]);
+      expect(twilioNumbers.release).not.toHaveBeenCalled();
+    });
+  });
 });

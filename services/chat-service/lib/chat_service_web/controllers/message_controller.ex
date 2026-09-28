@@ -4,6 +4,7 @@ defmodule ChatServiceWeb.MessageController do
 
   alias ChatService.Messages.MessageService
   alias ChatService.Conversations.ConversationService
+  alias ChatService.Messages.ThreadInbox
 
   action_fallback ChatServiceWeb.FallbackController
 
@@ -20,6 +21,7 @@ defmodule ChatServiceWeb.MessageController do
       []
       |> maybe_add_before(params)
       |> maybe_add_limit(params)
+      |> maybe_add_since(conn.assigns[:user_id], chat_id)
 
     case MessageService.get_messages(chat_id, opts) do
       {:ok, %{messages: messages, reactions: reactions, next_cursor: next_cursor, has_more: has_more}} ->
@@ -39,6 +41,93 @@ defmodule ChatServiceWeb.MessageController do
         conn
         |> put_status(500)
         |> json(%{success: false, data: nil, error: "Failed to retrieve messages"})
+    end
+  end
+
+  @doc """
+  GET /api/v1/messages/:chat_id/threads/:thread_id
+
+  Slack style thread: the root message plus every reply that was sent with
+  this thread id, oldest first.
+  """
+  def thread(conn, %{"chat_id" => conversation_id, "thread_id" => thread_id}) do
+    user_id = conn.assigns.user_id
+
+    with {:ok, _conversation} <- ConversationService.find_conversation(user_id, conversation_id),
+         {:ok, messages} <- MessageService.get_thread_messages(conversation_id, thread_id) do
+      conn
+      |> put_view(ChatServiceWeb.MessageView)
+      |> render("index.json", messages: messages, next_cursor: nil, has_more: false)
+    else
+      {:error, :not_found} ->
+        conn |> put_status(404) |> json(%{success: false, data: nil, error: "Conversation not found"})
+
+      {:error, reason} ->
+        Logger.error("Failed to load thread #{thread_id}: #{inspect(reason)}")
+        conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to load thread"})
+    end
+  end
+
+  @doc """
+  GET /api/v1/messages/:chat_id/pinned
+
+  Every message pinned in this conversation, newest first.
+  """
+  def pinned(conn, %{"chat_id" => conversation_id}) do
+    user_id = conn.assigns.user_id
+
+    with {:ok, _conversation} <- ConversationService.find_conversation(user_id, conversation_id),
+         {:ok, messages} <- MessageService.get_pinned_messages(conversation_id) do
+      conn
+      |> put_view(ChatServiceWeb.MessageView)
+      |> render("index.json", messages: messages, next_cursor: nil, has_more: false)
+    else
+      {:error, :not_found} ->
+        conn |> put_status(404) |> json(%{success: false, data: nil, error: "Conversation not found"})
+
+      {:error, reason} ->
+        Logger.error("Failed to load pinned messages for #{conversation_id}: #{inspect(reason)}")
+        conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to load pinned messages"})
+    end
+  end
+
+  @doc """
+  POST /api/v1/messages/:chat_id/:message_id/pin
+
+  Pin a message. Either participant of a private conversation may do it.
+  """
+  def pin(conn, %{"chat_id" => conversation_id, "message_id" => message_id}) do
+    user_id = conn.assigns.user_id
+
+    with {:ok, _conversation} <- ConversationService.find_conversation(user_id, conversation_id),
+         {:ok, payload} <- MessageService.pin_message(conversation_id, message_id, user_id) do
+      conn |> put_status(200) |> json(%{success: true, data: payload, error: nil})
+    else
+      {:error, :not_found} ->
+        conn |> put_status(404) |> json(%{success: false, data: nil, error: "Message not found"})
+
+      {:error, reason} ->
+        Logger.error("Failed to pin #{message_id}: #{inspect(reason)}")
+        conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to pin message"})
+    end
+  end
+
+  @doc """
+  DELETE /api/v1/messages/:chat_id/:message_id/pin
+  """
+  def unpin(conn, %{"chat_id" => conversation_id, "message_id" => message_id}) do
+    user_id = conn.assigns.user_id
+
+    with {:ok, _conversation} <- ConversationService.find_conversation(user_id, conversation_id),
+         {:ok, payload} <- MessageService.unpin_message(conversation_id, message_id, user_id) do
+      conn |> put_status(200) |> json(%{success: true, data: payload, error: nil})
+    else
+      {:error, :not_found} ->
+        conn |> put_status(404) |> json(%{success: false, data: nil, error: "Conversation not found"})
+
+      {:error, reason} ->
+        Logger.error("Failed to unpin #{message_id}: #{inspect(reason)}")
+        conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to unpin message"})
     end
   end
 
@@ -75,7 +164,17 @@ defmodule ChatServiceWeb.MessageController do
         # conversation first, so this should never trip in normal flows).
         case ConversationService.find_conversation(user_id, conversation_id) do
           {:ok, _conversation} ->
-            case MessageService.send_message(user_id, conversation_id, content, content_type) do
+            opts =
+              [
+                metadata: params["metadata"],
+                thread_id: blank_to_nil(params["threadId"]),
+                reply_to_id: blank_to_nil(params["replyToId"]),
+                reply_to_content: params["replyToContent"],
+                reply_to_sender: params["replyToSender"]
+              ]
+              |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+            case MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
               {:ok, message} ->
                 conn
                 |> put_status(201)
@@ -200,6 +299,78 @@ defmodule ChatServiceWeb.MessageController do
     end
   end
 
+  @doc """
+  GET /api/v1/messages/threads
+
+  The threads inbox: every thread this user takes part in, across every
+  conversation, newest reply first, each with its unread count and follow
+  flag. Slack's "Threads" entry, served from the server so the count survives
+  a reinstall and matches on every device.
+  """
+  def threads(conn, _params) do
+    user_id = conn.assigns.user_id
+
+    case ThreadInbox.list(user_id) do
+      {:ok, threads} ->
+        conn |> put_status(200) |> json(%{success: true, data: %{threads: Enum.map(threads, &thread_json/1)}})
+
+      {:error, reason} ->
+        Logger.error("Failed to list threads for #{user_id}: #{inspect(reason)}")
+        conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to list threads"})
+    end
+  end
+
+  @doc """
+  POST /api/v1/messages/:chat_id/threads/:thread_id/read
+
+  Every reply in the thread counts as seen. Sent when the thread opens.
+  """
+  def thread_read(conn, %{"chat_id" => conversation_id, "thread_id" => thread_id}) do
+    user_id = conn.assigns.user_id
+    ThreadInbox.mark_read(user_id, thread_id, conversation_id)
+    conn |> put_status(200) |> json(%{success: true, data: %{thread_id: thread_id}})
+  end
+
+  @doc """
+  POST /api/v1/messages/:chat_id/threads/:thread_id/follow
+
+  Body `{"following": true|false}`. An unfollowed thread stays in the inbox
+  but stops carrying an unread count, as in Slack.
+  """
+  def thread_follow(conn, %{"thread_id" => thread_id} = params) do
+    user_id = conn.assigns.user_id
+    following = params["following"] != false
+    ThreadInbox.set_following(user_id, thread_id, following)
+    conn |> put_status(200) |> json(%{success: true, data: %{thread_id: thread_id, following: following}})
+  end
+
+  defp thread_json(thread) do
+    %{
+      thread_id: thread.thread_id,
+      conversation_id: thread.conversation_id,
+      participant_id: thread.participant_id,
+      participant_name: thread.participant_name,
+      root_preview: thread.root_preview,
+      reply_preview: thread.reply_preview,
+      last_reply_sender_id: thread.last_reply_sender_id,
+      reply_count: thread.reply_count,
+      unread: thread.unread,
+      following: thread.following,
+      last_reply_at: thread.last_reply_at && DateTime.to_iso8601(thread.last_reply_at)
+    }
+  end
+
+  # A reader who deleted this chat only sees what arrived after they did.
+  # Their own row carries the stamp; anyone else's read is untouched.
+  defp maybe_add_since(opts, nil, _chat_id), do: opts
+
+  defp maybe_add_since(opts, user_id, chat_id) do
+    case ConversationService.find_conversation(user_id, chat_id) do
+      {:ok, %{cleared_at: %DateTime{} = at}} -> Keyword.put(opts, :since, at)
+      _ -> opts
+    end
+  end
+
   defp maybe_add_before(opts, %{"before" => before}) when is_binary(before) and before != "" do
     Keyword.put(opts, :before, before)
   end
@@ -214,4 +385,8 @@ defmodule ChatServiceWeb.MessageController do
   end
 
   defp maybe_add_limit(opts, _params), do: opts
+
+  defp blank_to_nil(nil), do: nil
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
 end

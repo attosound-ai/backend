@@ -9,6 +9,7 @@ import { Server } from "ws";
 import { MediaService } from "./media.service";
 import { CallsService } from "../calls/calls.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
+import { AnalyticsService } from "../analytics/analytics.service";
 
 /**
  * WebSocket gateway that receives Twilio Media Streams.
@@ -29,6 +30,7 @@ export class MediaGateway
     private readonly mediaService: MediaService,
     private readonly callsService: CallsService,
     private readonly kafka: KafkaProducer,
+    private readonly analytics: AnalyticsService,
   ) {}
 
   afterInit(server: Server): void {
@@ -85,17 +87,33 @@ export class MediaGateway
             callSid,
             track,
           );
+
+          // Telemetry: what tracks did Twilio actually fork? `track` is the
+          // joined `tracks` array from the Twilio start frame. If the client
+          // requested both_tracks but this reports only "inbound", Twilio is
+          // NOT forking the remote (outbound) leg — the exact signature of the
+          // "I'm recorded, the other party isn't" bug.
+          this.analytics.capture(userId || null, "backend_recording_started", {
+            call_sid: callSid,
+            stream_sid: streamSid,
+            call_id: callId,
+            tracks_forked: track,
+            both_tracks: track.includes("inbound") && track.includes("outbound"),
+          });
           break;
         }
 
         case "media": {
           const { payload, timestamp, track } = msg.media;
           const streamSid = msg.streamSid;
+          // Pass the RAW track label (may be undefined). appendChunk buckets
+          // unknown/missing labels as inbound but counts them separately, so a
+          // mislabeled remote track is visible instead of silently merged.
           this.mediaService.appendChunk(
             streamSid,
             payload,
             parseInt(timestamp, 10),
-            track || "inbound",
+            track,
           );
           break;
         }
@@ -107,6 +125,31 @@ export class MediaGateway
           // Finalize and save the audio segment
           const session = this.mediaService.getSession(streamSid);
           if (session) {
+            // Snapshot per-track buffers BEFORE finalize (which clears the
+            // session). This is the smoking gun for the one-sided-recording
+            // bug: inbound = local mic (rep's voice), outbound = what Twilio
+            // played to the leg (the REMOTE party's voice). If outbound_* is
+            // 0, the remote was never captured.
+            const inboundChunks = session.inboundChunks.length;
+            const outboundChunks = session.outboundChunks.length;
+            const inboundBytes = session.inboundChunks.reduce(
+              (s, b) => s + b.length,
+              0,
+            );
+            const outboundBytes = session.outboundChunks.reduce(
+              (s, b) => s + b.length,
+              0,
+            );
+            // Frame-label counters (set during media frames, stable at stop).
+            const framesLabeledInbound = session.framesLabeledInbound;
+            const framesLabeledOutbound = session.framesLabeledOutbound;
+            const framesMissingLabel = session.framesMissingLabel;
+            const framesLabeledOther = session.framesLabeledOther;
+            const firstOutboundFrameOffsetMs =
+              session.firstOutboundTs === null
+                ? null
+                : session.firstOutboundTs - session.startTimestamp;
+
             const segmentIndex = await this.callsService.getNextSegmentIndex(
               session.callId,
             );
@@ -138,6 +181,59 @@ export class MediaGateway
                 durationMs: result.durationMs,
               });
             }
+
+            this.analytics.capture(
+              session.userId || null,
+              "backend_recording_segment",
+              {
+                call_sid: session.callSid,
+                stream_sid: streamSid,
+                segment_index: segmentIndex,
+                tracks_config: session.track,
+                inbound_chunks: inboundChunks,
+                outbound_chunks: outboundChunks,
+                inbound_bytes: inboundBytes,
+                outbound_bytes: outboundBytes,
+                // Diagnosis flags — one_sided is the exact bug signature.
+                inbound_empty: inboundChunks === 0,
+                outbound_empty: outboundChunks === 0,
+                one_sided: (inboundChunks === 0) !== (outboundChunks === 0),
+                duration_ms: result?.durationMs ?? 0,
+                file_size_bytes: result?.fileSizeBytes ?? 0,
+                saved: !!result,
+              },
+            );
+
+            // Frame-label distribution — separates a genuine one-track fork
+            // (first_outbound_frame_offset_ms == null → Twilio never forked the
+            // remote) from a mislabeled remote (frames_missing_label/other > 0
+            // while outbound_chunks == 0 → frames arrived but missed the
+            // 'outbound' branch).
+            this.analytics.capture(
+              session.userId || null,
+              "backend_recording_track_summary",
+              {
+                call_sid: session.callSid,
+                stream_sid: streamSid,
+                frames_total:
+                  framesLabeledInbound +
+                  framesLabeledOutbound +
+                  framesMissingLabel +
+                  framesLabeledOther,
+                frames_labeled_inbound: framesLabeledInbound,
+                frames_labeled_outbound: framesLabeledOutbound,
+                frames_missing_label: framesMissingLabel,
+                frames_labeled_other: framesLabeledOther,
+                first_outbound_frame_offset_ms: firstOutboundFrameOffsetMs,
+              },
+            );
+          } else {
+            // No session for this streamSid — the start frame was never
+            // processed, or finalize already ran. Either way the segment is
+            // lost; make that visible instead of silently dropping it.
+            this.analytics.capture(null, "backend_recording_segment_orphaned", {
+              stream_sid: streamSid,
+            });
           }
           break;
         }

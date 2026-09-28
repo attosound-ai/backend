@@ -8,6 +8,12 @@ defmodule ChatService.Application do
 
   @impl true
   def start(_type, _args) do
+    # Route crash reports and Logger error/warning entries to Sentry.
+    # No-ops when :sentry dsn is nil (dev/test), so this is safe everywhere.
+    :logger.add_handler(:chat_service_sentry, Sentry.LoggerHandler, %{
+      config: %{metadata: [:file, :line], capture_log_messages: false}
+    })
+
     cassandra_nodes = Application.get_env(:chat_service, :cassandra_nodes, ["localhost:9042"])
     cassandra_keyspace = Application.get_env(:chat_service, :cassandra_keyspace, "atto_chat")
     kafka_brokers = Application.get_env(:chat_service, :kafka_brokers, [{"localhost", 9092}])
@@ -125,6 +131,26 @@ defmodule ChatService.Application do
         PRIMARY KEY (message_id, user_id)
       )
       """,
+      # Dead-letter for account deletions whose chat cascade failed (see KafkaConsumer).
+      # Reprocessed by `mix chat.reprocess_failed_deletions`.
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.failed_deletions (
+        user_id text,
+        reason text,
+        attempts int,
+        failed_at timestamp,
+        PRIMARY KEY (user_id)
+      )
+      """,
+      # Resumable cursor for `mix chat.cleanup_orphans` (paging_state is an opaque blob).
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.cleanup_checkpoints (
+        job text,
+        paging_state blob,
+        updated_at timestamp,
+        PRIMARY KEY (job)
+      )
+      """,
       # Add new columns to messages (idempotent — Cassandra ignores if they already exist)
       "ALTER TABLE #{keyspace}.messages ADD is_edited boolean",
       "ALTER TABLE #{keyspace}.messages ADD edited_at timestamp",
@@ -133,7 +159,54 @@ defmodule ChatService.Application do
       "ALTER TABLE #{keyspace}.messages ADD reply_to_content text",
       "ALTER TABLE #{keyspace}.messages ADD reply_to_sender text",
       "ALTER TABLE #{keyspace}.messages ADD deleted_at timestamp",
-      "ALTER TABLE #{keyspace}.messages ADD deleted_by text"
+      "ALTER TABLE #{keyspace}.messages ADD deleted_by text",
+      # Sep 2026: media and effects metadata (JSON) and Slack style threads.
+      "ALTER TABLE #{keyspace}.messages ADD metadata text",
+      "ALTER TABLE #{keyspace}.messages ADD thread_id text",
+      # Sep 2026: deleting a chat from the list. The row stays so the other
+      # side can still reach this user and the conversation keeps its id; it
+      # is hidden from the list, and `cleared_at` keeps the history that was
+      # deleted out of the thread even after a new message brings it back.
+      "ALTER TABLE #{keyspace}.conversations ADD hidden boolean",
+      "ALTER TABLE #{keyspace}.conversations ADD cleared_at timestamp",
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.thread_messages (
+        conversation_id uuid,
+        thread_id text,
+        message_id timeuuid,
+        created_at timestamp,
+        PRIMARY KEY ((conversation_id, thread_id), message_id)
+      ) WITH CLUSTERING ORDER BY (message_id ASC)
+      """,
+      # Sep 2026: the threads inbox. One row per (user, thread) on both
+      # sides, so "Threads" costs a single partition read per user, and the
+      # unread count and the follow flag live on the server instead of on one
+      # device. See ChatService.Messages.ThreadInbox.
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.threads_by_user (
+        user_id text,
+        thread_id text,
+        conversation_id uuid,
+        participant_id text,
+        participant_name text,
+        root_preview text,
+        reply_preview text,
+        reply_count int,
+        last_reply_at timestamp,
+        last_reply_sender_id text,
+        PRIMARY KEY (user_id, thread_id)
+      )
+      """,
+      """
+      CREATE TABLE IF NOT EXISTS #{keyspace}.thread_state (
+        user_id text,
+        thread_id text,
+        read_count int,
+        following boolean,
+        updated_at timestamp,
+        PRIMARY KEY (user_id, thread_id)
+      )
+      """
     ]
 
     Enum.each(statements, fn stmt ->

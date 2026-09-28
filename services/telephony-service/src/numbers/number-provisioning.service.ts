@@ -196,6 +196,73 @@ export class NumberProvisioningService {
   }
 
   /**
+   * A real Twilio number keeps billing for as long as it exists on the account,
+   * whether or not anyone is assigned to it. The dev mode placeholders
+   * (+1500555xxxx, never bought) cost nothing.
+   */
+  static isRealTwilioNumber(phoneNumber: string): boolean {
+    return !phoneNumber.startsWith("+1500555");
+  }
+
+  /**
+   * Account deletion: every number the user held goes away for good.
+   *
+   * `releaseNumber()` only returns a number to the pool, so after a deletion
+   * the Twilio number kept existing (and kept costing money) with nobody to
+   * route to. This variant DELETES real numbers from Twilio and marks the row
+   * `released`; placeholders take the cheap pool path. Twilio is called before
+   * the row changes, so a Twilio failure leaves the row `assigned` and visible
+   * for a retry instead of silently orphaning a paid number.
+   */
+  async releaseNumbersForDeletedUser(userId: string): Promise<string[]> {
+    const held = await this.numberRepo.find({
+      where: { userId, status: "assigned" },
+    });
+    if (held.length === 0) {
+      this.logger.log("Deleted user %s held no number", userId);
+      return [];
+    }
+
+    const released: string[] = [];
+    for (const provisioned of held) {
+      const phoneNumber = provisioned.phoneNumber;
+      if (!NumberProvisioningService.isRealTwilioNumber(phoneNumber)) {
+        await this.releaseNumber(userId);
+        released.push(phoneNumber);
+        continue;
+      }
+
+      await this.twilioNumbers.release(provisioned.twilioNumberSid);
+
+      await this.dataSource.transaction(async (manager) => {
+        provisioned.status = "released";
+        provisioned.releasedAt = new Date();
+        await manager.save(provisioned);
+        await manager.update(
+          PhoneNumberAssignment,
+          { phoneNumber },
+          { status: "inactive" },
+        );
+        await this.outbox.enqueue(
+          manager,
+          "number.released",
+          "phone_number",
+          userId,
+          { userId, phoneNumber, deletedFromTwilio: true },
+        );
+      });
+
+      this.logger.log(
+        "Number %s deleted from Twilio for deleted user %s",
+        phoneNumber,
+        userId,
+      );
+      released.push(phoneNumber);
+    }
+    return released;
+  }
+
+  /**
    * Fully delete a number from Twilio (for cleanup or cost savings).
    * Use releaseNumber() for normal subscription cancellation.
    */

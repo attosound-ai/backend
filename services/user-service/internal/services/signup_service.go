@@ -138,9 +138,19 @@ func (s *SignupService) Start(
 		if identifierType == models.IdentifierEmail {
 			session.Draft.Email = &identifier
 		}
+		if locale != "" {
+			loc := locale
+			session.Draft.Locale = &loc
+		}
 		if err := s.signupRepo.Create(session); err != nil {
 			return nil, fmt.Errorf("create signup session: %w", err)
 		}
+	} else if locale != "" && (session.Draft.Locale == nil || *session.Draft.Locale == "") {
+		// Existing session being reused — backfill locale if it wasn't set yet
+		// (e.g. session created by an older client that didn't ship locale).
+		loc := locale
+		session.Draft.Locale = &loc
+		_ = s.signupRepo.Update(session)
 	}
 
 	// Trigger OTP send (best-effort, but we surface failure — the user can't
@@ -198,9 +208,15 @@ func (s *SignupService) VerifyOTP(
 	}
 
 	// Apply draft FIRST so it persists even on subsequent failure paths.
-	// Idempotent: re-sending the same draft on retry is a no-op.
+	// Idempotent: re-sending the same draft on retry is a no-op. Use the
+	// shared helper that mirrors PatchDraft (bcrypts the raw password,
+	// validates DOB, recomputes completedSteps) — a bare `mergeDraft` was
+	// silently dropping `password` because the merger intentionally skips
+	// PasswordHash (the hashing lives in the caller).
 	if draft != nil {
-		mergeDraft(&session.Draft, draft)
+		if err := s.applyDraftPatch(session, draft); err != nil {
+			return nil, fmt.Errorf("apply draft on verify-otp: %w", err)
+		}
 		if err := s.signupRepo.Update(session); err != nil {
 			return nil, fmt.Errorf("merge draft into session: %w", err)
 		}
@@ -289,36 +305,10 @@ func (s *SignupService) PatchDraft(
 		return nil, "", ErrOTPNotVerified
 	}
 
-	mergeDraft(&session.Draft, patch)
-
-	// Hash password client-side never; hash here once before persisting.
-	// We treat presence of a non-bcrypt-looking PasswordHash field as a raw
-	// password the client just submitted.
-	if patch.PasswordHash != nil && *patch.PasswordHash != "" && !looksLikeBcrypt(*patch.PasswordHash) {
-		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.PasswordHash), bcrypt.DefaultCost)
-		if hashErr != nil {
-			return nil, "", fmt.Errorf("hash password: %w", hashErr)
-		}
-		hashStr := string(hash)
-		session.Draft.PasswordHash = &hashStr
-	}
-	if patch.CreatorPasswordHash != nil && *patch.CreatorPasswordHash != "" && !looksLikeBcrypt(*patch.CreatorPasswordHash) {
-		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.CreatorPasswordHash), bcrypt.DefaultCost)
-		if hashErr != nil {
-			return nil, "", fmt.Errorf("hash creator password: %w", hashErr)
-		}
-		hashStr := string(hash)
-		session.Draft.CreatorPasswordHash = &hashStr
+	if err := s.applyDraftPatch(session, patch); err != nil {
+		return nil, "", err
 	}
 
-	// Validate DOB format if present.
-	if session.Draft.DateOfBirth != nil && *session.Draft.DateOfBirth != "" {
-		if _, err := validation.ParseAndValidateDOB(*session.Draft.DateOfBirth); err != nil {
-			return nil, "", err
-		}
-	}
-
-	session.CompletedSteps = recomputeCompletedSteps(session)
 	if err := s.signupRepo.Update(session); err != nil {
 		return nil, "", fmt.Errorf("update session draft: %w", err)
 	}
@@ -417,12 +407,68 @@ func (s *SignupService) Complete(ctx context.Context, sessionID uuid.UUID) (*Com
 
 	creds := &models.UserCredentials{PasswordHash: *d.PasswordHash}
 
-	if err := s.userRepo.CreateUserWithCredentials(user, creds); err != nil {
-		// Most likely cause: unique constraint race on username or phone.
-		if strings.Contains(err.Error(), "users_username") || strings.Contains(err.Error(), "duplicate key") {
-			return nil, ErrUsernameTaken
+	// A representative exists to manage a creator (an inmate with no login of
+	// their own). Persist BOTH atomically so a representative can never be left
+	// orphaned without its creator — the Sep 2026 incident, where the creator
+	// INSERT collided on idx_users_email and its failure was only logged while
+	// the representative persisted. A representative whose draft is missing the
+	// creator details is an upstream bug: fail loudly rather than create a half
+	// account.
+	var linkedAccount *models.LinkedAccountPayload
+	isRepWithCreator := user.Role == models.RoleRepresentative && d.InmateNumber != nil
+
+	if isRepWithCreator {
+		if d.CreatorUsername == nil || d.CreatorDisplayName == nil ||
+			d.CreatorPasswordHash == nil || d.InmateState == nil {
+			return nil, ErrMissingRequired
 		}
-		return nil, fmt.Errorf("create user from session: %w", err)
+		fields := &models.ManagedCreatorFields{
+			Username:         *d.CreatorUsername,
+			DisplayName:      *d.CreatorDisplayName,
+			Email:            strVal(d.CreatorEmail),
+			PhoneCountryCode: d.CreatorPhoneCountryCode,
+			PhoneNumber:      d.CreatorPhoneNumber,
+			Avatar:           d.CreatorAvatar,
+			CreatorTypes:     d.CreatorTypes,
+			CreatorGenres:    d.CreatorGenres,
+		}
+		consent := false
+		if d.ConsentToRecording != nil {
+			consent = *d.ConsentToRecording
+		}
+		creator, err := s.userRepo.CreateRepresentativeWithManagedCreator(
+			user, creds, fields, *d.CreatorPasswordHash, *d.InmateNumber, *d.InmateState, consent,
+		)
+		if err != nil {
+			if strings.Contains(err.Error(), "users_username") || strings.Contains(err.Error(), "duplicate key") {
+				return nil, ErrUsernameTaken
+			}
+			return nil, fmt.Errorf("create representative + managed creator: %w", err)
+		}
+		creatorTokens, err := s.jwtMgr.GenerateTokenPair(creator)
+		if err != nil {
+			return nil, fmt.Errorf("generate creator tokens: %w", err)
+		}
+		// Managed creators don't traverse the normal publish path; emit
+		// user.created so social-service (welcome + auto-follow) and
+		// email-service run their onboarding for the creator too.
+		creatorLocale := "en"
+		if d.Locale != nil {
+			creatorLocale = *d.Locale
+		}
+		go s.publishUserCreated(creator, creatorLocale)
+		linkedAccount = &models.LinkedAccountPayload{
+			User:   creator.ToProfile(),
+			Tokens: creatorTokens,
+		}
+	} else {
+		if err := s.userRepo.CreateUserWithCredentials(user, creds); err != nil {
+			// Most likely cause: unique constraint race on username or phone.
+			if strings.Contains(err.Error(), "users_username") || strings.Contains(err.Error(), "duplicate key") {
+				return nil, ErrUsernameTaken
+			}
+			return nil, fmt.Errorf("create user from session: %w", err)
+		}
 	}
 
 	result := &CompleteResult{User: user.ToProfile()}
@@ -433,18 +479,17 @@ func (s *SignupService) Complete(ctx context.Context, sessionID uuid.UUID) (*Com
 		return nil, fmt.Errorf("generate tokens: %w", err)
 	}
 	result.Tokens = tokens
+	result.LinkedAccount = linkedAccount
 
-	// Optional managed creator account (representative path).
-	if user.Role == models.RoleRepresentative && d.InmateNumber != nil {
-		if linked, err := s.createManagedCreatorFromDraft(user, &d); err == nil && linked != nil {
-			result.LinkedAccount = linked
-		} else if err != nil {
-			log.Printf("[SIGNUP] Managed creator creation failed for rep %d: %v", user.ID, err)
-		}
+	// Publish event and clean up the session. Pass through the wizard's
+	// captured locale so downstream consumers (welcome email, push
+	// notifications, …) render in the user's language instead of falling
+	// back to whatever default they hard-code.
+	locale := ""
+	if session.Draft.Locale != nil {
+		locale = *session.Draft.Locale
 	}
-
-	// Publish event and clean up the session.
-	go s.publishUserCreated(user)
+	go s.publishUserCreated(user, locale)
 	if err := s.signupRepo.Delete(session.ID); err != nil {
 		log.Printf("[SIGNUP] Failed to delete completed session %s: %v", session.ID, err)
 	}
@@ -589,9 +634,54 @@ func appendUnique(arr pq.StringArray, vals ...string) pq.StringArray {
 	return arr
 }
 
+// applyDraftPatch is the full client-draft application: shallow merge of
+// non-password fields via mergeDraft, bcrypt of raw passwords, DOB
+// validation, and a recompute of completedSteps. Both PatchDraft and
+// VerifyOTP go through this so the wire contracts stay equivalent — a
+// previous version of VerifyOTP called only mergeDraft, which silently
+// dropped `password` (the merger intentionally skips PasswordHash because
+// hashing must happen on the server) and left signupComplete failing
+// with "missing required fields" whenever the password rode in on the
+// verify-otp atomic body.
+func (s *SignupService) applyDraftPatch(session *models.SignupSession, patch *models.SignupDraft) error {
+	mergeDraft(&session.Draft, patch)
+
+	// Hash password server-side. We treat presence of a non-bcrypt-looking
+	// PasswordHash field as a raw password the client just submitted.
+	if patch.PasswordHash != nil && *patch.PasswordHash != "" && !looksLikeBcrypt(*patch.PasswordHash) {
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.PasswordHash), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return fmt.Errorf("hash password: %w", hashErr)
+		}
+		hashStr := string(hash)
+		session.Draft.PasswordHash = &hashStr
+	}
+	if patch.CreatorPasswordHash != nil && *patch.CreatorPasswordHash != "" && !looksLikeBcrypt(*patch.CreatorPasswordHash) {
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(*patch.CreatorPasswordHash), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return fmt.Errorf("hash creator password: %w", hashErr)
+		}
+		hashStr := string(hash)
+		session.Draft.CreatorPasswordHash = &hashStr
+	}
+
+	// Validate DOB format if present.
+	if session.Draft.DateOfBirth != nil && *session.Draft.DateOfBirth != "" {
+		if _, err := validation.ParseAndValidateDOB(*session.Draft.DateOfBirth); err != nil {
+			return err
+		}
+	}
+
+	session.CompletedSteps = recomputeCompletedSteps(session)
+	return nil
+}
+
 // mergeDraft applies patch onto base, copying only non-nil fields. Slices
 // are replaced wholesale (not appended) so the client can clear them by
 // sending an empty array.
+//
+// PasswordHash is deliberately skipped — callers must bcrypt the raw
+// password (see `applyDraftPatch` for the proper full-merge entry point).
 func mergeDraft(base, patch *models.SignupDraft) {
 	if patch.DisplayName != nil {
 		base.DisplayName = patch.DisplayName
@@ -677,39 +767,6 @@ func looksLikeBcrypt(s string) bool {
 	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
 }
 
-func (s *SignupService) createManagedCreatorFromDraft(rep *models.User, d *models.SignupDraft) (*models.LinkedAccountPayload, error) {
-	if d.CreatorUsername == nil || d.CreatorDisplayName == nil || d.CreatorPasswordHash == nil ||
-		d.InmateNumber == nil || d.InmateState == nil {
-		return nil, nil
-	}
-	fields := &models.ManagedCreatorFields{
-		Username:         *d.CreatorUsername,
-		DisplayName:      *d.CreatorDisplayName,
-		Email:            strVal(d.CreatorEmail),
-		PhoneCountryCode: d.CreatorPhoneCountryCode,
-		PhoneNumber:      d.CreatorPhoneNumber,
-		Avatar:           d.CreatorAvatar,
-		CreatorTypes:     d.CreatorTypes,
-		CreatorGenres:    d.CreatorGenres,
-	}
-	consent := false
-	if d.ConsentToRecording != nil {
-		consent = *d.ConsentToRecording
-	}
-	managed, err := s.userRepo.CreateManagedCreator(rep, fields, *d.CreatorPasswordHash, *d.InmateNumber, *d.InmateState, consent)
-	if err != nil {
-		return nil, err
-	}
-	tokens, err := s.jwtMgr.GenerateTokenPair(managed)
-	if err != nil {
-		return nil, err
-	}
-	return &models.LinkedAccountPayload{
-		User:   managed.ToProfile(),
-		Tokens: tokens,
-	}, nil
-}
-
 func (s *SignupService) sendOTP(identifier string, idType models.IdentifierType, locale string) error {
 	body := map[string]string{"locale": locale}
 	switch idType {
@@ -768,14 +825,18 @@ func (s *SignupService) verifyOTP(identifier string, idType models.IdentifierTyp
 	return nil
 }
 
-func (s *SignupService) publishUserCreated(user *models.User) {
+func (s *SignupService) publishUserCreated(user *models.User, locale string) {
 	idStr := fmt.Sprintf("%d", user.ID)
+	if locale == "" {
+		locale = "en"
+	}
 	eventData := map[string]interface{}{
 		"id":          idStr,
 		"username":    user.Username,
 		"email":       strVal(user.Email),
 		"displayName": user.DisplayName,
 		"role":        string(user.Role),
+		"locale":      locale,
 	}
 	if err := s.producer.Publish(context.Background(), "user.created", idStr, eventData); err != nil {
 		log.Printf("[SIGNUP] Failed to publish user.created: %v", err)

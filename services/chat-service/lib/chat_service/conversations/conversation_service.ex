@@ -17,7 +17,7 @@ defmodule ChatService.Conversations.ConversationService do
   def list_conversations(user_id) do
     query = """
     SELECT user_id, conversation_id, participant_id, participant_name,
-           last_message, last_message_at, unread_count, updated_at
+           last_message, last_message_at, unread_count, updated_at, hidden, cleared_at
     FROM conversations
     WHERE user_id = ?
     ORDER BY updated_at DESC
@@ -27,9 +27,12 @@ defmodule ChatService.Conversations.ConversationService do
 
     case Repo.execute_prepared(query, params) do
       {:ok, result} ->
+        # A chat this user deleted keeps its row, so the other side can still
+        # reach them, but it is gone from the list until a new message lands.
         conversations =
           result
           |> Enum.to_list()
+          |> Enum.reject(fn row -> row["hidden"] == true end)
           |> Enum.map(&Conversation.from_row/1)
 
         {:ok, conversations}
@@ -95,7 +98,7 @@ defmodule ChatService.Conversations.ConversationService do
   def reset_unread_count(user_id, conversation_id) do
     find_query = """
     SELECT user_id, conversation_id, participant_id, participant_name,
-           last_message, last_message_at, unread_count, updated_at
+           last_message, last_message_at, unread_count, updated_at, hidden, cleared_at
     FROM conversations
     WHERE user_id = ?
     """
@@ -127,10 +130,15 @@ defmodule ChatService.Conversations.ConversationService do
 
             Repo.execute_prepared(delete_query, delete_params)
 
+            # The row is written from scratch after the delete, so anything it
+            # carried has to be named again or it comes back null. Opening a
+            # chat also brings it out of hiding, but what was cleared stays
+            # cleared.
             insert_query = """
             INSERT INTO conversations (user_id, conversation_id, participant_id, participant_name,
-                                       last_message, last_message_at, unread_count, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                       last_message, last_message_at, unread_count, updated_at,
+                                       hidden, cleared_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
 
             insert_params = %{
@@ -141,7 +149,9 @@ defmodule ChatService.Conversations.ConversationService do
               "last_message" => {"text", row["last_message"] || ""},
               "last_message_at" => {"timestamp", row["last_message_at"] || old_updated_at},
               "unread_count" => {"int", 0},
-              "updated_at" => {"timestamp", old_updated_at}
+              "updated_at" => {"timestamp", old_updated_at},
+              "hidden" => {"boolean", false},
+              "cleared_at" => {"timestamp", row["cleared_at"]}
             }
 
             Repo.execute_prepared(insert_query, insert_params)
@@ -160,7 +170,7 @@ defmodule ChatService.Conversations.ConversationService do
   """
   def get_total_unread(user_id) do
     query = """
-    SELECT unread_count FROM conversations
+    SELECT unread_count, hidden FROM conversations
     WHERE user_id = ?
     """
 
@@ -171,6 +181,7 @@ defmodule ChatService.Conversations.ConversationService do
         total =
           result
           |> Enum.to_list()
+          |> Enum.reject(fn row -> row["hidden"] == true end)
           |> Enum.reduce(0, fn row, acc -> acc + (row["unread_count"] || 0) end)
 
         {:ok, total}
@@ -187,7 +198,7 @@ defmodule ChatService.Conversations.ConversationService do
   def find_conversation(user_id, conversation_id) do
     query = """
     SELECT user_id, conversation_id, participant_id, participant_name,
-           last_message, last_message_at, unread_count, updated_at
+           last_message, last_message_at, unread_count, updated_at, hidden, cleared_at
     FROM conversations
     WHERE user_id = ?
     """
@@ -207,6 +218,58 @@ defmodule ChatService.Conversations.ConversationService do
       {:error, reason} ->
         Logger.error("Failed to find conversation: #{inspect(reason)}")
         {:error, :query_failed}
+    end
+  end
+
+  @doc """
+  Delete a chat from this user's list, the way WhatsApp and Telegram delete
+  one: for this user only, and only what is already there.
+
+  The row is kept rather than removed. The other side still has to be able to
+  reach this user, the conversation has to keep its id so the two views never
+  split in two, and the stamp of what was deleted has to live somewhere. So
+  the row is marked hidden, which takes it out of the list, and `cleared_at`
+  is set to now, which takes every message up to this moment out of the
+  thread. A new message brings the chat back carrying only itself.
+  """
+  def clear_conversation(user_id, conversation_id) do
+    case find_conversation(user_id, conversation_id) do
+      {:ok, conversation} ->
+        now = DateTime.utc_now()
+
+        # updated_at is part of the clustering key, so writing the same value
+        # back is an upsert of the same row, with no delete to undo.
+        query = """
+        INSERT INTO conversations (user_id, conversation_id, participant_id, participant_name,
+                                   last_message, last_message_at, unread_count, updated_at,
+                                   hidden, cleared_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        params = %{
+          "user_id" => {"text", to_string(user_id)},
+          "conversation_id" => {"uuid", conversation_id},
+          "participant_id" => {"text", to_string(conversation.participant_id)},
+          "participant_name" => {"text", conversation.participant_name || ""},
+          "last_message" => {"text", ""},
+          "last_message_at" => {"timestamp", conversation.last_message_at || now},
+          "unread_count" => {"int", 0},
+          "updated_at" => {"timestamp", conversation.updated_at || now},
+          "hidden" => {"boolean", true},
+          "cleared_at" => {"timestamp", now}
+        }
+
+        case Repo.execute_prepared(query, params) do
+          {:ok, _} ->
+            {:ok, now}
+
+          {:error, reason} ->
+            Logger.error("Failed to clear conversation: #{inspect(reason)}")
+            {:error, :update_failed}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -261,7 +324,8 @@ defmodule ChatService.Conversations.ConversationService do
     # We search the sender's conversations to find the participant_id.
 
     sender_query = """
-    SELECT user_id, conversation_id, participant_id, participant_name, unread_count, updated_at
+    SELECT user_id, conversation_id, participant_id, participant_name, unread_count,
+           updated_at, cleared_at
     FROM conversations
     WHERE user_id = ?
     """
@@ -287,12 +351,14 @@ defmodule ChatService.Conversations.ConversationService do
             content,
             timestamp,
             sender_row["updated_at"],
-            0  # Sender's unread stays at current or 0
+            0,  # Sender's unread stays at current or 0
+            sender_row["cleared_at"]
           )
 
           # Update recipient's conversation entry
           recipient_query = """
-          SELECT user_id, conversation_id, participant_id, participant_name, unread_count, updated_at
+          SELECT user_id, conversation_id, participant_id, participant_name, unread_count,
+                 updated_at, cleared_at
           FROM conversations
           WHERE user_id = ?
           """
@@ -317,7 +383,8 @@ defmodule ChatService.Conversations.ConversationService do
                   content,
                   timestamp,
                   recipient_row["updated_at"],
-                  current_unread + 1
+                  current_unread + 1,
+                  recipient_row["cleared_at"]
                 )
               end
 
@@ -334,7 +401,7 @@ defmodule ChatService.Conversations.ConversationService do
     end
   end
 
-  defp update_single_conversation(user_id, conversation_id, participant_id, participant_name, content, timestamp, old_updated_at, unread_count) do
+  defp update_single_conversation(user_id, conversation_id, participant_id, participant_name, content, timestamp, old_updated_at, unread_count, cleared_at) do
     # Delete old entry (since updated_at is part of the clustering key)
     if old_updated_at do
       delete_query = """
@@ -352,10 +419,13 @@ defmodule ChatService.Conversations.ConversationService do
     end
 
     # Insert new entry with updated timestamp
+    # A new message brings a deleted chat back, the way it does in WhatsApp,
+    # but only with what arrives from here on: `cleared_at` rides along.
     insert_query = """
     INSERT INTO conversations (user_id, conversation_id, participant_id, participant_name,
-                               last_message, last_message_at, unread_count, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               last_message, last_message_at, unread_count, updated_at,
+                               hidden, cleared_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     insert_params = %{
@@ -366,7 +436,9 @@ defmodule ChatService.Conversations.ConversationService do
       "last_message" => {"text", content},
       "last_message_at" => {"timestamp", timestamp},
       "unread_count" => {"int", unread_count},
-      "updated_at" => {"timestamp", timestamp}
+      "updated_at" => {"timestamp", timestamp},
+      "hidden" => {"boolean", false},
+      "cleared_at" => {"timestamp", cleared_at}
     }
 
     Repo.execute_prepared(insert_query, insert_params)
@@ -374,64 +446,17 @@ defmodule ChatService.Conversations.ConversationService do
 
   @doc """
   Delete all conversations and their messages for a user (account deletion).
+
+  Delegates to `ChatService.Conversations.AccountDeletion`, which is robust
+  (per-step error capture), idempotent, also cleans up reactions, and emits
+  telemetry. Kept for backward compatibility; new callers should use the
+  primitive directly to get the structured `{:ok, summary} | {:error, reason,
+  partial}` result.
   """
   def delete_all_for_user(user_id) do
-    # Get all conversations + participant_ids for this user
-    query = """
-    SELECT conversation_id, participant_id FROM conversations WHERE user_id = ?
-    """
-
-    params = %{"user_id" => {"text", user_id}}
-
-    case Repo.execute_prepared(query, params) do
-      {:ok, result} ->
-        rows = if is_list(result), do: result, else: Enum.to_list(result)
-
-        for row <- rows do
-          conv_id = row["conversation_id"]
-          participant_id = row["participant_id"]
-
-          if conv_id do
-            # Delete messages for this conversation
-            delete_msgs = "DELETE FROM messages WHERE conversation_id = ?"
-            Repo.execute_prepared(delete_msgs, %{"conversation_id" => {"uuid", conv_id}})
-
-            # Delete the other participant's copy of this conversation.
-            # Cassandra PK is (user_id, updated_at, conversation_id) — must find
-            # the exact updated_at to delete specific rows.
-            if participant_id do
-              find_other = "SELECT updated_at, conversation_id FROM conversations WHERE user_id = ?"
-              case Repo.execute_prepared(find_other, %{"user_id" => {"text", to_string(participant_id)}}) do
-                {:ok, other_rows} ->
-                  other_rows
-                  |> Enum.to_list()
-                  |> Enum.filter(fn r -> to_string(r["conversation_id"]) == to_string(conv_id) end)
-                  |> Enum.each(fn r ->
-                    Repo.execute_prepared(
-                      "DELETE FROM conversations WHERE user_id = ? AND updated_at = ? AND conversation_id = ?",
-                      %{
-                        "user_id" => {"text", to_string(participant_id)},
-                        "updated_at" => {"timestamp", r["updated_at"]},
-                        "conversation_id" => {"uuid", to_string(conv_id)}
-                      }
-                    )
-                  end)
-                _ -> :ok
-              end
-            end
-          end
-        end
-
-        # Delete all conversations for the deleted user
-        delete_convs = "DELETE FROM conversations WHERE user_id = ?"
-        Repo.execute_prepared(delete_convs, %{"user_id" => {"text", user_id}})
-
-        Logger.info("Deleted chat data for user #{user_id}: #{length(rows)} conversations (both sides)")
-        :ok
-
-      {:error, reason} ->
-        Logger.error("Failed to delete chat data for user #{user_id}: #{inspect(reason)}")
-        {:error, reason}
+    case ChatService.Conversations.AccountDeletion.delete_all_for_user(user_id) do
+      {:ok, _summary} -> :ok
+      {:error, reason, _partial} -> {:error, reason}
     end
   end
 end

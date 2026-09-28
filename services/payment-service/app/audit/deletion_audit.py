@@ -21,7 +21,7 @@ adding more services later doesn't conflate signals.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import text
@@ -135,6 +135,6 @@ async def audit_user_deletion(user_ids: list[str]) -> None:
             "user_ids": list(leaks_by_user.keys()),
             "residue_by_user": leaks_by_user,
             "total_orphan_rows": total_orphan_rows,
-            "detected_at": datetime.now(timezone.utc).isoformat(),
+            "detected_at": datetime.now(UTC).isoformat(),
         },
     )

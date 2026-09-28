@@ -43,4 +43,22 @@ defmodule ChatService.Repo do
   def execute_simple(query, opts \\ []) do
     Xandra.Cluster.execute(@cluster, query, opts)
   end
+
+  @doc """
+  Execute a prepared query and return the raw `%Xandra.Page{}` so callers can
+  drive pagination via `:page_size` / `:paging_state`.
+
+  Returns `{:ok, %Xandra.Page{}}` (the page is enumerable, and `page.paging_state`
+  is non-nil while more pages remain) or `{:error, reason}`.
+
+  Used by `mix chat.cleanup_orphans` to full-scan the `conversations` table in
+  bounded pages without loading the whole table into memory.
+  """
+  def execute_page(query, params \\ %{}, opts \\ []) do
+    clean_params = strip_type_annotations(params)
+
+    with {:ok, prepared} <- Xandra.Cluster.prepare(@cluster, query) do
+      Xandra.Cluster.execute(@cluster, prepared, clean_params, opts)
+    end
+  end
 end

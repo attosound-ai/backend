@@ -15,6 +15,7 @@ const PUSH_BODY: Record<string, (actor: string) => string> = {
   share: (a) => `${a} shared your post`,
   message: (a) => `${a} sent you a message`,
   new_post: (a) => `${a} just posted`,
+  mention: (a) => `${a} tagged you in a post`,
 };
 
 type DeepLinkFn = (
@@ -42,6 +43,7 @@ const DEEP_LINK: Record<string, DeepLinkFn> = {
     return `/chat?${params.toString()}`;
   },
   new_post: (ref) => (ref ? `/post/${ref}` : null),
+  mention: (ref) => (ref ? `/post/${ref}` : null),
 };
 
 @Injectable()

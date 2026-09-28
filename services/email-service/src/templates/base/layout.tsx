@@ -11,8 +11,10 @@ import {
 } from "@react-email/components";
 import * as React from "react";
 
+// Same 3D logo used on the in-app welcome screen (front/assets/logo-3d.png).
+// Square source (1200×1200) — served at 2× the display width for retina.
 const LOGO_URL =
-  "https://res.cloudinary.com/dxzcutnlp/image/upload/w_560,q_auto,fl_lossy/v1773648117/Disen%CC%83o_sin_ti%CC%81tulo_tnwxst.gif";
+  "https://res.cloudinary.com/dxzcutnlp/image/upload/w_320,q_auto,f_auto/v1779560817/atto/email-logo-3d.png";
 
 interface LayoutProps {
   preview: string;
@@ -70,8 +72,8 @@ export const Layout: React.FC<LayoutProps> = ({
             <Img
               src={LOGO_URL}
               alt="Atto"
-              width={560}
-              height={157}
+              width={160}
+              height={160}
               style={logoImg}
             />
           </Section>
@@ -99,15 +101,16 @@ const container: React.CSSProperties = {
 };
 
 const header: React.CSSProperties = {
-  padding: 0,
-  margin: "0 0 32px 0",
+  padding: "32px 0 0 0",
+  margin: "0 0 24px 0",
+  textAlign: "center" as const,
 };
 
 const logoImg: React.CSSProperties = {
   display: "block",
-  width: "100%",
-  height: "auto",
-  margin: 0,
+  width: "160px",
+  height: "160px",
+  margin: "0 auto",
   padding: 0,
 };
 

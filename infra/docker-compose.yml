@@ -394,6 +394,10 @@ services:
       JWT_SECRET: atto-dev-secret-change-in-production
       CONSUL_ADDR: consul:8500
       JAEGER_ENDPOINT: http://jaeger:4318/v1/traces
+      # Official ATTO SOUND account every new user auto-follows on signup
+      # (see KafkaConsumer.autoFollowOfficialAccount). Set the same value on
+      # Railway. Leave unset to disable auto-follow.
+      OFFICIAL_ACCOUNT_ID: "152"
     volumes:
       - ../proto:/proto:ro
     networks:

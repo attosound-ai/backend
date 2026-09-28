@@ -37,10 +37,11 @@ export abstract class CountsRepository {
     loader: () => Promise<number>,
   ): Promise<number>;
 
-  /** Atomic increment. No-op if the key has not been seeded — caller
-   * SHOULD have invoked {@link getOrCompute} or {@link set} previously,
-   * otherwise the resulting key has no TTL (Redis INCR creates with
-   * EXPIRE -1). */
+  /** Atomic increment, and a genuine NO-OP when the key has not been seeded
+   * (returns -1). Enforced in the Redis implementation since Aug 23 2026: a
+   * bare INCR on a missing key creates it at 1 with NO TTL, which pinned a
+   * counter to a wrong value permanently. Callers need not seed first; an
+   * unseeded id simply stays uncached until the next read computes it. */
   abstract increment(type: CountType, id: string): Promise<number>;
 
   /** Atomic decrement, clamped at zero. */

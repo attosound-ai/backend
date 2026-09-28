@@ -54,8 +54,30 @@ pub struct ChatWallpaper {
     pub name: String,
 
     /// Public URL of the tileable image. MUST have matching edges so
-    /// `resizeMode="repeat"` looks seamless.
+    /// `resizeMode="repeat"` looks seamless. Empty for gradient wallpapers.
+    #[serde(default)]
     pub image_url: String,
+
+    /// `image` (tiled photo or texture, the original kind), `gradient` (four
+    /// colour gradient drawn on the client, rotates when a message is sent,
+    /// like Telegram) or `pattern` (a gradient with a tileable line art
+    /// doodle drawn over it). Absent means `image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+
+    /// Up to four HEX colours for `gradient` and `pattern` wallpapers, read
+    /// top left to bottom right.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient_colors: Option<Vec<String>>,
+
+    /// Tileable transparent PNG with the doodle line art for `pattern`
+    /// wallpapers, drawn over the gradient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern_url: Option<String>,
+
+    /// Opacity of the doodle layer, 0.0 to 1.0. Defaults to 0.18 on the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern_opacity: Option<f32>,
 
     /// Optional smaller preview URL used inside the picker grid.
     /// Falls back to `image_url` on the client when absent.

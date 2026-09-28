@@ -178,14 +178,26 @@ export class EmailService {
         return { subject, html };
       }
       case "welcome": {
+        const welcomeLocale = (data.locale as string) || "en";
         const html = await render(
           createElement(WelcomeEmail, {
             name: data.name as string,
             role: data.role as "creator" | "representative" | "listener",
             appDeeplink,
+            locale: welcomeLocale,
           }),
         );
-        return { subject: "¡Bienvenido a Atto!", html };
+        const welcomeSubjects: Record<string, string> = {
+          en: "Welcome to Atto!",
+          es: "¡Bienvenido a Atto!",
+          "pt-BR": "Bem-vindo ao Atto!",
+        };
+        const welcomeSubject =
+          welcomeSubjects[welcomeLocale] ??
+          (welcomeLocale.startsWith("pt")
+            ? welcomeSubjects["pt-BR"]
+            : welcomeSubjects.en);
+        return { subject: welcomeSubject, html };
       }
       case "password-reset": {
         const prLocale = (data.locale as string) || "en";
@@ -207,13 +219,23 @@ export class EmailService {
         return { subject: prSubject, html };
       }
       case "instructions": {
+        const instLocale = (data.locale as string) || "en";
         const html = await render(
           createElement(InstructionsEmail, {
             name: data.name as string,
             bridgeNumber: data.bridgeNumber as string | undefined,
+            locale: instLocale,
           }),
         );
-        return { subject: "Instrucciones para representantes — Atto", html };
+        const instSubjects: Record<string, string> = {
+          en: "Representative instructions — Atto",
+          es: "Instrucciones para representantes — Atto",
+          "pt-BR": "Instruções para representantes — Atto",
+        };
+        const instSubject =
+          instSubjects[instLocale] ??
+          (instLocale.startsWith("pt") ? instSubjects["pt-BR"] : instSubjects.en);
+        return { subject: instSubject, html };
       }
     }
   }

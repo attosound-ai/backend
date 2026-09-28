@@ -151,7 +151,9 @@ export class FeedService {
     posts: FeedPostDto[];
     meta: { nextCursor: number | null; hasMore: boolean };
   }> {
-    const REEL_TYPES = new Set(['reel', 'video']);
+    // Reels = actual reels + vertical (~9:16) videos. height/width ≥ this counts
+    // as vertical; 9:16 ≈ 1.78. Landscape/square videos stay out of reels.
+    const REEL_MIN_ASPECT = 1.6;
 
     // Get personalised feed IDs (larger window so we have enough reels after filtering)
     let personalIds: string[] = [];
@@ -193,11 +195,21 @@ export class FeedService {
       return { posts: [], meta: { nextCursor: null, hasMore: false } };
     }
 
-    // Fetch content and filter to reel/video types
+    // Fetch content and filter to reels + vertical videos.
     const { contents } = await this.grpcClients.getContentBatch(
       candidateIds.slice(0, limit * 5),
     );
-    const reelContents = contents.filter((c) => REEL_TYPES.has(c.content_type));
+    const reelContents = contents.filter((c) => {
+      if (c.content_type === 'reel') return true;
+      if (c.content_type !== 'video') return false;
+      const w = Number(c.metadata?.width);
+      const h = Number(c.metadata?.height);
+      // Exclude only confirmed landscape/square. Videos with unknown dimensions
+      // are kept (the client gates by aspect too) so the feed never empties if
+      // metadata is missing.
+      if (w > 0 && h > 0 && h / w < REEL_MIN_ASPECT) return false;
+      return true;
+    });
 
     if (reelContents.length === 0) {
       return { posts: [], meta: { nextCursor: null, hasMore: false } };

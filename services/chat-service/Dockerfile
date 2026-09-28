@@ -1,5 +1,5 @@
 # Build stage
-FROM elixir:1.16-alpine AS builder
+FROM elixir:1.17-alpine AS builder
 
 RUN apk add --no-cache build-base git
 
@@ -12,8 +12,8 @@ RUN mix local.hex --force && \
 # Set build environment
 ENV MIX_ENV=prod
 
-# Install dependencies
-COPY mix.exs ./
+# Install dependencies (the lock pins xandra 0.19, which needs Elixir 1.17)
+COPY mix.exs mix.lock ./
 RUN mix deps.get --only prod && \
     mix deps.compile
 
@@ -25,7 +25,7 @@ COPY lib lib
 RUN mix compile
 
 # Runtime stage
-FROM elixir:1.16-alpine AS runtime
+FROM elixir:1.17-alpine AS runtime
 
 RUN apk add --no-cache \
     libstdc++ \

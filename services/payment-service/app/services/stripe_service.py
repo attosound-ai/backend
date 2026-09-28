@@ -7,7 +7,9 @@ the rest of the payment service stays decoupled from the payment provider.
 import logging
 
 import stripe
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import plan_catalog
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -21,19 +23,10 @@ logger.info(
     len(settings.stripe_secret_key),
 )
 
-# Plan lookup: plan_id -> Stripe Price ID
-PLAN_PRICE_MAP: dict[str, str] = {
-    "record": settings.stripe_record_price_id,          # $99/year
-    "record_pro": settings.stripe_record_pro_price_id,  # $139/year
-    "connect_pro": settings.stripe_connect_pro_price_id, # $1,999/year
-}
 
-# Amount in cents used for one-time PaymentIntent when no recurring price
-PLAN_AMOUNT_MAP: dict[str, int] = {
-    "record": 9900,       # $99.00
-    "record_pro": 13900,  # $139.00
-    "connect_pro": 199900, # $1,999.00
-}
+async def get_price_id(session: AsyncSession, plan_id: str) -> str:
+    """Stripe Price id for a plan: the catalog row first, then the env settings map."""
+    return await plan_catalog.stripe_price_id(session, plan_id)
 
 
 async def get_or_create_customer(user_id: str, email: str) -> str:
@@ -61,6 +54,7 @@ async def get_or_create_customer(user_id: str, email: str) -> str:
 
 
 async def create_checkout_session(
+    session: AsyncSession,
     user_id: str,
     plan_id: str,
     email: str,
@@ -68,13 +62,17 @@ async def create_checkout_session(
     """Create a Stripe PaymentIntent suitable for mobile clients.
 
     Returns a dict with ``clientSecret`` and ``paymentIntentId`` that the
-    mobile app uses with the Stripe SDK to complete payment on-device.
+    mobile app uses with the Stripe SDK to complete payment on device.
+    The amount comes from the plan catalog; free or unknown plans are refused.
     """
-    customer_id = await get_or_create_customer(user_id, email)
-
-    amount = PLAN_AMOUNT_MAP.get(plan_id)
-    if amount is None:
+    plan = await plan_catalog.get_plan(session, plan_id)
+    if plan is None or not plan.active:
         raise ValueError(f"Unknown plan_id: {plan_id}")
+    if plan.price_cents <= 0:
+        raise ValueError(f"Plan {plan_id} has no price to charge")
+    amount = plan.price_cents
+
+    customer_id = await get_or_create_customer(user_id, email)
 
     payment_intent = stripe.PaymentIntent.create(
         amount=amount,

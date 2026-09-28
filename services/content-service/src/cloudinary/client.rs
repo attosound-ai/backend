@@ -31,6 +31,7 @@ impl CloudinaryClient {
         public_id: &str,
         resource_type: &str,
         eager: Option<&str>,
+        eager_async: bool,
     ) -> SignedUploadParams {
         let timestamp = chrono::Utc::now().timestamp();
 
@@ -40,10 +41,18 @@ impl CloudinaryClient {
             ("timestamp".into(), timestamp.to_string()),
         ];
 
+        let has_eager = eager.map(|e| !e.is_empty()).unwrap_or(false);
         if let Some(e) = eager {
             if !e.is_empty() {
                 params.push(("eager".into(), e.into()));
             }
+        }
+
+        // HLS transcoding is heavy → process eager transforms asynchronously so
+        // the upload returns immediately. Only meaningful when there's an eager.
+        let use_async = eager_async && has_eager;
+        if use_async {
+            params.push(("eager_async".into(), "true".into()));
         }
 
         // Sort alphabetically for signature
@@ -65,6 +74,7 @@ impl CloudinaryClient {
             folder: folder.into(),
             public_id: public_id.into(),
             eager: eager.map(String::from),
+            eager_async: use_async,
             resource_type: resource_type.into(),
             extra_params: HashMap::new(),
         }
@@ -80,10 +90,18 @@ impl CloudinaryClient {
             )),
             "audio" => Some(("atto/audio", TransformationPresets::audio_eager())),
             "chat" => Some(("atto/chat", Some(TransformationPresets::chat_image_eager()))),
-            "video" => Some(("atto/videos", Some(TransformationPresets::video_thumbnail_eager()))),
-            "reel" => Some(("atto/reels", Some(TransformationPresets::reel_thumbnail_eager()))),
+            // Video/reel: eager-generate the adaptive HLS stream + thumbnail.
+            // These are processed asynchronously (see `context_is_async`).
+            "video" => Some(("atto/videos", Some(TransformationPresets::video_eager()))),
+            "reel" => Some(("atto/reels", Some(TransformationPresets::reel_eager()))),
             _ => None,
         }
+    }
+
+    /// Whether a context's eager transforms must be generated asynchronously
+    /// (true for video/reel because HLS transcoding is slow).
+    pub fn context_is_async(context: &str) -> bool {
+        matches!(context, "video" | "reel")
     }
 
     /// Delete a resource from Cloudinary.

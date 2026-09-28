@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
@@ -180,6 +180,7 @@ async def _handle_user_deleted(data: dict) -> None:
 
     # 2. Cancel Stripe subscriptions (best-effort, never blocks DB cleanup)
     import stripe
+
     from app.config import settings as cfg
 
     stripe.api_key = cfg.stripe_secret_key

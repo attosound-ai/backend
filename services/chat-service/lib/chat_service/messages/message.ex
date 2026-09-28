@@ -22,6 +22,8 @@ defmodule ChatService.Messages.Message do
     :reply_to_id,
     :reply_to_content,
     :reply_to_sender,
+    :metadata,
+    :thread_id,
     :created_at
   ]
 
@@ -40,6 +42,8 @@ defmodule ChatService.Messages.Message do
           reply_to_id: String.t() | nil,
           reply_to_content: String.t() | nil,
           reply_to_sender: String.t() | nil,
+          metadata: map() | nil,
+          thread_id: String.t() | nil,
           created_at: DateTime.t() | nil
         }
 
@@ -62,6 +66,8 @@ defmodule ChatService.Messages.Message do
       reply_to_id: row["reply_to_id"],
       reply_to_content: row["reply_to_content"],
       reply_to_sender: row["reply_to_sender"],
+      metadata: decode_metadata(row["metadata"]),
+      thread_id: blank_to_nil(row["thread_id"]),
       created_at: row["created_at"]
     }
   end
@@ -85,6 +91,8 @@ defmodule ChatService.Messages.Message do
       reply_to_id: message.reply_to_id,
       reply_to_content: message.reply_to_content,
       reply_to_sender: message.reply_to_sender,
+      metadata: message.metadata,
+      thread_id: message.thread_id,
       created_at: format_datetime(message.created_at)
     }
   end
@@ -92,4 +100,27 @@ defmodule ChatService.Messages.Message do
   defp format_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
   defp format_datetime(nil), do: nil
   defp format_datetime(other), do: to_string(other)
+
+  @doc """
+  Free form message metadata stored as JSON text (media url, duration,
+  waveform, iMessage style effect, ...). Absent or unreadable JSON reads as nil.
+  """
+  def decode_metadata(nil), do: nil
+  def decode_metadata(""), do: nil
+
+  def decode_metadata(text) when is_binary(text) do
+    case Jason.decode(text) do
+      {:ok, map} when is_map(map) -> map
+      _ -> nil
+    end
+  end
+
+  def decode_metadata(map) when is_map(map), do: map
+
+  def encode_metadata(nil), do: ""
+  def encode_metadata(map) when is_map(map) and map_size(map) == 0, do: ""
+  def encode_metadata(map) when is_map(map), do: Jason.encode!(map)
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
 end

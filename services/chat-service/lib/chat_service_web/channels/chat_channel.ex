@@ -76,6 +76,16 @@ defmodule ChatServiceWeb.ChatChannel do
     {:noreply, socket}
   end
 
+  def handle_info({:message_pinned, payload}, socket) do
+    push(socket, "message_pinned", payload)
+    {:noreply, socket}
+  end
+
+  def handle_info({:message_unpinned, payload}, socket) do
+    push(socket, "message_unpinned", payload)
+    {:noreply, socket}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @doc """
@@ -102,8 +112,12 @@ defmodule ChatServiceWeb.ChatChannel do
         []
       end
 
+    extra_opts =
+      [metadata: payload["metadata"], thread_id: payload["thread_id"]]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) or v == "" end)
+
     with {:ok, conversation} <- ConversationService.find_conversation(user_id, conversation_id),
-         opts <- [recipient_id: conversation.participant_id] ++ reply_opts,
+         opts <- [recipient_id: conversation.participant_id] ++ reply_opts ++ extra_opts,
          {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
       message_map = Message.to_map(message)
       broadcast!(socket, "new_message", message_map)
@@ -140,17 +154,22 @@ defmodule ChatServiceWeb.ChatChannel do
 
   Broadcasts typing status to all other participants in the channel.
   """
-  def handle_in("typing", %{"is_typing" => is_typing}, socket) do
+  def handle_in("typing", %{"is_typing" => is_typing} = payload, socket) do
     user_id = socket.assigns.user_id
     conversation_id = socket.assigns.conversation_id
+    # Slack shows "typing" inside the thread, not in the channel, so the
+    # indicator carries the thread it belongs to. Absent for the main chat,
+    # which is what every older client sends.
+    thread_id = payload["thread_id"]
 
     Logger.info(
-      "[TYPING] user=#{user_id} conv=#{conversation_id} is_typing=#{is_typing}"
+      "[TYPING] user=#{user_id} conv=#{conversation_id} is_typing=#{is_typing} thread=#{thread_id || "-"}"
     )
 
     broadcast_from!(socket, "typing", %{
       user_id: user_id,
-      is_typing: is_typing
+      is_typing: is_typing,
+      thread_id: thread_id
     })
 
     {:noreply, socket}

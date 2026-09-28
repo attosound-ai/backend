@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { WaveFile } from 'wavefile';
 import { AudioStorageService } from './audio-storage.service';
+import { AnalyticsService } from '../analytics/analytics.service';
 
 /** Represents a single active audio capture session. */
 interface CaptureSession {
@@ -13,6 +14,16 @@ interface CaptureSession {
   outboundChunks: Buffer[];
   startTimestamp: number;
   lastTimestamp: number;
+  // Per-track frame-label accounting. Twilio normally labels every both_tracks
+  // frame 'inbound'/'outbound'; counting missing/other labels separates a
+  // genuine one-track fork (no remote at source) from a mislabel that would
+  // otherwise be silently bucketed as inbound.
+  framesLabeledInbound: number;
+  framesLabeledOutbound: number;
+  framesMissingLabel: number;
+  framesLabeledOther: number;
+  /** Twilio timestamp of the first outbound (remote) frame, or null if none. */
+  firstOutboundTs: number | null;
 }
 
 @Injectable()
@@ -22,7 +33,10 @@ export class MediaService {
   /** Active capture sessions keyed by streamSid. */
   private readonly sessions = new Map<string, CaptureSession>();
 
-  constructor(private readonly storage: AudioStorageService) {}
+  constructor(
+    private readonly storage: AudioStorageService,
+    private readonly analytics: AnalyticsService,
+  ) {}
 
   /** Initialize a new capture session when a Media Stream connects. */
   startSession(
@@ -42,6 +56,11 @@ export class MediaService {
       outboundChunks: [],
       startTimestamp: 0,
       lastTimestamp: 0,
+      framesLabeledInbound: 0,
+      framesLabeledOutbound: 0,
+      framesMissingLabel: 0,
+      framesLabeledOther: 0,
+      firstOutboundTs: null,
     });
 
     this.logger.log(
@@ -51,12 +70,18 @@ export class MediaService {
     );
   }
 
-  /** Append a media chunk (base64 mulaw audio) to the session buffer. */
+  /**
+   * Append a media chunk (base64 mulaw audio) to the session buffer.
+   * `track` is the raw label from the Twilio media frame — may be undefined
+   * if Twilio omits it. We bucket outbound→remote, everything else→local
+   * (preserving prior behaviour) but COUNT each label class so a mislabeled
+   * remote can't masquerade as "no outbound" in the telemetry.
+   */
   appendChunk(
     streamSid: string,
     payload: string,
     timestamp: number,
-    track: string,
+    track: string | undefined,
   ): void {
     const session = this.sessions.get(streamSid);
     if (!session) return;
@@ -64,8 +89,21 @@ export class MediaService {
     const chunk = Buffer.from(payload, 'base64');
     if (track === 'outbound') {
       session.outboundChunks.push(chunk);
-    } else {
+      session.framesLabeledOutbound += 1;
+      if (session.firstOutboundTs === null) {
+        session.firstOutboundTs = timestamp;
+      }
+    } else if (track === 'inbound') {
       session.inboundChunks.push(chunk);
+      session.framesLabeledInbound += 1;
+    } else if (!track) {
+      // Missing label — buffer as inbound (prior behaviour) but flag it.
+      session.inboundChunks.push(chunk);
+      session.framesMissingLabel += 1;
+    } else {
+      // Unknown label value — buffer as inbound, count separately.
+      session.inboundChunks.push(chunk);
+      session.framesLabeledOther += 1;
     }
 
     if (session.startTimestamp === 0) {
@@ -139,13 +177,64 @@ export class MediaService {
     // Duration from the longer track
     const durationMs = Math.round((maxLen / 8000) * 1000);
 
-    // Upload to MinIO
+    // Upload to MinIO. Previously this had no try/catch — a MinIO failure threw,
+    // the segment never saved, kafka never fired, and the client's poll loop
+    // exhausted into a generic "recording not found" with zero server reason.
+    // Now we capture the upload outcome so "not found" splits cleanly into
+    // empty-stream / finalize-crash / upload-fail, and return null on failure
+    // (the gateway still emits backend_recording_segment with saved=false).
     const storageKey = this.storage.buildStorageKey(
       session.callSid,
       segmentIndex,
       session.track,
     );
-    const { bucket, size } = await this.storage.upload(storageKey, wavBuffer);
+
+    const uploadStart = Date.now();
+    let bucket: string;
+    let size: number;
+    try {
+      const r = await this.storage.upload(storageKey, wavBuffer);
+      bucket = r.bucket;
+      size = r.size;
+    } catch (err) {
+      const e = err as {
+        name?: string;
+        Code?: string;
+        message?: string;
+        $metadata?: { httpStatusCode?: number };
+      };
+      this.analytics.capture(
+        session.userId || null,
+        'backend_recording_upload',
+        {
+          call_sid: session.callSid,
+          stream_sid: streamSid,
+          storage_key: storageKey,
+          file_size_bytes: wavBuffer.length,
+          upload_latency_ms: Date.now() - uploadStart,
+          outcome: 'failed',
+          s3_error_code: e?.Code ?? e?.name ?? null,
+          http_status: e?.$metadata?.httpStatusCode ?? null,
+          error_message: e?.message ?? String(err),
+        },
+      );
+      this.logger.error(
+        'Segment upload failed for stream=%s key=%s: %s',
+        streamSid,
+        storageKey,
+        e?.message ?? String(err),
+      );
+      return null;
+    }
+
+    this.analytics.capture(session.userId || null, 'backend_recording_upload', {
+      call_sid: session.callSid,
+      stream_sid: streamSid,
+      storage_key: storageKey,
+      file_size_bytes: size,
+      upload_latency_ms: Date.now() - uploadStart,
+      outcome: 'success',
+    });
 
     this.logger.log(
       'Segment saved: stream=%s key=%s duration=%dms size=%d',

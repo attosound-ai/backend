@@ -16,6 +16,15 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI resolves Depends() in argument defaults by design.
+"app/routers/*" = ["B008"]
+# gRPC method names follow the proto service definition.
+"app/grpc/server.py" = ["N802"]
+# str enums are stored by value and the PyUUID alias avoids clashing with the SQLAlchemy type.
+"app/models/*" = ["UP042", "N811"]
+"app/entitlements.py" = ["UP042"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

@@ -12,6 +12,11 @@ pub struct SignedUploadParams {
     pub public_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eager: Option<String>,
+    /// When true the frontend must send `eager_async=true` so Cloudinary
+    /// processes the (HLS) eager transforms in the background instead of
+    /// blocking the upload response.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub eager_async: bool,
     pub resource_type: String,
     #[serde(flatten)]
     pub extra_params: HashMap<String, String>,
