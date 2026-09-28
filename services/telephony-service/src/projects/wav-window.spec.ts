@@ -201,3 +201,69 @@ describe("tamanoDeContentRange", () => {
     expect(tamanoDeContentRange("sin barra")).toBeNull();
   });
 });
+
+// Una comprobación sobre un archivo escrito por el mismo ffmpeg que usa el
+// servicio, porque lo que se arregla aquí es exactamente lo que ese ffmpeg
+// escribe: un bloque LIST con su firma entre la cabecera y el audio.
+describe("un WAV como los que escribe ffmpeg", () => {
+  // RIFF + fmt + LIST(INFO/ISFT "Lavf62.3.100") + data, que es byte por byte
+  // lo que sale de `-ar 8000 -ac 1 -f wav`.
+  function comoFfmpeg(frames: number): Buffer {
+    const fmt = Buffer.alloc(24);
+    fmt.write("fmt ", 0, "ascii");
+    fmt.writeUInt32LE(16, 4);
+    fmt.writeUInt16LE(1, 8);
+    fmt.writeUInt16LE(1, 10);
+    fmt.writeUInt32LE(8000, 12);
+    fmt.writeUInt32LE(16000, 16);
+    fmt.writeUInt16LE(2, 20);
+    fmt.writeUInt16LE(16, 22);
+
+    const list = Buffer.alloc(8 + 26);
+    list.write("LIST", 0, "ascii");
+    list.writeUInt32LE(26, 4);
+    list.write("INFO", 8, "ascii");
+    list.write("ISFT", 12, "ascii");
+    list.writeUInt32LE(13, 16);
+    list.write("Lavf62.3.100\0\0", 20, "ascii");
+
+    const dataHead = Buffer.alloc(8);
+    dataHead.write("data", 0, "ascii");
+    dataHead.writeUInt32LE(frames * 2, 4);
+
+    const riff = Buffer.alloc(12);
+    riff.write("RIFF", 0, "ascii");
+    riff.writeUInt32LE(4 + fmt.length + list.length + 8 + frames * 2, 4);
+    riff.write("WAVE", 8, "ascii");
+
+    const audio = Buffer.alloc(frames * 2);
+    for (let i = 0; i < frames; i++) audio.writeInt16LE(1000, i * 2);
+    return Buffer.concat([riff, fmt, list, dataHead, audio]);
+  }
+
+  it("el audio empieza en el 78, no en el 44", () => {
+    const cab = leerCabeceraWav(comoFfmpeg(1000))!;
+    expect(cab.dataOffset).toBe(78);
+    expect(cab.sampleRate).toBe(8000);
+    expect(cab.channels).toBe(1);
+  });
+
+  it("y por eso desaparece el pico fantasma del principio", () => {
+    const buf = comoFfmpeg(1000);
+    const cab = leerCabeceraWav(buf)!;
+
+    // Lo que hacía el código viejo: leer desde el 44. Los 34 bytes de más son
+    // el texto "LIST...INFOISFT...Lavf", que como enteros de 16 bits valen
+    // medio fondo de escala.
+    const viejo = lectorDeFotogramas(buf.subarray(44), {
+      ...cab,
+      dataOffset: 44,
+    });
+    expect(viejo.leer(0) / viejo.maximo).toBeGreaterThan(0.4);
+
+    // Lo que hace ahora: la primera muestra es audio de verdad.
+    const nuevo = lectorDeFotogramas(buf.subarray(cab.dataOffset), cab);
+    expect(nuevo.leer(0)).toBe(1000);
+    expect(nuevo.frames).toBe(1000);
+  });
+});

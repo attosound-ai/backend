@@ -237,18 +237,39 @@ export class AudioProcessorService {
       }
       const wavBuffer = Buffer.concat(chunks);
 
-      // Parse WAV header to get PCM data
-      // Standard WAV: 44-byte header, 16-bit PCM mono at 8000Hz
-      const headerSize = 44;
+      // Dónde empieza el audio de verdad.
+      //
+      // Aquí había un 44 fijo, que es lo que mide la cabecera de un WAV sin
+      // extras. Pero los archivos los escribe ffmpeg, y ffmpeg mete un bloque
+      // LIST con su firma ("Lavf62.3.100"), así que el audio empieza en el 78.
+      // Los 34 bytes de diferencia se dibujaban como si fueran sonido, y como
+      // son texto ASCII valen medio fondo de escala: TODO clip importado
+      // salía con un pico de la nada pegado a su primera muestra.
+      const cabecera = leerCabeceraWav(
+        wavBuffer.subarray(0, Math.min(8192, wavBuffer.length)),
+      );
+      const headerSize = cabecera?.dataOffset ?? 44;
       if (wavBuffer.length <= headerSize) {
         return Array(numSamples).fill(0);
       }
 
-      const pcmData = wavBuffer.subarray(headerSize);
-      const samples = new Int16Array(
-        pcmData.buffer,
-        pcmData.byteOffset,
-        pcmData.byteLength / 2,
+      const pcmData = wavBuffer.subarray(
+        headerSize,
+        cabecera && cabecera.dataBytes > 0
+          ? Math.min(wavBuffer.length, headerSize + cabecera.dataBytes)
+          : wavBuffer.length,
+      );
+      // El lector, y no un Int16Array, porque un Int16Array exige que el
+      // desplazamiento sea par y eso depende de dónde caiga el buffer.
+      const lector = lectorDeFotogramas(
+        pcmData,
+        cabecera ?? {
+          dataOffset: headerSize,
+          dataBytes: pcmData.length,
+          bitsPerSample: 16,
+          channels: 1,
+          sampleRate: 8000,
+        },
       );
 
       // Peak envelope, the model every waveform renderer uses (audiowaveform /
@@ -266,17 +287,17 @@ export class AudioProcessorService {
       const count = Math.max(1, Math.min(numSamples, 24000));
       // Solo el tramo pedido. Con la ventana completa esto es exactamente lo
       // que se hacía antes.
-      const inicio = Math.floor(desde * samples.length);
-      const fin = Math.max(inicio + 1, Math.floor(hasta * samples.length));
+      const inicio = Math.floor(desde * lector.frames);
+      const fin = Math.max(inicio + 1, Math.floor(hasta * lector.frames));
       const total = fin - inicio;
       // Nunca más cubos que muestras: pedir 2000 picos de 500 muestras daba
       // cubos de cero muestras y devolvía una onda plana, que es justo lo que
       // pasaba al ampliar mucho una ventana corta.
       const amplitudes = picosDeMuestras(
-        (i) => samples[inicio + i],
+        (i) => lector.leer(inicio + i),
         total,
         count,
-        32768,
+        lector.maximo,
       );
 
       // Cache for ~14 days with jitter
