@@ -435,10 +435,17 @@ export class AudioProcessorService {
     inputPath: string,
     outputPath: string,
   ): Promise<void> {
+    // loudnorm resamples to 192 kHz unless told otherwise, so every export
+    // came out 24 times the size of its 8 kHz mix: a 77 s take weighed
+    // 29.6 MB and the post was refused (client, Sep 28 2026). Keep the rate
+    // the mix already has.
+    const sampleRate =
+      (await this.probeAudio(inputPath).catch(() => null))?.sampleRate || 8000;
     await new Promise<void>((resolve, reject) => {
       ffmpeg(inputPath)
         .audioFilters("loudnorm=I=-16:TP=-1.5:LRA=11")
         .output(outputPath)
+        .outputOptions(["-ar", String(sampleRate)])
         .on("end", () => resolve())
         .on("error", (err: Error) => reject(err))
         .run();
