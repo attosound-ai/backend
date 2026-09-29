@@ -58,6 +58,15 @@ export function leerCabeceraWav(head: Buffer): CabeceraWav | null {
     if (id === "fmt ") {
       if (cuerpo + 16 > head.length) return null;
       formato = head.readUInt16LE(cuerpo);
+      // WAVE_FORMAT_EXTENSIBLE (0xFFFE) guarda el formato real en los dos
+      // primeros bytes del GUID del subtipo, 24 bytes dentro del bloque. Es
+      // lo que escribe AVAssetWriter en el iPhone (con JUNK y un relleno FLLR
+      // de 4 KB antes del audio). Antes se rechazaba, se caía a los 44 bytes
+      // de siempre y esos 4 KB de cabecera se dibujaban como un pico al
+      // inicio de cada importación convertida en el teléfono (Sep 29 2026).
+      if (formato === 0xfffe && size >= 26 && cuerpo + 26 <= head.length) {
+        formato = head.readUInt16LE(cuerpo + 24);
+      }
       channels = head.readUInt16LE(cuerpo + 2);
       sampleRate = head.readUInt32LE(cuerpo + 4);
       bitsPerSample = head.readUInt16LE(cuerpo + 14);

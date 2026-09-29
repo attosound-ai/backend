@@ -79,6 +79,59 @@ describe("leerCabeceraWav", () => {
   });
 });
 
+/**
+ * Lo que escribe AVAssetWriter en el iPhone al convertir una importación:
+ * JUNK de 28, fmt extensible de 40 (formato 0xFFFE con el subtipo en el
+ * GUID), un relleno FLLR de 3984 y el audio en el byte 4096. Medido en la
+ * Mac con el mismo lector y escritor que usa la app.
+ */
+function wavDelIphone(frames: number, subtipo = 1): Buffer {
+  const junk = Buffer.alloc(8 + 28);
+  junk.write("JUNK", 0, "ascii");
+  junk.writeUInt32LE(28, 4);
+  const fmt = Buffer.alloc(8 + 40);
+  fmt.write("fmt ", 0, "ascii");
+  fmt.writeUInt32LE(40, 4);
+  fmt.writeUInt16LE(0xfffe, 8);
+  fmt.writeUInt16LE(1, 10);
+  fmt.writeUInt32LE(8000, 12);
+  fmt.writeUInt32LE(16000, 16);
+  fmt.writeUInt16LE(2, 20);
+  fmt.writeUInt16LE(16, 22);
+  fmt.writeUInt16LE(22, 24);
+  fmt.writeUInt16LE(16, 26);
+  fmt.writeUInt32LE(4, 28);
+  fmt.writeUInt16LE(subtipo, 32);
+  const fllr = Buffer.alloc(8 + 3984);
+  fllr.write("FLLR", 0, "ascii");
+  fllr.writeUInt32LE(3984, 4);
+  const dataHead = Buffer.alloc(8);
+  dataHead.write("data", 0, "ascii");
+  dataHead.writeUInt32LE(frames * 2, 4);
+  const riff = Buffer.alloc(12);
+  riff.write("RIFF", 0, "ascii");
+  riff.write("WAVE", 8, "ascii");
+  const out = Buffer.concat([riff, junk, fmt, fllr, dataHead, Buffer.alloc(frames * 2)]);
+  out.writeUInt32LE(out.length - 8, 4);
+  return out;
+}
+
+describe("leerCabeceraWav con el WAV del iPhone", () => {
+  it("encuentra el audio en el byte 4096 y no dibuja la cabecera", () => {
+    const cab = leerCabeceraWav(wavDelIphone(1000));
+    expect(cab).not.toBeNull();
+    expect(cab!.dataOffset).toBe(4096);
+    expect(cab!.dataBytes).toBe(2000);
+    expect(cab!.channels).toBe(1);
+    expect(cab!.bitsPerSample).toBe(16);
+    expect(cab!.sampleRate).toBe(8000);
+  });
+
+  it("un extensible con subtipo float sigue rechazado", () => {
+    expect(leerCabeceraWav(wavDelIphone(100, 3))).toBeNull();
+  });
+});
+
 describe("rangoDeBytes", () => {
   const cab = leerCabeceraWav(wav({ frames: 48000 }))!;
   const total = 44 + 96000;

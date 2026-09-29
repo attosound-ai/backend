@@ -196,10 +196,11 @@ export class AudioProcessorService {
     // La clave incluye la ventana redondeada a seis decimales: dos peticiones
     // del mismo tramo comparten caché, y una de otro tramo no lo pisa.
     const ventana = desde === 0 && hasta === 1 ? "full" : `${desde.toFixed(6)}-${hasta.toFixed(6)}`;
-    // v2: la caché dura catorce días, así que sin cambiar la clave el arreglo
-    // del pico fantasma no se vería en ningún audio ya dibujado. Recalcular
-    // cuesta una lectura por segmento y solo la primera vez.
-    const cacheKey = `telephony:waveform:v2:${segmentId}:${numSamples}:${ventana}`;
+    // La caché dura catorce días, así que cada arreglo de la onda sube la
+    // versión o no se vería en ningún audio ya dibujado. v2: el LIST de
+    // ffmpeg. v3: el WAV extensible del iPhone (JUNK, FLLR, audio en 4096).
+    // Recalcular cuesta una lectura por segmento y solo la primera vez.
+    const cacheKey = `telephony:waveform:v3:${segmentId}:${numSamples}:${ventana}`;
     const cached = await this.cache.get<number[]>(cacheKey);
     if (cached) return cached;
 
