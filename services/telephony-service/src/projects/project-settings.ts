@@ -36,6 +36,36 @@ export interface ExportOptions {
   fileName?: string;
   /** Storage key of an uploaded cover image (jpg or png) to embed. */
   coverKey?: string;
+  /**
+   * Mix down only this span of the timeline, in ms (the editor's selected
+   * range). A post is capped by size, so a 60 minute project cannot go out
+   * whole, but the take inside it can. Per request, never remembered.
+   */
+  rangeStartMs?: number;
+  rangeEndMs?: number;
+}
+
+/** The part of ExportOptions worth remembering between mixdowns. */
+export function rememberedExportPrefs(options: ExportOptions): ExportOptions {
+  const { rangeStartMs: _s, rangeEndMs: _e, ...rest } = options;
+  return rest;
+}
+
+/**
+ * ffmpeg filters that cut the mix to the requested range, or [] when the
+ * request has no usable range (missing, not finite, or shorter than 10 ms).
+ */
+export function exportRangeFilters(options: ExportOptions | undefined): string[] {
+  const start = options?.rangeStartMs;
+  const end = options?.rangeEndMs;
+  if (typeof start !== "number" || typeof end !== "number") return [];
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+  const from = Math.max(0, Math.min(start, end));
+  const to = Math.max(start, end);
+  if (to - from < 10) return [];
+  const s = (from / 1000).toFixed(3);
+  const e = (to / 1000).toFixed(3);
+  return [`atrim=start=${s}:end=${e}`, "asetpts=PTS-STARTPTS"];
 }
 
 export interface ProjectSettings {

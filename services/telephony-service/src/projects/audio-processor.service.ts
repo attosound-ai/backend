@@ -9,6 +9,7 @@ import ffmpeg = require("fluent-ffmpeg");
 import {
   encodePlan,
   envelopeVolumeExpression,
+  exportRangeFilters,
   masterFilterChain,
   type EncodePlan,
   type ExportOptions,
@@ -765,15 +766,25 @@ export class AudioProcessorService {
 
       // Mix lanes together (or just use single lane output)
       await this.mixFiles(laneFiles, tmpOutput);
+      let finalOutput = tmpOutput;
+
+      // Only the selected range, when the editor asked for one. Cut before
+      // normalising so the excerpt gets its own level, not the whole mix's.
+      const rangeFilters = exportRangeFilters(options);
+      if (rangeFilters.length > 0) {
+        const rangedOutput = join(tmpdir(), `export-range-${randomUUID()}.wav`);
+        allTmpFiles.push(rangedOutput);
+        await this.applyFilters(finalOutput, rangedOutput, rangeFilters);
+        finalOutput = rangedOutput;
+      }
 
       // Loudness-normalize the final mix so recordings play at a comfortable
       // level instead of the very quiet raw Securus-line level. Falls back to the
       // un-normalized mix if normalization throws, so an export never breaks.
-      let finalOutput = tmpOutput;
       try {
         const normalizedOutput = join(tmpdir(), `export-norm-${randomUUID()}.wav`);
         allTmpFiles.push(normalizedOutput);
-        await this.normalizeLoudness(tmpOutput, normalizedOutput);
+        await this.normalizeLoudness(finalOutput, normalizedOutput);
         finalOutput = normalizedOutput;
       } catch (err) {
         this.logger.warn(

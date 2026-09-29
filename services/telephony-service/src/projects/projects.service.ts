@@ -1,9 +1,10 @@
 import { Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
-import type {
-  ExportOptions,
-  ProjectSettings,
+import {
+  rememberedExportPrefs,
+  type ExportOptions,
+  type ProjectSettings,
 } from "./project-settings";
 import { QueryDeepPartialEntity } from "typeorm/query-builder/QueryPartialEntity";
 import { Project } from "../entities/project.entity";
@@ -503,7 +504,7 @@ export class ProjectsService {
       // Remember the exporter's picks for the next mixdown.
       await this.projectRepo.update(
         { id: projectId, userId },
-        { settings: { ...settings, exportPrefs: exportOptions } },
+        { settings: { ...settings, exportPrefs: rememberedExportPrefs(exportOptions) } },
       );
     }
     const result = await this.audioProcessor.exportProject(
