@@ -12,6 +12,7 @@ from app.kafka.producer import publish_event
 from app.models.subscription import Subscription
 from app.models.transaction import Transaction
 from app.repositories.transaction_repo import TransactionRepository
+from app.user_lookup import UserGoneError, user_exists
 from app.schemas.subscription import (
     CancelSubscriptionResponse,
     PendingPlanChange,
@@ -263,7 +264,11 @@ class PaymentService:
 
         Skips creation if the user already has an active subscription
         (e.g. they paid during registration before the Kafka event arrived).
+        Raises ``UserGoneError`` for an account that no longer exists: a free
+        plan for a deleted user is an orphan (and a phone number) in waiting.
         """
+        if not await user_exists(self.session, user_id):
+            raise UserGoneError(user_id)
         existing = await self.repo.get_active_subscription(user_id)
         if existing:
             logger.info(
@@ -368,6 +373,8 @@ class PaymentService:
         by user, not by subscription. A zero amount transaction records the
         switch so the ledger shows why a paid plan has no payment behind it.
         """
+        if not await user_exists(self.session, user_id):
+            raise UserGoneError(user_id)
         current = await self.repo.get_active_subscription(user_id)
         if current and current.plan == plan_key:
             return await self._to_response(current)
@@ -442,8 +449,12 @@ class PaymentService:
         the entitlement, publishes the same event, and reports the status.
         Safe to repeat: telephony hands back the number a user already holds.
 
-        Returns ``(None, 'not_entitled')`` when the plan has no bridge number.
+        Returns ``(None, 'not_entitled')`` when the plan has no bridge number
+        and ``(None, 'user_deleted')`` when the account no longer exists.
         """
+        if not await user_exists(self.session, user_id):
+            logger.warning("claim_bridge_number user=%s does not exist, nothing requested", user_id)
+            return None, "user_deleted"
         sub = await self.repo.get_active_subscription(user_id)
         if not sub:
             await self.create_free_subscription(user_id)

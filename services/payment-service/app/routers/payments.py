@@ -276,6 +276,8 @@ async def claim_bridge_number(
 
     svc = PaymentService(session)
     bridge_number, status = await svc.claim_bridge_number(target)
+    if status == "user_deleted":
+        raise HTTPException(status_code=410, detail="This account no longer exists")
     if status == "not_entitled":
         raise HTTPException(
             status_code=403,

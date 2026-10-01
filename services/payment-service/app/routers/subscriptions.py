@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.user_lookup import UserGoneError
 from app import plan_catalog
 from app.config import settings
 from app.database import get_session
@@ -160,7 +161,10 @@ async def select_plan(
     target_user = body.for_user_id or user_id
     await _require_active_plan(session, body.plan)
     svc = PaymentService(session)
-    sub = await svc.select_plan_without_payment(target_user, body.plan)
+    try:
+        sub = await svc.select_plan_without_payment(target_user, body.plan)
+    except UserGoneError:
+        raise HTTPException(status_code=410, detail="This account no longer exists")
     # The new plan may grant a bridge number the old one did not. Numbers are
     # for creators only: a creator's own switch, or a representative acting
     # for the creator it manages. A listener never gets one provisioned.

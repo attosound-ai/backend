@@ -130,6 +130,22 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Never hand a number to an account that no longer exists. On Oct 1
+    // 2026 a claim raced the account deletion: the payment event arrived a
+    // tenth of a second after this service had released the user's number
+    // and purged its rows, and a new number was assigned to a deleted user.
+    if (!(await this.userExists(userId))) {
+      this.logger.warn(
+        "payment.completed for user %s, who no longer exists: no number assigned",
+        userId,
+      );
+      this.analytics.capture(userId, "backend_number_provision_skipped", {
+        reason: "user_deleted",
+        subscription_id: subscriptionId || null,
+      });
+      return;
+    }
+
     try {
       const phoneNumber = await this.numberProvisioning.assignNumberToUser(
         userId,
@@ -272,6 +288,25 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.log(`Telephony cleanup done for users: ${userIds.join(", ")}`);
+  }
+
+  /**
+   * Whether the account still exists. The services share one Postgres and
+   * `users` is the source of truth. If the lookup itself fails the answer is
+   * yes: a missed number for a real creator is worse than a number the
+   * deletion audit will reclaim.
+   */
+  private async userExists(userId: string): Promise<boolean> {
+    try {
+      const rows: unknown[] = await this.callRepo.query(
+        "SELECT 1 FROM users WHERE id::text = $1 LIMIT 1",
+        [String(userId)],
+      );
+      return rows.length > 0;
+    } catch (err) {
+      this.logger.warn(`users lookup failed for ${userId}: ${err}`);
+      return true;
+    }
   }
 
   /** When subscription is cancelled, release the user's number back to pool. */

@@ -94,37 +94,59 @@ async def _capture_posthog(event: str, properties: dict) -> None:
         logger.warning("PostHog capture failed for %s: %s", event, exc)
 
 
-async def audit_user_deletion(user_ids: list[str]) -> None:
-    """Run 60s after user.deleted; emit PostHog event if anything leaks."""
+async def audit_user_deletion(user_ids: list[str], attempt: int = 0) -> None:
+    """Run 60s after user.deleted. If anything leaks, repair it once.
+
+    Detecting was not enough: on Oct 1 2026 the audit reported a leaked
+    subscription and an active phone number assignment for a deleted user
+    and nothing cleaned them. Now, for every user whose account is really
+    gone, the audit republishes ``user.deleted`` (marked ``repair``) so every
+    service runs its own idempotent cleanup again, then audits once more.
+    Accounts that still exist are never touched (a recreated id, a bad event).
+    """
     if not user_ids:
         return
 
     await asyncio.sleep(AUDIT_DELAY_SECONDS)
 
     from app.database import async_session
+    from app.user_lookup import user_exists
 
     leaks_by_user: dict[str, dict[str, int]] = {}
+    still_exists: list[str] = []
 
     async with async_session() as session:
         for user_id in user_ids:
+            if await user_exists(session, str(user_id)):
+                still_exists.append(str(user_id))
+                continue
             residue = await _count_residue_for_user(session, str(user_id))
             if residue:
                 leaks_by_user[str(user_id)] = residue
 
+    if still_exists:
+        logger.warning("Deletion audit skipped users that still exist: %s", still_exists)
+
     if not leaks_by_user:
         logger.info(
-            "Deletion audit OK for users %s (delay=%ds, no residue)",
-            user_ids, AUDIT_DELAY_SECONDS,
+            "Deletion audit OK for users %s (attempt=%d, delay=%ds, no residue)",
+            user_ids, attempt, AUDIT_DELAY_SECONDS,
         )
+        if attempt > 0:
+            await _capture_posthog(
+                event="account_delete_orphans_repaired",
+                properties={"user_ids": [str(u) for u in user_ids], "attempt": attempt},
+            )
         return
 
     total_orphan_rows = sum(
         sum(counts.values()) for counts in leaks_by_user.values()
     )
+    will_repair = attempt == 0
 
     logger.error(
-        "Deletion audit FAILED — orphan rows detected: %s",
-        leaks_by_user,
+        "Deletion audit FAILED (attempt=%d, repair=%s) — orphan rows detected: %s",
+        attempt, will_repair, leaks_by_user,
     )
 
     await _capture_posthog(
@@ -135,6 +157,20 @@ async def audit_user_deletion(user_ids: list[str]) -> None:
             "user_ids": list(leaks_by_user.keys()),
             "residue_by_user": leaks_by_user,
             "total_orphan_rows": total_orphan_rows,
+            "attempt": attempt,
+            "will_repair": will_repair,
             "detected_at": datetime.now(UTC).isoformat(),
         },
     )
+
+    if will_repair:
+        from app.kafka.producer import publish_event
+
+        await publish_event(
+            "user.deleted",
+            {
+                "event_type": "user.deleted",
+                "data": {"userIds": list(leaks_by_user.keys()), "repair": True},
+            },
+            key=list(leaks_by_user.keys())[0],
+        )
