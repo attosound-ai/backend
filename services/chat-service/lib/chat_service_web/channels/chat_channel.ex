@@ -120,7 +120,11 @@ defmodule ChatServiceWeb.ChatChannel do
          opts <- [recipient_id: conversation.participant_id] ++ reply_opts ++ extra_opts,
          {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
       message_map = Message.to_map(message)
-      broadcast!(socket, "new_message", message_map)
+      # No broadcast here: MessageService.send_message already publishes
+      # {:new_message, _} on "chat:<id>" and handle_info pushes it to every
+      # subscriber. Broadcasting here too delivered each message twice to
+      # everyone with the chat open (client, Oct 3 2026: every
+      # messages_received_realtime arrived twice, 8 ms apart).
 
       # Notify both participants' user channels so conversation lists update in real-time
       notify_payload = %{
