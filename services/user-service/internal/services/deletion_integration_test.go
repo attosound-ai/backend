@@ -30,7 +30,7 @@ func integrationDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(&models.User{}, &models.UserCredentials{}, &models.PushToken{},
-		&models.SignupSession{}, &models.AccountDeletion{}); err != nil {
+		&models.SignupSession{}, &models.UserAppIconPreference{}, &models.AccountDeletion{}); err != nil {
 		t.Fatal(err)
 	}
 	db.Exec("TRUNCATE users, account_deletions RESTART IDENTITY CASCADE")
@@ -182,5 +182,26 @@ func TestIntegrationRelinkOrphanedCreator(t *testing.T) {
 	}
 	if _, err := svc.RelinkOrphanedCreator(context.Background(), req); err != ErrRelinkNotOrphan {
 		t.Fatalf("second relink allowed: %v", err)
+	}
+}
+
+// Every user-service table keyed by the user goes with it.
+func TestIntegrationDeleteLeavesNoUserServiceRows(t *testing.T) {
+	db := integrationDB(t)
+	db.Exec("TRUNCATE user_credentials, push_tokens, user_app_icon_preferences")
+	r, _ := seed(t, db)
+	db.Create(&models.UserCredentials{UserID: r.ID, PasswordHash: "x"})
+	db.Exec("INSERT INTO user_app_icon_preferences (user_id, slot_name, updated_at, selected_at) VALUES (?, 'gold', now(), now())", r.ID)
+	svc := NewUserService(repositories.NewUserRepository(db), kafka.NewProducer("127.0.0.1:1"))
+	meta := DeletionMeta{Via: models.DeletionViaOperator, RequestedBy: "a", PerformedBy: "b", Reason: "c"}
+	if err := svc.DeleteAccount(context.Background(), r.ID, false, meta); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"user_credentials", "push_tokens", "user_app_icon_preferences"} {
+		var n int64
+		db.Table(table).Where("user_id = ?", r.ID).Count(&n)
+		if n != 0 {
+			t.Fatalf("%s kept %d rows of the deleted user", table, n)
+		}
 	}
 }

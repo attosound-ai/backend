@@ -512,6 +512,11 @@ func (r *UserRepository) DeleteUserRecord(tx *gorm.DB, userID uint64) error {
 	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.PushToken{}).Error; err != nil {
 		return fmt.Errorf("delete push_tokens: %w", err)
 	}
+	// Oct 3 2026 orphan sweep: rows of deleted users 188 and 207 were still
+	// here; every user-service table keyed by user_id goes with the user.
+	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.UserAppIconPreference{}).Error; err != nil {
+		return fmt.Errorf("delete user_app_icon_preferences: %w", err)
+	}
 	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.UserCredentials{}).Error; err != nil {
 		return fmt.Errorf("delete user_credentials: %w", err)
 	}
