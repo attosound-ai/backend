@@ -6,9 +6,12 @@ impl TransformationPresets {
     /// Avatar: face-detection crop, multiple sizes eager-generated.
     pub fn avatar_eager() -> String {
         [
-            "c_thumb,g_face,w_40,h_40,f_auto,q_auto",
-            "c_thumb,g_face,w_80,h_80,f_auto,q_auto",
-            "c_thumb,g_face,w_200,h_200,f_auto,q_auto",
+            // Same sizes as the app presets (front lib/media/cloudinaryUrl.ts),
+            // sized for 3x screens since Oct 3 2026.
+            "c_thumb,g_face,w_120,h_120,f_auto,q_auto",
+            "c_thumb,g_face,w_160,h_160,f_auto,q_auto",
+            "c_thumb,g_face,w_240,h_240,f_auto,q_auto",
+            "c_thumb,g_face,w_360,h_360,f_auto,q_auto",
         ]
         .join("|")
     }
