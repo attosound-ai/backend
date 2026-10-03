@@ -101,6 +101,7 @@ defmodule ChatService.Messages.MessageService do
 
         broadcast_message(conversation_id, message)
         recipient_id = Keyword.get(opts, :recipient_id)
+        notify_participants(conversation_id, sender_id, recipient_id, content)
         publish_kafka_event(message, recipient_id)
 
         {:ok, message}
@@ -353,6 +354,35 @@ defmodule ChatService.Messages.MessageService do
       "chat:#{conversation_id}",
       {event, payload}
     )
+  end
+
+  # Both participants' user channels, so the conversation list and the badge
+  # update live. This used to live only in the channel's handle_in, so a
+  # message sent over REST (every photo, audio and video, and any text sent
+  # while the sender's socket was down) reached the other phone as a push but
+  # never moved the open conversation list (client, Oct 3 2026: "if I'm in
+  # the message section I won't get it until I close the app").
+  defp notify_participants(_conversation_id, _sender_id, nil, _content), do: :ok
+
+  defp notify_participants(conversation_id, sender_id, recipient_id, content) do
+    payload = %{
+      conversation_id: conversation_id,
+      last_message: content,
+      sender_id: sender_id
+    }
+
+    ChatServiceWeb.Endpoint.broadcast("user:#{sender_id}", "conversation_updated", payload)
+
+    if to_string(recipient_id) != to_string(sender_id) do
+      ChatServiceWeb.Endpoint.broadcast("user:#{recipient_id}", "conversation_updated", payload)
+
+      ChatServiceWeb.Endpoint.broadcast("user:#{recipient_id}", "new_notification", %{
+        type: "message",
+        actor_id: sender_id
+      })
+    end
+
+    :ok
   end
 
   defp broadcast_message(conversation_id, %Message{} = message) do

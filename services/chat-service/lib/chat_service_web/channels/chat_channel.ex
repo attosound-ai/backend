@@ -126,25 +126,8 @@ defmodule ChatServiceWeb.ChatChannel do
       # everyone with the chat open (client, Oct 3 2026: every
       # messages_received_realtime arrived twice, 8 ms apart).
 
-      # Notify both participants' user channels so conversation lists update in real-time
-      notify_payload = %{
-        conversation_id: conversation_id,
-        last_message: content,
-        sender_id: user_id
-      }
-
-      ChatServiceWeb.Endpoint.broadcast("user:#{user_id}", "conversation_updated", notify_payload)
-      ChatServiceWeb.Endpoint.broadcast("user:#{conversation.participant_id}", "conversation_updated", notify_payload)
-
-      # Notify recipient about new notification (for badge + list refresh)
-      if user_id != conversation.participant_id do
-        ChatServiceWeb.Endpoint.broadcast(
-          "user:#{conversation.participant_id}",
-          "new_notification",
-          %{type: "message", actor_id: user_id}
-        )
-      end
-
+      # The user channels are notified inside MessageService.send_message,
+      # the same way for this path and for REST.
       {:reply, {:ok, message_map}, socket}
     else
       {:error, reason} ->

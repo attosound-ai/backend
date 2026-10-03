@@ -163,9 +163,10 @@ defmodule ChatServiceWeb.MessageController do
         # instead of a Cassandra-driven 500 (the client now always resolves the
         # conversation first, so this should never trip in normal flows).
         case ConversationService.find_conversation(user_id, conversation_id) do
-          {:ok, _conversation} ->
+          {:ok, conversation} ->
             opts =
               [
+                recipient_id: conversation.participant_id,
                 metadata: params["metadata"],
                 thread_id: blank_to_nil(params["threadId"]),
                 reply_to_id: blank_to_nil(params["replyToId"]),
