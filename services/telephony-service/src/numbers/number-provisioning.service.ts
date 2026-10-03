@@ -205,6 +205,22 @@ export class NumberProvisioningService {
   }
 
   /**
+   * Numbers the platform itself uses (the SMS sender of the OTP service, the
+   * bridge number). Never deleted from Twilio, whoever holds them: on Oct 1
+   * 2026 deleting the test account 277 deleted +14752657155, which was also
+   * the OTP service's SMS sender, and every SMS code failed with 21659 until
+   * Oct 3. Comma separated E.164 in PROTECTED_PHONE_NUMBERS, plus the bridge.
+   */
+  static protectedNumbers(): Set<string> {
+    const list = (process.env.PROTECTED_PHONE_NUMBERS || "")
+      .split(",")
+      .map((n) => n.trim())
+      .filter(Boolean);
+    if (process.env.TWILIO_BRIDGE_NUMBER) list.push(process.env.TWILIO_BRIDGE_NUMBER.trim());
+    return new Set(list);
+  }
+
+  /**
    * Account deletion: every number the user held goes away for good.
    *
    * `releaseNumber()` only returns a number to the pool, so after a deletion
@@ -228,6 +244,28 @@ export class NumberProvisioningService {
       const phoneNumber = provisioned.phoneNumber;
       if (!NumberProvisioningService.isRealTwilioNumber(phoneNumber)) {
         await this.releaseNumber(userId);
+        released.push(phoneNumber);
+        continue;
+      }
+
+      if (NumberProvisioningService.protectedNumbers().has(phoneNumber)) {
+        // Unassign only: the number stays in Twilio, reserved, out of the pool.
+        await this.dataSource.transaction(async (manager) => {
+          provisioned.status = "reserved";
+          provisioned.userId = null as unknown as string;
+          provisioned.releasedAt = new Date();
+          await manager.save(provisioned);
+          await manager.update(
+            PhoneNumberAssignment,
+            { phoneNumber },
+            { status: "inactive" },
+          );
+        });
+        this.logger.warn(
+          "Protected number %s kept in Twilio (deleted user %s held it)",
+          phoneNumber,
+          userId,
+        );
         released.push(phoneNumber);
         continue;
       }

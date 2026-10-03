@@ -288,6 +288,34 @@ describe("NumberProvisioningService", () => {
       );
     });
 
+    it("never deletes a protected platform number from Twilio", async () => {
+      const prev = process.env.PROTECTED_PHONE_NUMBERS;
+      process.env.PROTECTED_PHONE_NUMBERS = "+19592100804, +14752657155";
+      const manager = { save: jest.fn(), update: jest.fn() };
+      dataSource.transaction.mockImplementation(async (fn: any) => fn(manager));
+      const held = {
+        twilioNumberSid: "PNsystem",
+        phoneNumber: "+14752657155",
+        userId,
+        status: "assigned",
+      } as ProvisionedNumber;
+      (numberRepo as any).find = jest.fn().mockResolvedValue([held]);
+      (twilioNumbers.release as jest.Mock).mockClear();
+
+      const released = await service.releaseNumbersForDeletedUser(userId);
+
+      expect(released).toEqual(["+14752657155"]);
+      expect(twilioNumbers.release).not.toHaveBeenCalled();
+      expect(held.status).toBe("reserved");
+      expect(held.userId).toBeNull();
+      expect(manager.update).toHaveBeenCalledWith(
+        PhoneNumberAssignment,
+        { phoneNumber: "+14752657155" },
+        { status: "inactive" },
+      );
+      process.env.PROTECTED_PHONE_NUMBERS = prev;
+    });
+
     it("returns a dev placeholder to the pool without touching Twilio", async () => {
       const manager = { save: jest.fn(), update: jest.fn() };
       dataSource.transaction.mockImplementation(async (fn: any) => fn(manager));
