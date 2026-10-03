@@ -17,8 +17,9 @@ import (
 // interface so the guard rails below can be tested without a database.
 type accountAdmin interface {
 	GetUserByID(ctx context.Context, id string) (*models.UserProfile, error)
-	DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool) error
+	DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool, meta services.DeletionMeta) error
 	ListUsersForAdmin(f repositories.AdminUserFilter) (*services.AdminUserList, error)
+	ListDeletions(search string, limit, offset int) (*services.DeletionList, error)
 }
 
 // AdminHandler serves operator only routes. Every route is mounted behind
@@ -32,7 +33,8 @@ func NewAdminHandler(accounts accountAdmin) *AdminHandler {
 	return &AdminHandler{accounts: accounts}
 }
 
-// DeleteUser handles DELETE /users/admin/:id?username=<name>&deleteLinked=<bool>.
+// DeleteUser handles DELETE /users/admin/:id?username=<name>&deleteLinked=<bool>
+// &requestedBy=<who asked>&performedBy=<who runs it>&reason=<why>.
 //
 // The self service deletion needs an OTP sent to the owner, so support had no
 // way to honour a removal request. This runs the SAME deletion (user-service
@@ -42,6 +44,10 @@ func NewAdminHandler(accounts accountAdmin) *AdminHandler {
 // Guard rails: the numeric id must be paired with the account's username, so
 // a mistyped id cannot delete a stranger; and linked accounts (a
 // representative's managed creators) are only included when asked for.
+//
+// requestedBy, performedBy and reason are required (Oct 3 2026): arami (266)
+// was deleted here on Sep 20 and two weeks later nobody could say who asked.
+// They are stored in account_deletions in the same transaction as the delete.
 func (h *AdminHandler) DeleteUser(c *fiber.Ctx) error {
 	id := c.Params("id")
 	uid, err := strconv.ParseUint(id, 10, 64)
@@ -86,7 +92,22 @@ func (h *AdminHandler) DeleteUser(c *fiber.Ctx) error {
 		})
 	}
 
-	if err := h.accounts.DeleteAccount(c.Context(), uid, deleteLinked); err != nil {
+	meta := services.DeletionMeta{
+		Via:         models.DeletionViaOperator,
+		RequestedBy: strings.TrimSpace(c.Query("requestedBy")),
+		PerformedBy: strings.TrimSpace(c.Query("performedBy")),
+		Reason:      strings.TrimSpace(c.Query("reason")),
+		ClientIP:    clientIP(c),
+		UserAgent:   string(c.Request().Header.UserAgent()),
+	}
+	if err := meta.Validate(); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "requestedBy, performedBy and reason are required: say who asked for this deletion, who is running it and why",
+		})
+	}
+
+	if err := h.accounts.DeleteAccount(c.Context(), uid, deleteLinked, meta); err != nil {
 		log.Printf("[ADMIN] delete user %d (%s) failed: %v", uid, profile.Username, err)
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,
@@ -94,7 +115,8 @@ func (h *AdminHandler) DeleteUser(c *fiber.Ctx) error {
 		})
 	}
 
-	log.Printf("[ADMIN] deleted user %d (%s) deleteLinked=%t", uid, profile.Username, deleteLinked)
+	log.Printf("[ADMIN] deleted user %d (%s) deleteLinked=%t requestedBy=%q performedBy=%q reason=%q",
+		uid, profile.Username, deleteLinked, meta.RequestedBy, meta.PerformedBy, meta.Reason)
 	return c.JSON(models.APIResponse{
 		Success: true,
 		Data: fiber.Map{
@@ -172,5 +194,25 @@ func (h *AdminHandler) ListUsers(c *fiber.Ctx) error {
 		})
 	}
 
+	return c.JSON(models.APIResponse{Success: true, Data: list})
+}
+
+// ListDeletions handles GET /users/admin/deletions?search=&limit=&offset=.
+// Every deleted account with who asked, who ran it, why, and the creators it
+// left without a representative.
+func (h *AdminHandler) ListDeletions(c *fiber.Ctx) error {
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	list, err := h.accounts.ListDeletions(strings.TrimSpace(c.Query("search")), limit, offset)
+	if err != nil {
+		log.Printf("[ADMIN] list deletions failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
 	return c.JSON(models.APIResponse{Success: true, Data: list})
 }

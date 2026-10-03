@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/atto-sound/user-service/internal/kafka"
 	"github.com/atto-sound/user-service/internal/models"
 	"github.com/atto-sound/user-service/internal/repositories"
@@ -275,7 +277,13 @@ func (s *UserService) GetActivePushTokens(userID uint64) ([]models.PushToken, er
 // DeleteAccount permanently removes a user and all associated data from
 // every Postgres table, then emits a Kafka event so non-Postgres stores
 // (MongoDB, Cassandra, Redis) can clean up asynchronously.
-func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool) error {
+//
+// meta is mandatory: one account_deletions row per removed account is
+// written in the same transaction as the delete (see models.AccountDeletion).
+func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool, meta DeletionMeta) error {
+	if err := meta.Validate(); err != nil {
+		return err
+	}
 	user, err := s.repo.FindByID(userID)
 	if err != nil || user == nil {
 		return errors.New("user not found")
@@ -283,33 +291,42 @@ func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLi
 
 	userIDs := []uint64{userID}
 
+	// Always look the linked accounts up: they are deleted with deleteLinked,
+	// and otherwise they tell the record which creators are left orphaned.
+	linked, err := s.repo.GetLinkedAccounts(
+		userID,
+		user.IsManagedAccount,
+		user.RepresentativeID,
+	)
+	if err != nil {
+		log.Printf("[USER] Warning: failed to fetch linked accounts for %d: %v", userID, err)
+	}
+	var extra []*models.User
 	if deleteLinked {
-		linked, err := s.repo.GetLinkedAccounts(
-			userID,
-			user.IsManagedAccount,
-			user.RepresentativeID,
-		)
-		if err != nil {
-			log.Printf("[USER] Warning: failed to fetch linked accounts for %d: %v", userID, err)
-		}
 		for _, u := range linked {
 			userIDs = append(userIDs, u.ID)
+			extra = append(extra, u)
 		}
 		if len(userIDs) > 1 {
 			log.Printf("[USER] Including linked accounts in deletion: %v", userIDs)
 		}
 	}
 
-	// Single transaction: wipe user-service Postgres rows.
+	batchID := uuid.NewString()
+	records := BuildDeletionRecords(batchID, user, extra, linked, meta, time.Now().UTC())
+
+	// Single transaction: the deletion records plus the user-service rows.
 	// Other services purge their own rows via the user.deleted Kafka event.
-	if err := s.repo.PurgeAllUserData(userIDs); err != nil {
+	if err := s.repo.PurgeAllUserData(userIDs, records); err != nil {
 		log.Printf("[USER] Failed to purge user-service data for users %v: %v", userIDs, err)
 		// Surface the underlying message so the client can diagnose.
 		// Safe to return: this code path never sees user-supplied SQL.
 		return fmt.Errorf("delete account failed: %w", err)
 	}
 
-	log.Printf("[USER] Purged user-service rows for %v; cross-service cleanup via Kafka", userIDs)
+	log.Printf("[USER] Purged user-service rows for %v via=%s requestedBy=%q performedBy=%q batch=%s; cross-service cleanup via Kafka",
+		userIDs, meta.Via, meta.RequestedBy, meta.PerformedBy, batchID)
+	go captureDeletions(records)
 
 	// Emit Kafka event for async cleanup (MongoDB, Cassandra, Redis)
 	idStrs := make([]string, len(userIDs))
@@ -319,6 +336,8 @@ func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLi
 	go func() {
 		eventData := map[string]interface{}{
 			"userIds": idStrs,
+			"batchId": batchID,
+			"via":     meta.Via,
 		}
 		if err := s.producer.Publish(context.Background(), "user.deleted", idStrs[0], eventData); err != nil {
 			log.Printf("[USER] Failed to publish user.deleted event: %v", err)
@@ -326,6 +345,24 @@ func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLi
 	}()
 
 	return nil
+}
+
+// ListDeletions serves the operator's deletion history.
+func (s *UserService) ListDeletions(search string, limit, offset int) (*DeletionList, error) {
+	rows, total, err := s.repo.ListDeletions(search, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	if rows == nil {
+		rows = []models.AccountDeletion{}
+	}
+	return &DeletionList{Deletions: rows, Total: total}, nil
+}
+
+// DeletionList is one page of the deletion history.
+type DeletionList struct {
+	Deletions []models.AccountDeletion `json:"deletions"`
+	Total     int64                    `json:"total"`
 }
 
 // GetLinkedAccounts returns accounts linked to the given user.

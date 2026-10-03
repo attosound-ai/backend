@@ -614,8 +614,17 @@ func (r *UserRepository) DeleteTelephonyData(tx *gorm.DB, userID string) error {
 //
 // Marker `_ = idStr` is omitted on purpose: idStr is no longer needed
 // here because we no longer call the cross-DB helpers.
-func (r *UserRepository) PurgeAllUserData(userIDs []uint64) error {
+//
+// records are written in the SAME transaction: if the record cannot be
+// saved nothing is deleted, and an account never disappears without one.
+func (r *UserRepository) PurgeAllUserData(userIDs []uint64, records []models.AccountDeletion) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		if len(records) == 0 {
+			return errors.New("refusing to delete without a deletion record")
+		}
+		if err := tx.Create(&records).Error; err != nil {
+			return fmt.Errorf("write account_deletions: %w", err)
+		}
 		for _, uid := range userIDs {
 			if err := r.DeleteUserRecord(tx, uid); err != nil {
 				return fmt.Errorf("user record (user %d): %w", uid, err)
@@ -623,6 +632,29 @@ func (r *UserRepository) PurgeAllUserData(userIDs []uint64) error {
 		}
 		return nil
 	})
+}
+
+// ListDeletions returns the deletion records, newest first. search matches
+// username, display name, email, requested by or the deleted id.
+func (r *UserRepository) ListDeletions(search string, limit, offset int) ([]models.AccountDeletion, int64, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	q := r.db.Model(&models.AccountDeletion{})
+	if s := strings.TrimSpace(search); s != "" {
+		like := "%" + s + "%"
+		q = q.Where("username ILIKE ? OR display_name ILIKE ? OR email ILIKE ? OR requested_by ILIKE ? OR CAST(deleted_user_id AS TEXT) = ?",
+			like, like, like, like, s)
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []models.AccountDeletion
+	if err := q.Order("deleted_at DESC, id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
 }
 
 // AdminUserFilter es lo que el panel de operador puede pedir de la lista.

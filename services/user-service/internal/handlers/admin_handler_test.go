@@ -20,6 +20,7 @@ type fakeAccounts struct {
 	deletedID   uint64
 	deletedLink bool
 	deleteCalls int
+	deletedMeta services.DeletionMeta
 	listFilter  repositories.AdminUserFilter
 	listErr     error
 	listCalls   int
@@ -33,11 +34,16 @@ func (f *fakeAccounts) GetUserByID(_ context.Context, id string) (*models.UserPr
 	return p, nil
 }
 
-func (f *fakeAccounts) DeleteAccount(_ context.Context, userID uint64, deleteLinked bool) error {
+func (f *fakeAccounts) DeleteAccount(_ context.Context, userID uint64, deleteLinked bool, meta services.DeletionMeta) error {
 	f.deleteCalls++
+	f.deletedMeta = meta
 	f.deletedID = userID
 	f.deletedLink = deleteLinked
 	return f.deleteErr
+}
+
+func (f *fakeAccounts) ListDeletions(string, int, int) (*services.DeletionList, error) {
+	return &services.DeletionList{}, nil
 }
 
 func (f *fakeAccounts) ListUsersForAdmin(
@@ -88,10 +94,10 @@ func do(t *testing.T, app *fiber.App, target, token string) int {
 func TestAdminDelete_UnconfiguredSecretIsClosed(t *testing.T) {
 	f := accounts()
 	app := newAdminApp(f, "")
-	if got := do(t, app, "/users/admin/266?username=arami", "anything"); got != 503 {
+	if got := do(t, app, "/users/admin/266?username=arami&requestedBy=client&performedBy=operator&reason=asked", "anything"); got != 503 {
 		t.Fatalf("status = %d, want 503", got)
 	}
-	if got := do(t, app, "/users/admin/266?username=arami", ""); got != 503 {
+	if got := do(t, app, "/users/admin/266?username=arami&requestedBy=client&performedBy=operator&reason=asked", ""); got != 503 {
 		t.Fatalf("status without token = %d, want 503", got)
 	}
 	if f.deleteCalls != 0 {
@@ -103,7 +109,7 @@ func TestAdminDelete_RejectsMissingOrWrongToken(t *testing.T) {
 	f := accounts()
 	app := newAdminApp(f, testSecret)
 	for _, tok := range []string{"", "wrong", testSecret + "x", testSecret[:len(testSecret)-1]} {
-		if got := do(t, app, "/users/admin/266?username=arami", tok); got != 401 {
+		if got := do(t, app, "/users/admin/266?username=arami&requestedBy=client&performedBy=operator&reason=asked", tok); got != 401 {
 			t.Fatalf("token %q: status = %d, want 401", tok, got)
 		}
 	}
@@ -115,7 +121,7 @@ func TestAdminDelete_RejectsMissingOrWrongToken(t *testing.T) {
 func TestAdminDelete_DeletesOnlyTheNamedAccountByDefault(t *testing.T) {
 	f := accounts()
 	app := newAdminApp(f, testSecret)
-	if got := do(t, app, "/users/admin/266?username=arami", testSecret); got != 200 {
+	if got := do(t, app, "/users/admin/266?username=arami&requestedBy=client&performedBy=operator&reason=asked", testSecret); got != 200 {
 		t.Fatalf("status = %d, want 200", got)
 	}
 	if f.deleteCalls != 1 || f.deletedID != 266 {
@@ -129,7 +135,7 @@ func TestAdminDelete_DeletesOnlyTheNamedAccountByDefault(t *testing.T) {
 func TestAdminDelete_LinkedOnlyWhenAsked(t *testing.T) {
 	f := accounts()
 	app := newAdminApp(f, testSecret)
-	if got := do(t, app, "/users/admin/266?username=ARAMI&deleteLinked=true", testSecret); got != 200 {
+	if got := do(t, app, "/users/admin/266?username=ARAMI&deleteLinked=true&requestedBy=client&performedBy=operator&reason=asked", testSecret); got != 200 {
 		t.Fatalf("status = %d, want 200", got)
 	}
 	if !f.deletedLink {
@@ -142,7 +148,7 @@ func TestAdminDelete_LinkedOnlyWhenAsked(t *testing.T) {
 func TestAdminDelete_UsernameMustMatchTheID(t *testing.T) {
 	f := accounts()
 	app := newAdminApp(f, testSecret)
-	if got := do(t, app, "/users/admin/267?username=arami", testSecret); got != 409 {
+	if got := do(t, app, "/users/admin/267?username=arami&requestedBy=client&performedBy=operator&reason=asked", testSecret); got != 409 {
 		t.Fatalf("status = %d, want 409", got)
 	}
 	if got := do(t, app, "/users/admin/266", testSecret); got != 400 {
@@ -157,10 +163,10 @@ func TestAdminDelete_BadInput(t *testing.T) {
 	f := accounts()
 	app := newAdminApp(f, testSecret)
 	cases := map[string]int{
-		"/users/admin/abc?username=arami":                   400,
-		"/users/admin/0?username=arami":                     400,
-		"/users/admin/999?username=ghost":                   404,
-		"/users/admin/266?username=arami&deleteLinked=yes!": 400,
+		"/users/admin/abc?username=arami&requestedBy=client&performedBy=operator&reason=asked":                   400,
+		"/users/admin/0?username=arami&requestedBy=client&performedBy=operator&reason=asked":                     400,
+		"/users/admin/999?username=ghost&requestedBy=client&performedBy=operator&reason=asked":                   404,
+		"/users/admin/266?username=arami&deleteLinked=yes!&requestedBy=client&performedBy=operator&reason=asked": 400,
 	}
 	for target, want := range cases {
 		if got := do(t, app, target, testSecret); got != want {
@@ -176,7 +182,7 @@ func TestAdminDelete_SurfacesServiceFailure(t *testing.T) {
 	f := accounts()
 	f.deleteErr = errors.New("delete account failed: boom")
 	app := newAdminApp(f, testSecret)
-	if got := do(t, app, "/users/admin/266?username=arami", testSecret); got != 500 {
+	if got := do(t, app, "/users/admin/266?username=arami&requestedBy=client&performedBy=operator&reason=asked", testSecret); got != 500 {
 		t.Fatalf("status = %d, want 500", got)
 	}
 }
@@ -260,5 +266,33 @@ func TestListUsersSinFiltroSirveLaPrimeraPagina(t *testing.T) {
 	}
 	if f.listFilter.Limit != 0 || f.listFilter.Offset != 0 {
 		t.Fatalf("sin query el filtro va vacío y lo decide el repositorio: %+v", f.listFilter)
+	}
+}
+
+// Oct 3 2026: no operator deletion without who asked, who ran it and why.
+func TestAdminDelete_RequiresWhoAndWhy(t *testing.T) {
+	f := accounts()
+	app := newAdminApp(f, testSecret)
+	base := "/users/admin/266?username=arami"
+	for _, q := range []string{
+		"",
+		"&requestedBy=client&performedBy=operator",
+		"&requestedBy=client&reason=asked",
+		"&performedBy=operator&reason=asked",
+		"&requestedBy=%20&performedBy=operator&reason=asked",
+	} {
+		if got := do(t, app, base+q, testSecret); got != 400 {
+			t.Fatalf("%q: status = %d, want 400", q, got)
+		}
+	}
+	if f.deleteCalls != 0 {
+		t.Fatal("deleted without saying who and why")
+	}
+	if got := do(t, app, base+"&requestedBy=client%20Anthony&performedBy=David&reason=client%20asked", testSecret); got != 200 {
+		t.Fatalf("status = %d, want 200", got)
+	}
+	m := f.deletedMeta
+	if m.Via != models.DeletionViaOperator || m.RequestedBy != "client Anthony" || m.PerformedBy != "David" || m.Reason != "client asked" {
+		t.Fatalf("meta not passed through: %+v", m)
 	}
 }

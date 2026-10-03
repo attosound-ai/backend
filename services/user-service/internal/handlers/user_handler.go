@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
@@ -319,6 +320,8 @@ type deleteAccountRequest struct {
 	OTPCode              string `json:"otpCode"`
 	OTPIdentifier        string `json:"otpIdentifier"`
 	DeleteLinkedAccounts bool   `json:"deleteLinkedAccounts"`
+	// Reason is optional: the app may send what the person picked.
+	Reason string `json:"reason"`
 }
 
 // DeleteAccount handles DELETE /users/me/account.
@@ -363,8 +366,21 @@ func (h *UserHandler) DeleteAccount(c *fiber.Ctx) error {
 		})
 	}
 
-	// Purge all data
-	if err := h.userService.DeleteAccount(c.Context(), uid, req.DeleteLinkedAccounts); err != nil {
+	// Purge all data, with the record of who did it.
+	who := "account " + claims.UserID
+	if profile, perr := h.userService.GetUserByID(c.Context(), claims.UserID); perr == nil && profile != nil {
+		who = profile.Username + " (" + claims.UserID + ")"
+	}
+	meta := services.DeletionMeta{
+		Via:         models.DeletionViaSelfService,
+		RequestedBy: who + ", from the app with an OTP",
+		PerformedBy: who,
+		Reason:      req.Reason,
+		ActorUserID: &uid,
+		ClientIP:    clientIP(c),
+		UserAgent:   string(c.Request().Header.UserAgent()),
+	}
+	if err := h.userService.DeleteAccount(c.Context(), uid, req.DeleteLinkedAccounts, meta); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,
 			Error:   err.Error(),
@@ -399,4 +415,12 @@ func (h *UserHandler) verifyOTP(identifier, code string) error {
 		return fmt.Errorf("otp verification failed: %s", string(respBody))
 	}
 	return nil
+}
+
+// clientIP prefers the first X-Forwarded-For hop (the gateway adds it).
+func clientIP(c *fiber.Ctx) string {
+	if xff := c.Get("X-Forwarded-For"); xff != "" {
+		return strings.TrimSpace(strings.Split(xff, ",")[0])
+	}
+	return c.IP()
 }
