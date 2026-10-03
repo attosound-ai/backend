@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ type accountAdmin interface {
 	DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool, meta services.DeletionMeta) error
 	ListUsersForAdmin(f repositories.AdminUserFilter) (*services.AdminUserList, error)
 	ListDeletions(search string, limit, offset int) (*services.DeletionList, error)
+	RelinkOrphanedCreator(ctx context.Context, req services.RelinkRequest) (*services.RelinkResult, error)
 }
 
 // AdminHandler serves operator only routes. Every route is mounted behind
@@ -215,4 +217,28 @@ func (h *AdminHandler) ListDeletions(c *fiber.Ctx) error {
 		})
 	}
 	return c.JSON(models.APIResponse{Success: true, Data: list})
+}
+
+// RelinkCreator handles POST /users/admin/relink: a new representative for a
+// managed creator whose representative was deleted.
+func (h *AdminHandler) RelinkCreator(c *fiber.Ctx) error {
+	var req services.RelinkRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{Success: false, Error: "invalid request body"})
+	}
+	res, err := h.accounts.RelinkOrphanedCreator(c.Context(), req)
+	if err != nil {
+		status := fiber.StatusInternalServerError
+		switch {
+		case errors.Is(err, services.ErrRelinkIncomplete):
+			status = fiber.StatusBadRequest
+		case err.Error() == "user not found":
+			status = fiber.StatusNotFound
+		case errors.Is(err, services.ErrRelinkNameMismatch), errors.Is(err, services.ErrRelinkNotCreator),
+			errors.Is(err, services.ErrRelinkNotOrphan), errors.Is(err, services.ErrRelinkTaken):
+			status = fiber.StatusConflict
+		}
+		return c.Status(status).JSON(models.APIResponse{Success: false, Error: err.Error()})
+	}
+	return c.JSON(models.APIResponse{Success: true, Data: res})
 }

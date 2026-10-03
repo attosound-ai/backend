@@ -42,6 +42,10 @@ func (f *fakeAccounts) DeleteAccount(_ context.Context, userID uint64, deleteLin
 	return f.deleteErr
 }
 
+func (f *fakeAccounts) RelinkOrphanedCreator(context.Context, services.RelinkRequest) (*services.RelinkResult, error) {
+	return &services.RelinkResult{}, nil
+}
+
 func (f *fakeAccounts) ListDeletions(string, int, int) (*services.DeletionList, error) {
 	return &services.DeletionList{}, nil
 }
@@ -186,7 +190,6 @@ func TestAdminDelete_SurfacesServiceFailure(t *testing.T) {
 		t.Fatalf("status = %d, want 500", got)
 	}
 }
-
 
 // La lista es de operador: sin el token no existe, y lo que llega por la query
 // no puede convertirse en una consulta cualquiera.

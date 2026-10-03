@@ -171,6 +171,7 @@ func main() {
 	// user route carries it; registered before the parameterized routes.
 	users.Get("/admin", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListUsers)
 	users.Get("/admin/deletions", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListDeletions)
+	users.Post("/admin/relink", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.RelinkCreator)
 	users.Delete("/admin/:id", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.DeleteUser)
 
 	// Inmate lookup (public)

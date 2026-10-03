@@ -130,3 +130,57 @@ func TestIntegrationIncompleteMetaDeletesNothing(t *testing.T) {
 		t.Fatal("account deleted anonymously")
 	}
 }
+
+// The Oct 3 repair: delete the representative only, then give the orphaned
+// creator a new one. The new rep shares the creator's password and the
+// creator points at it with a fresh internal email.
+func TestIntegrationRelinkOrphanedCreator(t *testing.T) {
+	db := integrationDB(t)
+	db.Exec("TRUNCATE user_credentials")
+	r, c := seed(t, db)
+	inmate := "334658"
+	db.Model(&models.User{}).Where("id = ?", c.ID).Update("inmate_number", inmate)
+	db.Create(&models.UserCredentials{UserID: c.ID, PasswordHash: "hash-of-creator"})
+	svc := NewUserService(repositories.NewUserRepository(db), kafka.NewProducer("127.0.0.1:1"))
+
+	req := RelinkRequest{CreatorID: c.ID, CreatorUsername: "aramis", Email: "Stephanie@Example.com", Username: "arami",
+		DisplayName: "Stephanie", Relationship: "family", RequestedBy: "client", PerformedBy: "operator", Reason: "rep deleted"}
+	if _, err := svc.RelinkOrphanedCreator(context.Background(), req); err != ErrRelinkNotOrphan {
+		t.Fatalf("relinked a creator that still has its representative: %v", err)
+	}
+	meta := DeletionMeta{Via: models.DeletionViaOperator, RequestedBy: "a", PerformedBy: "b", Reason: "c"}
+	if err := svc.DeleteAccount(context.Background(), r.ID, false, meta); err != nil {
+		t.Fatal(err)
+	}
+	bad := req
+	bad.CreatorUsername = "arami"
+	if _, err := svc.RelinkOrphanedCreator(context.Background(), bad); err != ErrRelinkNameMismatch {
+		t.Fatalf("username guard: %v", err)
+	}
+	res, err := svc.RelinkOrphanedCreator(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep, cr models.User
+	db.First(&rep, res.RepresentativeID)
+	db.First(&cr, c.ID)
+	if rep.Role != models.RoleRepresentative || rep.Email == nil || *rep.Email != "stephanie@example.com" || rep.Username != "arami" {
+		t.Fatalf("rep wrong: %+v", rep)
+	}
+	if cr.RepresentativeID == nil || *cr.RepresentativeID != rep.ID || cr.Email == nil ||
+		*cr.Email != "creator_334658_"+strconv.FormatUint(rep.ID, 10)+"@managed.atto" {
+		t.Fatalf("creator not relinked: %+v", cr)
+	}
+	var creds models.UserCredentials
+	db.Where("user_id = ?", rep.ID).First(&creds)
+	if creds.PasswordHash != "hash-of-creator" {
+		t.Fatal("rep did not get the creator's password")
+	}
+	linked, _ := repositories.NewUserRepository(db).GetLinkedAccounts(rep.ID, false, nil)
+	if len(linked) != 1 || linked[0].ID != c.ID {
+		t.Fatalf("switcher would not see the creator: %+v", linked)
+	}
+	if _, err := svc.RelinkOrphanedCreator(context.Background(), req); err != ErrRelinkNotOrphan {
+		t.Fatalf("second relink allowed: %v", err)
+	}
+}

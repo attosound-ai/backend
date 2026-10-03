@@ -634,6 +634,34 @@ func (r *UserRepository) PurgeAllUserData(userIDs []uint64, records []models.Acc
 	})
 }
 
+// CreateRepresentativeForCreator creates rep, gives it the creator's password
+// and points the creator at it, all in one transaction. The creator's
+// internal email is rebuilt with the new representative id, the shape signup
+// uses (creator_<inmate>_<repId>@managed.atto). Returns that email.
+func (r *UserRepository) CreateRepresentativeForCreator(rep *models.User, creator *models.User) (string, error) {
+	var internal string
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var creds models.UserCredentials
+		if err := tx.Where("user_id = ?", creator.ID).First(&creds).Error; err != nil {
+			return fmt.Errorf("creator has no credentials to share: %w", err)
+		}
+		if err := tx.Create(rep).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&models.UserCredentials{UserID: rep.ID, PasswordHash: creds.PasswordHash}).Error; err != nil {
+			return err
+		}
+		inmate := ""
+		if creator.InmateNumber != nil {
+			inmate = *creator.InmateNumber
+		}
+		internal = fmt.Sprintf("creator_%s_%d@managed.atto", inmate, rep.ID)
+		return tx.Model(&models.User{}).Where("id = ?", creator.ID).
+			Updates(map[string]interface{}{"representative_id": rep.ID, "email": internal}).Error
+	})
+	return internal, err
+}
+
 // ListDeletions returns the deletion records, newest first. search matches
 // username, display name, email, requested by or the deleted id.
 func (r *UserRepository) ListDeletions(search string, limit, offset int) ([]models.AccountDeletion, int64, error) {
