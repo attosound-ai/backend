@@ -7,6 +7,7 @@ import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entit
 import { Call } from "../entities/call.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { ChildLeg, siblingsToCancel } from "./decline-siblings";
 
 @Injectable()
 export class CallsService {
@@ -26,6 +27,42 @@ export class CallsService {
     const accountSid = this.config.get<string>("twilio.accountSid");
     const authToken = this.config.get<string>("twilio.authToken");
     this.twilioClient = Twilio(accountSid, authToken);
+  }
+
+  /**
+   * A leg of a fan out dial was declined: cancel its siblings still ringing.
+   * Returns the canceled SIDs. Never throws (a leg may end on its own meanwhile).
+   */
+  async cancelRingingSiblings(
+    parentCallSid: string,
+    declinedSid: string,
+  ): Promise<string[]> {
+    let children: ChildLeg[] = [];
+    try {
+      const list = await this.twilioClient.calls.list({ parentCallSid, limit: 20 });
+      children = list.map((c) => ({ sid: c.sid, status: String(c.status) }));
+    } catch (err) {
+      this.logger.warn(
+        "Sibling lookup failed parent=%s: %s",
+        parentCallSid,
+        err instanceof Error ? err.message : String(err),
+      );
+      return [];
+    }
+    const canceled: string[] = [];
+    for (const sid of siblingsToCancel(children, declinedSid)) {
+      try {
+        await this.twilioClient.calls(sid).update({ status: "canceled" });
+        canceled.push(sid);
+      } catch (err) {
+        this.logger.warn(
+          "Sibling cancel failed sid=%s: %s",
+          sid,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+    return canceled;
   }
 
   /** Find the user assigned to a Twilio phone number. */

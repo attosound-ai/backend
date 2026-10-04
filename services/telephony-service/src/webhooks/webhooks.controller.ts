@@ -16,6 +16,7 @@ import { KafkaProducer } from "../kafka/kafka.producer";
 import { UsersClientService } from "../users-client/users-client.service";
 import { PushService } from "../push/push.service";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { isDecline } from "../calls/decline-siblings";
 
 @Controller("telephony/webhooks/voice")
 @UseGuards(TwilioSignatureGuard)
@@ -159,7 +160,16 @@ export class WebhooksController {
     }
 
     for (const targetId of targets) {
-      const client = dial.client(`user-${targetId}`);
+      // Each leg reports when it ends: a decline (busy) on one device cancels
+      // the siblings still ringing, so the caller stops hearing ringback.
+      const client = dial.client(
+        {
+          statusCallback: `${webhookBaseUrl}/telephony/webhooks/voice/client-leg-status`,
+          statusCallbackEvent: ["completed"],
+          statusCallbackMethod: "POST",
+        },
+        `user-${targetId}`,
+      );
       // DisplayName is per-<Client> so CallKit's
       // setIncomingCallContactHandleTemplate template renders correctly
       // regardless of which identity Twilio happens to reach first.
@@ -335,6 +345,36 @@ export class WebhooksController {
     this.logger.log("Status callback: sid=%s status=%s", callSid, status);
 
     await this.callsService.updateCallStatus(callSid, status, duration);
+    return { ok: true };
+  }
+
+  /**
+   * A <Client> leg of the fan out dial ended. When a person declined it (busy),
+   * cancel the sibling legs still ringing: a decline on one device declines
+   * everywhere. The dial then completes normally and dial-status records it.
+   */
+  @Post("client-leg-status")
+  @HttpCode(200)
+  async handleClientLegStatus(
+    @Body() body: Record<string, string>,
+  ): Promise<{ ok: true }> {
+    const legSid = body.CallSid;
+    const parentSid = body.ParentCallSid;
+    const status = body.CallStatus;
+    if (!parentSid || !isDecline(status)) return { ok: true };
+    const canceled = await this.callsService.cancelRingingSiblings(parentSid, legSid);
+    this.logger.log(
+      "Leg declined sid=%s parent=%s canceled siblings=%s",
+      legSid,
+      parentSid,
+      canceled.join(",") || "none",
+    );
+    this.analytics.capture(body.To?.replace("client:user-", "") || "unknown", "backend_call_declined_siblings_canceled", {
+      call_sid: parentSid,
+      declined_leg_sid: legSid,
+      declined_identity: body.To || null,
+      canceled_count: canceled.length,
+    });
     return { ok: true };
   }
 
