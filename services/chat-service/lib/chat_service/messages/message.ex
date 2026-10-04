@@ -24,6 +24,7 @@ defmodule ChatService.Messages.Message do
     :reply_to_sender,
     :metadata,
     :thread_id,
+    :edit_history,
     :created_at
   ]
 
@@ -68,6 +69,7 @@ defmodule ChatService.Messages.Message do
       reply_to_sender: row["reply_to_sender"],
       metadata: decode_metadata(row["metadata"]),
       thread_id: blank_to_nil(row["thread_id"]),
+      edit_history: ChatService.Messages.EditPolicy.decode(row["edit_history"]),
       created_at: row["created_at"]
     }
   end
@@ -93,6 +95,7 @@ defmodule ChatService.Messages.Message do
       reply_to_sender: message.reply_to_sender,
       metadata: message.metadata,
       thread_id: message.thread_id,
+      edit_history: message.edit_history || [],
       created_at: format_datetime(message.created_at)
     }
   end

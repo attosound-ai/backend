@@ -272,6 +272,9 @@ defmodule ChatServiceWeb.MessageController do
         {:error, :not_found} ->
           conn |> put_status(404) |> json(%{success: false, data: nil, error: "Message not found"})
 
+        {:error, reason} when reason in [:edit_window_closed, :edit_limit_reached, :not_editable] ->
+          conn |> put_status(422) |> json(%{success: false, data: nil, error: Atom.to_string(reason)})
+
         {:error, _reason} ->
           conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to edit message"})
       end

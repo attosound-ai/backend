@@ -241,6 +241,9 @@ defmodule ChatServiceWeb.ChatChannel do
       {:error, :not_found} ->
         {:reply, {:error, %{reason: "message_not_found"}}, socket}
 
+      {:error, reason} when reason in [:edit_window_closed, :edit_limit_reached, :not_editable] ->
+        {:reply, {:error, %{reason: Atom.to_string(reason)}}, socket}
+
       {:error, reason} ->
         Logger.error("Failed to edit message: #{inspect(reason)}")
         {:reply, {:error, %{reason: "edit_failed"}}, socket}
