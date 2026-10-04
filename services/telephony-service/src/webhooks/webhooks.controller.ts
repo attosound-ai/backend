@@ -171,6 +171,10 @@ export class WebhooksController {
         name: "TargetUserId",
         value: String(assignment.userId),
       });
+      // Every <Client> leg of this dial is the same incoming call. The app uses
+      // it to reject the sibling invites when the user declines one, so the
+      // caller hears busy right away instead of ringing out the 30 s timeout.
+      client.parameter({ name: "ParentCallSid", value: callSid });
     }
 
     this.logger.log(
