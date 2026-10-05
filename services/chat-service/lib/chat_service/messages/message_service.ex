@@ -239,11 +239,11 @@ defmodule ChatService.Messages.MessageService do
   only the sender, text only, within 15 minutes, at most 5 edits. The replaced
   version goes to `edit_history` so "Edited" can show previous versions.
   """
-  def edit_message(message_id, conversation_id, sender_id, new_content) do
+  def edit_message(message_id, conversation_id, sender_id, new_content, opts \\ []) do
     with {:ok, row} <- fetch_for_edit(message_id, conversation_id),
          history = EditPolicy.decode(row && row["edit_history"]),
          now = DateTime.utc_now(),
-         :ok <- EditPolicy.check(row, sender_id, history, now) do
+         :ok <- EditPolicy.check(row, sender_id, history, now, opts) do
       new_history =
         EditPolicy.append(history, row["content"], row["edited_at"] || row["created_at"])
 
@@ -271,7 +271,7 @@ defmodule ChatService.Messages.MessageService do
             is_edited: true,
             edited_at: DateTime.to_iso8601(now),
             edit_history: new_history,
-            edits_left: EditPolicy.max_edits() - length(new_history)
+            edits_left: max(EditPolicy.max_edits() - length(new_history), 0)
           }
 
           broadcast_event(conversation_id, :message_edited, payload)

@@ -40,6 +40,23 @@ defmodule ChatService.Messages.EditPolicyTest do
             %{"content" => "second", "since" => "2026-10-04T12:00:30Z"}] == h
   end
 
+  test "clients that do not know the rules keep editing without limits (builds up to 229)" do
+    late = DateTime.add(@sent, 3 * 3600)
+    six = List.duplicate(%{"content" => "x"}, 6)
+    assert :ok == EditPolicy.check(row(), "282", six, late, enforce: false)
+    assert :ok == EditPolicy.check(row(%{"content_type" => "image"}), "282", [], late, enforce: false)
+    # ownership and deletion still apply to everyone
+    assert {:error, :forbidden} == EditPolicy.check(row(), "152", [], late, enforce: false)
+    assert {:error, :not_found} == EditPolicy.check(row(%{"is_deleted" => true}), "282", [], late, enforce: false)
+  end
+
+  test "history is capped so unlimited old edits cannot grow it forever" do
+    h = Enum.reduce(1..30, [], fn i, acc -> EditPolicy.append(acc, "v#{i}", @sent) end)
+    assert length(h) == 20
+    assert List.last(h)["content"] == "v30"
+    assert hd(h)["content"] == "v11"
+  end
+
   test "decode tolerates empty and broken values" do
     assert [] == EditPolicy.decode(nil)
     assert [] == EditPolicy.decode("")

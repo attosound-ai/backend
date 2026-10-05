@@ -262,7 +262,9 @@ defmodule ChatServiceWeb.MessageController do
       |> put_status(400)
       |> json(%{success: false, data: nil, error: "content is required"})
     else
-      case MessageService.edit_message(message_id, chat_id, user_id, content) do
+      enforce = params["enforce_rules"] in [true, "true"]
+
+      case MessageService.edit_message(message_id, chat_id, user_id, content, enforce: enforce) do
         {:ok, payload} ->
           conn |> put_status(200) |> json(%{success: true, data: payload})
 

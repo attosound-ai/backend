@@ -227,11 +227,19 @@ defmodule ChatServiceWeb.ChatChannel do
   Payload: %{"message_id" => string, "content" => string}
   Only the original sender can edit.
   """
-  def handle_in("edit_message", %{"message_id" => message_id, "content" => content}, socket) do
+  def handle_in(
+        "edit_message",
+        %{"message_id" => message_id, "content" => content} = payload,
+        socket
+      ) do
     user_id = socket.assigns.user_id
     conversation_id = socket.assigns.conversation_id
+    # Only clients that know the iMessage limits ask the server to enforce them.
+    enforce = payload["enforce_rules"] == true
 
-    case MessageService.edit_message(message_id, conversation_id, user_id, content) do
+    case MessageService.edit_message(message_id, conversation_id, user_id, content,
+           enforce: enforce
+         ) do
       {:ok, _payload} ->
         {:reply, {:ok, %{status: "edited"}}, socket}
 

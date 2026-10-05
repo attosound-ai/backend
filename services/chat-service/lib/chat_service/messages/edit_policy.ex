@@ -9,6 +9,7 @@ defmodule ChatService.Messages.EditPolicy do
 
   @window_seconds 15 * 60
   @max_edits 5
+  @history_cap 20
 
   def window_seconds, do: @window_seconds
   def max_edits, do: @max_edits
@@ -17,13 +18,18 @@ defmodule ChatService.Messages.EditPolicy do
   Decides whether `row` (as read from Cassandra) may be edited by `sender_id`
   at `now`. `history` is the decoded list of previous versions.
   """
-  def check(row, sender_id, history, now) do
+  def check(row, sender_id, history, now, opts \\ []) do
+    # Builds up to 229 have no window, no edit limit and cannot explain a
+    # refusal (the edit just reverts). Ownership always applies; the iMessage
+    # limits apply only when the client says it knows them (enforce: true).
+    enforce = Keyword.get(opts, :enforce, true)
     created_at = row["created_at"]
 
     cond do
       is_nil(row) -> {:error, :not_found}
       to_string(row["sender_id"]) != to_string(sender_id) -> {:error, :forbidden}
       row["is_deleted"] == true -> {:error, :not_found}
+      not enforce -> :ok
       (row["content_type"] || "text") != "text" -> {:error, :not_editable}
       is_nil(created_at) -> {:error, :edit_window_closed}
       DateTime.diff(now, created_at, :second) > @window_seconds -> {:error, :edit_window_closed}
@@ -37,7 +43,9 @@ defmodule ChatService.Messages.EditPolicy do
   appended with the moment it started being the visible one.
   """
   def append(history, previous_content, previous_since) do
-    history ++ [%{"content" => previous_content, "since" => format(previous_since)}]
+    # Old clients can edit without limit: keep the newest versions only.
+    (history ++ [%{"content" => previous_content, "since" => format(previous_since)}])
+    |> Enum.take(-@history_cap)
   end
 
   def decode(nil), do: []
