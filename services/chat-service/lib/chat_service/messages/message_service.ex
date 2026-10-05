@@ -5,6 +5,7 @@ defmodule ChatService.Messages.MessageService do
   Handles sending messages (insert into Cassandra, update conversations,
   broadcast via Phoenix Channel, publish to Kafka) and retrieving message history.
   """
+  alias ChatService.Messages.EditPolicy
 
   alias ChatService.Messages.Message
   alias ChatService.Messages.Authorizer
@@ -234,48 +235,76 @@ defmodule ChatService.Messages.MessageService do
   end
 
   @doc """
-  Edit a message's content. Only the original sender can edit.
+  Edit a message's content, iMessage rules (ChatService.Messages.EditPolicy):
+  only the sender, text only, within 15 minutes, at most 5 edits. The replaced
+  version goes to `edit_history` so "Edited" can show previous versions.
   """
-  def edit_message(message_id, conversation_id, sender_id, new_content) do
-    # Verify sender owns the message
-    case verify_sender(message_id, conversation_id, sender_id) do
-      :ok ->
-        now = DateTime.utc_now()
+  def edit_message(message_id, conversation_id, sender_id, new_content, opts \\ []) do
+    with {:ok, row} <- fetch_for_edit(message_id, conversation_id),
+         history = EditPolicy.decode(row && row["edit_history"]),
+         now = DateTime.utc_now(),
+         :ok <- EditPolicy.check(row, sender_id, history, now, opts) do
+      new_history =
+        EditPolicy.append(history, row["content"], row["edited_at"] || row["created_at"])
 
-        query = """
-        UPDATE messages
-        SET content = ?, is_edited = true, edited_at = ?
-        WHERE conversation_id = ? AND message_id = ?
-        """
+      query = """
+      UPDATE messages
+      SET content = ?, is_edited = true, edited_at = ?, edit_history = ?
+      WHERE conversation_id = ? AND message_id = ?
+      """
 
-        params = %{
-          "content" => {"text", new_content},
-          "edited_at" => {"timestamp", now},
-          "conversation_id" => {"uuid", conversation_id},
-          "message_id" => {"timeuuid", message_id}
-        }
+      params = %{
+        "content" => {"text", new_content},
+        "edited_at" => {"timestamp", now},
+        "edit_history" => {"text", Jason.encode!(new_history)},
+        "conversation_id" => {"uuid", conversation_id},
+        "message_id" => {"timeuuid", message_id}
+      }
 
-        case Repo.execute_prepared(query, params) do
-          {:ok, _} ->
-            payload = %{
-              message_id: message_id,
-              conversation_id: conversation_id,
-              sender_id: sender_id,
-              content: new_content,
-              is_edited: true,
-              edited_at: DateTime.to_iso8601(now)
-            }
+      case Repo.execute_prepared(query, params) do
+        {:ok, _} ->
+          payload = %{
+            message_id: message_id,
+            conversation_id: conversation_id,
+            sender_id: sender_id,
+            content: new_content,
+            is_edited: true,
+            edited_at: DateTime.to_iso8601(now),
+            edit_history: new_history,
+            edits_left: max(EditPolicy.max_edits() - length(new_history), 0)
+          }
 
-            broadcast_event(conversation_id, :message_edited, payload)
-            {:ok, payload}
+          broadcast_event(conversation_id, :message_edited, payload)
+          {:ok, payload}
 
-          {:error, reason} ->
-            Logger.error("Failed to edit message: #{inspect(reason)}")
-            {:error, :update_failed}
+        {:error, reason} ->
+          Logger.error("Failed to edit message: #{inspect(reason)}")
+          {:error, :update_failed}
+      end
+    end
+  end
+
+  defp fetch_for_edit(message_id, conversation_id) do
+    query = """
+    SELECT sender_id, content, content_type, is_deleted, created_at, edited_at, edit_history
+    FROM messages
+    WHERE conversation_id = ? AND message_id = ?
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id}
+    }
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, result} ->
+        case result |> Enum.to_list() |> List.first() do
+          nil -> {:error, :not_found}
+          row -> {:ok, row}
         end
 
-      {:error, reason} ->
-        {:error, reason}
+      {:error, _} ->
+        {:error, :query_failed}
     end
   end
 

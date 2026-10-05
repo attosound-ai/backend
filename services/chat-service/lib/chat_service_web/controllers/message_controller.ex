@@ -262,7 +262,9 @@ defmodule ChatServiceWeb.MessageController do
       |> put_status(400)
       |> json(%{success: false, data: nil, error: "content is required"})
     else
-      case MessageService.edit_message(message_id, chat_id, user_id, content) do
+      enforce = params["enforce_rules"] in [true, "true"]
+
+      case MessageService.edit_message(message_id, chat_id, user_id, content, enforce: enforce) do
         {:ok, payload} ->
           conn |> put_status(200) |> json(%{success: true, data: payload})
 
@@ -271,6 +273,9 @@ defmodule ChatServiceWeb.MessageController do
 
         {:error, :not_found} ->
           conn |> put_status(404) |> json(%{success: false, data: nil, error: "Message not found"})
+
+        {:error, reason} when reason in [:edit_window_closed, :edit_limit_reached, :not_editable] ->
+          conn |> put_status(422) |> json(%{success: false, data: nil, error: Atom.to_string(reason)})
 
         {:error, _reason} ->
           conn |> put_status(500) |> json(%{success: false, data: nil, error: "Failed to edit message"})

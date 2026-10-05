@@ -163,6 +163,8 @@ defmodule ChatService.Application do
       # Sep 2026: media and effects metadata (JSON) and Slack style threads.
       "ALTER TABLE #{keyspace}.messages ADD metadata text",
       "ALTER TABLE #{keyspace}.messages ADD thread_id text",
+      # Oct 2026: iMessage style edits keep the replaced versions (JSON list).
+      "ALTER TABLE #{keyspace}.messages ADD edit_history text",
       # Sep 2026: deleting a chat from the list. The row stays so the other
       # side can still reach this user and the conversation keeps its id; it
       # is hidden from the list, and `cleared_at` keeps the history that was
