@@ -423,27 +423,40 @@ defmodule ChatService.Messages.MessageService do
   end
 
   defp publish_kafka_event(%Message{} = message, recipient_id \\ nil) do
-    data =
-      %{
-        conversation_id: message.conversation_id,
-        message_id: message.message_id,
-        sender_id: message.sender_id,
-        content: message.content,
-        content_type: message.content_type,
-        created_at: format_datetime(message.created_at)
-      }
-      |> then(fn d ->
-        if recipient_id, do: Map.put(d, :recipient_id, recipient_id), else: d
-      end)
-
     event = %{
       event: "message.sent",
-      data: data,
+      data: message_sent_data(message, recipient_id),
       timestamp: DateTime.to_iso8601(DateTime.utc_now())
     }
 
     KafkaProducer.produce("message.sent", message.conversation_id, event)
   end
+
+  @doc """
+  The `data` of the `message.sent` Kafka event.
+
+  `metadata` travels with it because a media message keeps only its hosted
+  URL in `content`: whoever writes the push needs the type and the details
+  (voice note length, file name, shared contact) to describe the message
+  instead of showing that URL. Absent when the message has none, the same
+  way `recipient_id` is.
+  """
+  def message_sent_data(%Message{} = message, recipient_id \\ nil) do
+    %{
+      conversation_id: message.conversation_id,
+      message_id: message.message_id,
+      sender_id: message.sender_id,
+      content: message.content,
+      content_type: message.content_type,
+      created_at: format_datetime(message.created_at)
+    }
+    |> put_present(:recipient_id, recipient_id)
+    |> put_present(:metadata, message.metadata)
+  end
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, _key, value) when value == %{}, do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   defp format_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
   defp format_datetime(other), do: to_string(other)

@@ -11,6 +11,7 @@ import { FeedRepository } from "../redis/repositories/feed.repository";
 import { RedisClientProvider } from "../redis/redis-client.provider";
 import { PrismaService } from "../prisma/prisma.service";
 import { PushService } from "../push/push.service";
+import { chatPushPreview } from "../push/chat-push-preview";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
 import {
   officialFollowLog,
@@ -496,6 +497,8 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     conversation_id?: string;
     message_id: string;
     content?: string;
+    content_type?: string;
+    metadata?: unknown;
   }): Promise<void> {
     if (!data.recipient_id) {
       this.logger.warn(
@@ -530,11 +533,13 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       .getUser(data.sender_id)
       .then((actor) => {
         const senderName = actor?.username || "Someone";
-        const messagePreview = data.content
-          ? data.content.length > 100
-            ? data.content.slice(0, 100) + "…"
-            : data.content
-          : undefined;
+        // A media message keeps its hosted URL in `content`: the body is
+        // decided by type ("📹 Video"), and only text is shown as written.
+        const messagePreview = chatPushPreview(
+          data.content_type,
+          data.content,
+          data.metadata,
+        );
         this.pushService
           .sendPush(
             data.recipient_id!,
