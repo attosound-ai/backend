@@ -102,7 +102,14 @@ defmodule ChatService.Messages.MessageService do
 
         broadcast_message(conversation_id, message)
         recipient_id = Keyword.get(opts, :recipient_id)
-        notify_participants(conversation_id, sender_id, recipient_id, content)
+
+        notify_participants(
+          conversation_id,
+          sender_id,
+          recipient_id,
+          conversation_updated_payload(conversation_id, sender_id, content, content_type)
+        )
+
         publish_kafka_event(message, recipient_id)
 
         {:ok, message}
@@ -180,13 +187,20 @@ defmodule ChatService.Messages.MessageService do
 
         # Load reactions for all messages in batch
         message_ids = Enum.map(messages, & &1.message_id)
+
         reactions_map =
           case ReactionService.get_reactions_batch(message_ids) do
             {:ok, map} -> map
             _ -> %{}
           end
 
-        {:ok, %{messages: messages, reactions: reactions_map, next_cursor: next_cursor, has_more: has_more}}
+        {:ok,
+         %{
+           messages: messages,
+           reactions: reactions_map,
+           next_cursor: next_cursor,
+           has_more: has_more
+         }}
 
       {:error, reason} ->
         Logger.error("Failed to get messages: #{inspect(reason)}")
@@ -391,15 +405,9 @@ defmodule ChatService.Messages.MessageService do
   # while the sender's socket was down) reached the other phone as a push but
   # never moved the open conversation list (client, Oct 3 2026: "if I'm in
   # the message section I won't get it until I close the app").
-  defp notify_participants(_conversation_id, _sender_id, nil, _content), do: :ok
+  defp notify_participants(_conversation_id, _sender_id, nil, _payload), do: :ok
 
-  defp notify_participants(conversation_id, sender_id, recipient_id, content) do
-    payload = %{
-      conversation_id: conversation_id,
-      last_message: content,
-      sender_id: sender_id
-    }
-
+  defp notify_participants(_conversation_id, sender_id, recipient_id, payload) do
     ChatServiceWeb.Endpoint.broadcast("user:#{sender_id}", "conversation_updated", payload)
 
     if to_string(recipient_id) != to_string(sender_id) do
@@ -498,7 +506,7 @@ defmodule ChatService.Messages.MessageService do
     }
 
     with {:ok, page} <- Repo.execute_prepared(query, params) do
-      ids = [thread_id | Enum.map(page, & to_string(&1["message_id"]))] |> Enum.uniq()
+      ids = [thread_id | Enum.map(page, &to_string(&1["message_id"]))] |> Enum.uniq()
 
       messages =
         ids
@@ -628,6 +636,26 @@ defmodule ChatService.Messages.MessageService do
       {:ok, message} -> preview_for(message.content, message.content_type, nil)
       _ -> ""
     end
+  end
+
+  @doc """
+  What the phones get on `conversation_updated`. The app shows `last_message`
+  in the banner that drops in for a new message, and for a photo or a video
+  the raw content is the hosted address of the file (owner, Oct 6 2026: the
+  notification of a video "is the Cloudinary link"). So a media message goes
+  out as the same `[video]` marker the conversation list stores, which every
+  build already turns into its label, plus the type for the builds that
+  localise from it. Text is sent as written.
+  """
+  def conversation_updated_payload(conversation_id, sender_id, content, content_type) do
+    type = if is_binary(content_type) and content_type != "", do: content_type, else: "text"
+
+    %{
+      conversation_id: conversation_id,
+      last_message: preview_for(content, type, nil),
+      content_type: type,
+      sender_id: sender_id
+    }
   end
 
   defp preview_for(content, "text", nil), do: content
