@@ -4,6 +4,7 @@ import * as protoLoader from '@grpc/proto-loader';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 import { CountsRepository } from '../redis/repositories/counts.repository';
+import { visibleComments } from '../interactions/visible-comments';
 import { FollowGraphRepository } from '../redis/repositories/follow-graph.repository';
 
 @Injectable()
@@ -129,10 +130,10 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
         this.counts.getOrCompute("likes", contentId, () =>
           this.prisma.interaction.count({ where: { contentId, type: "LIKE" } }),
         ),
+        // Comments live in their own table; this read the old
+        // `interactions` rows and wrote that number over the real one.
         this.counts.getOrCompute("comments", contentId, () =>
-          this.prisma.interaction.count({
-            where: { contentId, type: "COMMENT" },
-          }),
+          this.prisma.comment.count({ where: visibleComments(contentId) }),
         ),
         this.counts.getOrCompute("shares", contentId, () =>
           this.prisma.interaction.count({

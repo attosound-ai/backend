@@ -13,6 +13,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { PushService } from "../push/push.service";
 import { chatPushPreview } from "../push/chat-push-preview";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
+import { visibleComments } from "../interactions/visible-comments";
 import {
   officialFollowLog,
   errorFields,
@@ -733,7 +734,9 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           // breaking the entire user.deleted cleanup for every account that
           // had reposts in their feed scope.
           if (type === "comments") {
-            dbCount = await this.prisma.comment.count({ where: { contentId } });
+            dbCount = await this.prisma.comment.count({
+              where: visibleComments(contentId),
+            });
           } else if (type === "reposts") {
             dbCount = await this.prisma.repost.count({ where: { contentId } });
           } else {

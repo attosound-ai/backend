@@ -37,6 +37,28 @@ describe("CounterCache", () => {
         store.set(k, String(next));
         return next;
       }),
+      // increment and decrement run as one script each since Aug 23 2026.
+      // This stands in for Redis running them: the same outcomes the scripts
+      // spell out (a key that is not there is left alone and answers -1; a
+      // decrement below zero is put back at 0, keeping its expiry, and
+      // answers -2). TTLs are not touched, as INCR, DECR and KEEPTTL do.
+      eval: jest.fn(async (script: string, _keys: number, k: string) => {
+        if (!store.has(k)) return -1;
+        const current = Number.parseInt(store.get(k)!, 10) || 0;
+        if (script.includes("'INCR'")) {
+          store.set(k, String(current + 1));
+          return current + 1;
+        }
+        if (script.includes("'DECR'")) {
+          if (current - 1 < 0) {
+            store.set(k, "0");
+            return -2;
+          }
+          store.set(k, String(current - 1));
+          return current - 1;
+        }
+        throw new Error(`script the test does not know: ${script}`);
+      }),
       del: jest.fn(async (k: string) => {
         const had = store.has(k);
         store.delete(k);
@@ -151,6 +173,34 @@ describe("CounterCache", () => {
       store.set("test:count:user-1", "5");
       const result = await cache.decrement("user-1");
       expect(result).toBe(4);
+    });
+
+    // The Aug 23 2026 rule: a bare INCR or DECR on a key that is not there
+    // creates it with no expiry, and the number then never gets counted
+    // again from the database.
+    it("increment leaves a counter that was never read alone", async () => {
+      const result = await cache.increment("user-1");
+
+      expect(result).toBe(-1);
+      expect(store.has("test:count:user-1")).toBe(false);
+      expect(await cache.getOrCompute("user-1", async () => 7)).toBe(7);
+      expect(ttls.get("test:count:user-1")).toBe(600);
+    });
+
+    it("decrement leaves a counter that was never read alone", async () => {
+      const result = await cache.decrement("user-1");
+
+      expect(result).toBe(-1);
+      expect(store.has("test:count:user-1")).toBe(false);
+    });
+
+    it("decrement keeps the expiry of the counter", async () => {
+      await cache.getOrCompute("user-1", async () => 5);
+
+      await cache.decrement("user-1");
+
+      expect(store.get("test:count:user-1")).toBe("4");
+      expect(ttls.get("test:count:user-1")).toBe(600);
     });
   });
 
