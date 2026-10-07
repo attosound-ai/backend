@@ -22,6 +22,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import plan_catalog
+from app.billing_mode import stripe_mode
 from app.config import settings
 from app.database import get_session
 from app.entitlements import ENTITLEMENT_CATALOG, ENTITLEMENT_KEYS
@@ -522,6 +523,10 @@ async def admin_metrics(session: AsyncSession = Depends(get_session)) -> ApiResp
                 "required": await plan_catalog.paywall_required(session),
                 "paidFeatures": await plan_catalog.paid_features(session),
             },
+            # Says whether revenue, MRR and ARR above are real money: with a
+            # Stripe test key they come from test cards and from plans picked
+            # for free, and the panel labels them as such.
+            "billing": {"stripeMode": stripe_mode(settings.stripe_secret_key)},
             "generatedAt": now.isoformat(),
         },
     )
