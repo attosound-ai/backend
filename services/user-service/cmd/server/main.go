@@ -81,6 +81,21 @@ func main() {
 
 	authService := services.NewAuthService(repo, jwtMgr, producer, cfg.OTPServiceURL)
 	userService := services.NewUserService(repo, producer)
+
+	// Real followers and posts for the operator list come from the social
+	// service. Optional: without SOCIAL_SERVICE_URL the list keeps serving the
+	// stored columns. The stats route sits behind the social service guard,
+	// which only trusts a JWT signed with the shared secret, so each page
+	// presents a one minute service token (no user, no role).
+	socialStats := services.NewSocialStatsClient(cfg.SocialServiceURL, func() (string, error) {
+		return jwtMgr.GenerateServiceToken(time.Minute)
+	})
+	userService.SetSocialStats(socialStats)
+	if socialStats.Enabled() {
+		log.Printf("[STARTUP] Operator list reads live stats from %s", cfg.SocialServiceURL)
+	} else {
+		log.Println("[STARTUP] SOCIAL_SERVICE_URL not set: operator list serves stored counts")
+	}
 	signupService := services.NewSignupService(signupRepo, repo, jwtMgr, producer, cfg.OTPServiceURL)
 
 	inmateService := services.NewInmateService()

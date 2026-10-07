@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -24,6 +26,9 @@ type fakeAccounts struct {
 	listFilter  repositories.AdminUserFilter
 	listErr     error
 	listCalls   int
+	// listStats, si está, pide los números reales con el contexto que le pasa
+	// el handler, igual que hace el servicio de verdad.
+	listStats *services.SocialStatsClient
 }
 
 func (f *fakeAccounts) GetUserByID(_ context.Context, id string) (*models.UserProfile, error) {
@@ -51,6 +56,7 @@ func (f *fakeAccounts) ListDeletions(string, int, int) (*services.DeletionList, 
 }
 
 func (f *fakeAccounts) ListUsersForAdmin(
+	ctx context.Context,
 	filter repositories.AdminUserFilter,
 ) (*services.AdminUserList, error) {
 	f.listCalls++
@@ -58,8 +64,12 @@ func (f *fakeAccounts) ListUsersForAdmin(
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
+	row := services.AdminUserRow{ID: 266, Username: "arami"}
+	if st, ok := f.listStats.FetchStats(ctx, []uint64{row.ID})[row.ID]; ok {
+		row.FollowersCount, row.PostsCount, row.StatsLive = st.Followers, st.Posts, true
+	}
 	return &services.AdminUserList{
-		Users: []services.AdminUserRow{{ID: 266, Username: "arami"}},
+		Users: []services.AdminUserRow{row},
 		Total: 1,
 		Limit: 50,
 	}, nil
@@ -269,6 +279,68 @@ func TestListUsersSinFiltroSirveLaPrimeraPagina(t *testing.T) {
 	}
 	if f.listFilter.Limit != 0 || f.listFilter.Offset != 0 {
 		t.Fatalf("sin query el filtro va vacío y lo decide el repositorio: %+v", f.listFilter)
+	}
+}
+
+// El handler pasa el contexto de la petición de Fiber, que es el de fasthttp
+// y no uno normal. El cliente de números tiene que funcionar colgado de él, y
+// la respuesta tiene que llevar los números reales y statsLive sin perder los
+// campos que ya lee el panel.
+func TestListUsersConElContextoDeFiberTraeNumerosReales(t *testing.T) {
+	social := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/users/266/stats" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"followersCount":17,"followingCount":3,"postsCount":48},"error":null}`))
+	}))
+	defer social.Close()
+
+	leer := func(f *fakeAccounts) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/users/admin", nil)
+		req.Header.Set(middleware.AdminTokenHeader, testSecret)
+		res, err := newAdminApp(f, testSecret).Test(req, -1)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		defer res.Body.Close()
+		if res.StatusCode != fiber.StatusOK {
+			t.Fatalf("esperaba 200, dio %d", res.StatusCode)
+		}
+		var body struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Users []map[string]any `json:"users"`
+				Total float64          `json:"total"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+			t.Fatalf("respuesta ilegible: %v", err)
+		}
+		if !body.Success || len(body.Data.Users) != 1 || body.Data.Total != 1 {
+			t.Fatalf("la forma de la respuesta cambió: %+v", body)
+		}
+		return body.Data.Users[0]
+	}
+
+	conNumeros := accounts()
+	conNumeros.listStats = services.NewSocialStatsClient(social.URL, nil)
+	fila := leer(conNumeros)
+	if fila["followersCount"] != float64(17) || fila["postsCount"] != float64(48) || fila["statsLive"] != true {
+		t.Fatalf("esperaba 17 seguidores, 48 publicaciones y statsLive true: %+v", fila)
+	}
+	if fila["username"] != "arami" || fila["id"] != float64(266) {
+		t.Fatalf("el resto de la fila tiene que seguir igual: %+v", fila)
+	}
+
+	// Sin servicio social configurado la fila sale como siempre, con los
+	// números guardados, y lo dice.
+	sinServicio := accounts()
+	fila = leer(sinServicio)
+	if fila["followersCount"] != float64(0) || fila["postsCount"] != float64(0) || fila["statsLive"] != false {
+		t.Fatalf("sin servicio social esperaba lo guardado y statsLive false: %+v", fila)
 	}
 }
 

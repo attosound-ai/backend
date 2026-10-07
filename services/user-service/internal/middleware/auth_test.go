@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -143,5 +144,70 @@ func TestRequireAuth_SignupTokenForbidden(t *testing.T) {
 	}
 	if resp.StatusCode != fiber.StatusForbidden {
 		t.Fatalf("expected 403 for signup token on user route, got %d", resp.StatusCode)
+	}
+}
+
+// A service token is what this service presents to a sibling one. It must be
+// a valid signature for the shared secret, name no user and no role, expire
+// with the ttl, and never open a user route here.
+func TestGenerateServiceToken_NamesNoUserAndExpires(t *testing.T) {
+	mgr := newTestMgr()
+
+	tok, err := mgr.GenerateServiceToken(time.Minute)
+	if err != nil {
+		t.Fatalf("issue service token: %v", err)
+	}
+	claims, err := mgr.ValidateToken(tok)
+	if err != nil {
+		t.Fatalf("validate service token: %v", err)
+	}
+	if claims.UserID != ServiceTokenSubject {
+		t.Fatalf("subject = %q, want %q", claims.UserID, ServiceTokenSubject)
+	}
+	if _, err := strconv.ParseUint(claims.UserID, 10, 64); err == nil {
+		t.Fatalf("subject %q must never parse as a user ID", claims.UserID)
+	}
+	if claims.Role != "" || claims.Username != "" || claims.Email != "" {
+		t.Fatalf("a service token carries no identity: %+v", claims)
+	}
+	if claims.EffectiveScope() != ScopeService {
+		t.Fatalf("scope = %q, want %q", claims.EffectiveScope(), ScopeService)
+	}
+	if claims.Issuer != ServiceTokenIssuer {
+		t.Fatalf("issuer = %q, want %q", claims.Issuer, ServiceTokenIssuer)
+	}
+	if left := time.Until(claims.ExpiresAt.Time); left <= 0 || left > time.Minute {
+		t.Fatalf("expires in %s, want within one minute", left)
+	}
+
+	expired, err := mgr.GenerateServiceToken(-time.Second)
+	if err != nil {
+		t.Fatalf("issue expired token: %v", err)
+	}
+	if _, err := mgr.ValidateToken(expired); err == nil {
+		t.Fatal("an expired service token must not validate")
+	}
+}
+
+func TestRequireAuth_ServiceTokenForbidden(t *testing.T) {
+	mgr := newTestMgr()
+	tok, err := mgr.GenerateServiceToken(time.Minute)
+	if err != nil {
+		t.Fatalf("issue service token: %v", err)
+	}
+
+	app := fiber.New()
+	app.Get("/protected", RequireAuth(mgr), func(c *fiber.Ctx) error {
+		return c.SendString("should not reach")
+	})
+
+	req := httptest.NewRequest("GET", "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("Test request: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("a service token must not open a user route, got %d", resp.StatusCode)
 	}
 }

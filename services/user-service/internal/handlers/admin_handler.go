@@ -19,7 +19,7 @@ import (
 type accountAdmin interface {
 	GetUserByID(ctx context.Context, id string) (*models.UserProfile, error)
 	DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool, meta services.DeletionMeta) error
-	ListUsersForAdmin(f repositories.AdminUserFilter) (*services.AdminUserList, error)
+	ListUsersForAdmin(ctx context.Context, f repositories.AdminUserFilter) (*services.AdminUserList, error)
 	ListDeletions(search string, limit, offset int) (*services.DeletionList, error)
 	RelinkOrphanedCreator(ctx context.Context, req services.RelinkRequest) (*services.RelinkResult, error)
 }
@@ -187,7 +187,7 @@ func (h *AdminHandler) ListUsers(c *fiber.Ctx) error {
 		filtro.Offset = n
 	}
 
-	list, err := h.accounts.ListUsersForAdmin(filtro)
+	list, err := h.accounts.ListUsersForAdmin(c.Context(), filtro)
 	if err != nil {
 		log.Printf("[ADMIN] list users failed: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{

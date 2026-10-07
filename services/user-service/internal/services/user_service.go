@@ -19,6 +19,9 @@ import (
 type UserService struct {
 	repo     *repositories.UserRepository
 	producer *kafka.Producer
+	// socialStats da los números reales a la lista de operador. Nil o apagado:
+	// la lista sirve las columnas guardadas.
+	socialStats *SocialStatsClient
 }
 
 // NewUserService creates a new UserService instance.
@@ -27,6 +30,12 @@ func NewUserService(repo *repositories.UserRepository, producer *kafka.Producer)
 		repo:     repo,
 		producer: producer,
 	}
+}
+
+// SetSocialStats conecta el cliente del servicio social. Es opcional y solo
+// lo usa la lista de operador; las rutas públicas no lo tocan.
+func (s *UserService) SetSocialStats(c *SocialStatsClient) {
+	s.socialStats = c
 }
 
 // GetUserByID retrieves a single user by their ID string.
@@ -423,6 +432,10 @@ func (s *UserService) GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error
 
 // AdminUserRow es una fila de la lista de operador: lo justo para identificar
 // una cuenta y saber cómo entró, sin arrastrar la ficha entera.
+//
+// StatsLive dice de dónde salen FollowersCount y PostsCount: true si los acaba
+// de dar el servicio social (los mismos que enseña el perfil de la app), false
+// si son las columnas guardadas, que nadie actualiza.
 type AdminUserRow struct {
 	ID               uint64     `json:"id"`
 	Username         string     `json:"username"`
@@ -438,6 +451,7 @@ type AdminUserRow struct {
 	RepresentativeID *uint64    `json:"representativeId,omitempty"`
 	FollowersCount   int64      `json:"followersCount"`
 	PostsCount       int64      `json:"postsCount"`
+	StatsLive        bool       `json:"statsLive"`
 	CreatedAt        time.Time  `json:"createdAt"`
 	LastSeenAt       *time.Time `json:"lastSeenAt,omitempty"`
 }
@@ -464,8 +478,24 @@ func telefonoCompleto(cc, number *string) *string {
 	return &full
 }
 
+// applyLiveStats pisa seguidores y publicaciones con los números reales de las
+// filas que los tienen y marca cada fila con su origen. Las que no están en el
+// mapa conservan lo guardado y quedan con StatsLive en false.
+func applyLiveStats(rows []AdminUserRow, stats map[uint64]SocialStats) {
+	for i := range rows {
+		st, ok := stats[rows[i].ID]
+		rows[i].StatsLive = ok
+		if !ok {
+			continue
+		}
+		rows[i].FollowersCount = st.Followers
+		rows[i].PostsCount = st.Posts
+	}
+}
+
 // ListUsersForAdmin devuelve la página pedida de usuarios registrados.
 func (s *UserService) ListUsersForAdmin(
+	ctx context.Context,
 	f repositories.AdminUserFilter,
 ) (*AdminUserList, error) {
 	users, total, err := s.repo.ListForAdmin(f)
@@ -494,6 +524,18 @@ func (s *UserService) ListUsersForAdmin(
 			PostsCount:       u.PostsCount,
 			CreatedAt:        u.CreatedAt,
 		})
+	}
+
+	// Seguidores y publicaciones de verdad los calcula el servicio social; las
+	// columnas de users se quedaron en cero porque nada las actualiza. Se
+	// piden solo los de esta página, y la fila que no responde a tiempo se
+	// queda con lo guardado: nunca tumba ni frena la lista.
+	if s.socialStats.Enabled() && len(rows) > 0 {
+		ids := make([]uint64, len(rows))
+		for i := range rows {
+			ids[i] = rows[i].ID
+		}
+		applyLiveStats(rows, s.socialStats.FetchStats(ctx, ids))
 	}
 
 	// El recuento por rol es del total, no de la página: es la cabecera de la

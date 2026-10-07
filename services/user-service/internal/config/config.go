@@ -27,6 +27,11 @@ type Config struct {
 	// AdminAPISecret gates the operator only routes (X-Admin-Token). Empty
 	// means those routes answer 503: never open by default.
 	AdminAPISecret string
+	// SocialServiceURL is the base URL of the social service on the private
+	// network (for example http://social-service.railway.internal:3000). The
+	// operator list asks it for the real followers and posts of each row.
+	// Optional: empty means the list keeps serving the stored columns.
+	SocialServiceURL string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -49,6 +54,7 @@ func Load() *Config {
 		JWTRefreshExpiry: parseDuration(getEnv("JWT_REFRESH_EXPIRY", "168h"), 168*time.Hour),
 		OTPServiceURL:    getEnv("OTP_SERVICE_URL", "http://otp-service:8000"),
 		AdminAPISecret:   getEnv("ADMIN_API_SECRET", ""),
+		SocialServiceURL: getEnv("SOCIAL_SERVICE_URL", ""),
 	}
 
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
