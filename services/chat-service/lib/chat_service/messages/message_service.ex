@@ -11,6 +11,7 @@ defmodule ChatService.Messages.MessageService do
   alias ChatService.Messages.Authorizer
   alias ChatService.Messages.Persistence
   alias ChatService.Messages.EventPublisher
+  alias ChatService.Messages.ConversationPreview
   alias ChatService.Messages.ReactionCleaner
   alias ChatService.Messages.ThreadInbox
   alias ChatService.Conversations.ConversationService
@@ -361,6 +362,9 @@ defmodule ChatService.Messages.MessageService do
       }
 
       :ok = EventPublisher.publish_deleted(payload)
+      # After the thread knows: the list of both people stops showing the
+      # text of a message that is gone.
+      :ok = ConversationPreview.message_deleted(message_id, conversation_id, user_id)
       {:ok, payload}
     end
   end

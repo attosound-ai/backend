@@ -91,6 +91,91 @@ defmodule ChatService.Conversations.ConversationService do
   end
 
   @doc """
+  Replace the stored preview of a conversation for both participants, in
+  place: `updated_at`, `last_message_at` and `unread_count` are left alone, so
+  the conversation keeps its position and its badge.
+
+  `preview_for` receives each participant's user id and returns the text for
+  that person's row. `known_user_id` is one of the two participants; the other
+  is read from that row. Returns the `{user_id, preview}` pairs it wrote.
+  """
+  def replace_last_message(conversation_id, known_user_id, preview_for)
+      when is_function(preview_for, 1) do
+    known = to_string(known_user_id)
+
+    case conversation_row(known, conversation_id) do
+      nil ->
+        []
+
+      row ->
+        other = to_string(row["participant_id"])
+
+        [{known, row}, {other, conversation_row(other, conversation_id)}]
+        |> Enum.uniq_by(fn {user_id, _row} -> user_id end)
+        |> Enum.flat_map(fn
+          {_user_id, nil} ->
+            []
+
+          {user_id, participant_row} ->
+            preview = preview_for.(user_id)
+
+            case write_last_message(user_id, participant_row["updated_at"], conversation_id, preview) do
+              :ok -> [{user_id, preview}]
+              :error -> []
+            end
+        end)
+    end
+  end
+
+  defp conversation_row(user_id, conversation_id) do
+    query = """
+    SELECT user_id, conversation_id, participant_id, updated_at
+    FROM conversations
+    WHERE user_id = ?
+    """
+
+    case Repo.execute_prepared(query, %{"user_id" => {"text", user_id}}) do
+      {:ok, result} ->
+        result
+        |> Enum.to_list()
+        |> Enum.find(fn row -> to_string(row["conversation_id"]) == conversation_id end)
+
+      {:error, reason} ->
+        Logger.error("Conversation row lookup failed: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  defp write_last_message(user_id, updated_at, conversation_id, preview) do
+    query = """
+    UPDATE conversations
+    SET last_message = ?
+    WHERE user_id = ? AND updated_at = ? AND conversation_id = ?
+    IF EXISTS
+    """
+
+    # IF EXISTS on purpose. An UPDATE in Cassandra creates the row when it is
+    # not there, and `updated_at` is part of the key: a message arriving
+    # between the read and this write moves the conversation to a new row, and
+    # a plain UPDATE would leave a second, half empty conversation in the list.
+    params = %{
+      "last_message" => {"text", preview},
+      "user_id" => {"text", user_id},
+      "updated_at" => {"timestamp", updated_at},
+      "conversation_id" => {"uuid", conversation_id}
+    }
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Conversation preview write failed: #{inspect(reason)}")
+        :error
+    end
+  end
+
+  @doc """
   Reset unread count for a user's conversation.
   Since we need to delete and re-insert (Cassandra clustering key includes updated_at),
   we find the existing row first.
