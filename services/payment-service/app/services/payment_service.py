@@ -440,6 +440,16 @@ class PaymentService:
             return sub.bridge_number, "assigned"
         return None, "provisioning"
 
+    async def plan_grants_bridge_number(self, user_id: str) -> bool:
+        """Whether the plan of this user comes with a bridge number.
+
+        Reads only: a user without a subscription is judged by the free plan,
+        which is the one the claim would give it.
+        """
+        sub = await self.repo.get_active_subscription(user_id)
+        plan = sub.plan if sub else await plan_catalog.free_plan_key(self.session)
+        return "bridge_number" in await plan_catalog.entitlements_for(self.session, plan)
+
     async def claim_bridge_number(self, user_id: str) -> tuple[str | None, str]:
         """Ask for the bridge number a plan grants without a payment.
 

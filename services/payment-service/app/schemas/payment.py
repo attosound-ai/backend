@@ -41,9 +41,12 @@ class BridgeNumberResponse(BaseModel):
 
     bridge_number: str | None = Field(
         alias="bridgeNumber",
-        description="Assigned bridge phone number, or null if still being provisioned",
+        description="Assigned bridge phone number, or null when there is none",
     )
     status: str = Field(
         default="assigned",
-        description="'assigned' when number is ready, 'provisioning' when pending",
+        description=(
+            "'assigned' when the number is ready, 'provisioning' while one is on its "
+            "way, 'unavailable' when the account or its plan has no bridge number"
+        ),
     )

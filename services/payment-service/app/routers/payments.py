@@ -225,9 +225,20 @@ async def confirm_payment(
     )
 
 
+def bridge_number_owner(role: str, user_id: str, for_user_id: str | None) -> str | None:
+    """Whose bridge number a caller can be waiting for: a creator its own, a
+    representative the one of the creator it manages. Nobody else gets one."""
+    if role == "creator":
+        return user_id
+    if role == "representative" and for_user_id:
+        return for_user_id
+    return None
+
+
 @router.get("/bridge-number", response_model=ApiResponse, status_code=200)
 async def get_bridge_number(
     user_id: str = Depends(get_current_user_id),
+    role: str = Depends(get_current_user_role),
     for_user_id: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -236,12 +247,19 @@ async def get_bridge_number(
     Accepts optional `for_user_id` query param to check a linked creator's
     bridge number (used by representatives).
 
-    Returns status='provisioning' while pending, 'assigned' when ready,
-    or 'failed' if Twilio provisioning failed.
+    Returns status='assigned' when ready, 'provisioning' while a number is on
+    its way, and 'unavailable' when none ever will be: the account is not a
+    creator, or its plan has no bridge number. Before Oct 7 2026 those two
+    answered 'provisioning' as well, so the app showed "being set up" for
+    good and asked again every four seconds.
     """
     svc = PaymentService(session)
     target = for_user_id if for_user_id else user_id
     bridge_number, status = await svc.get_bridge_number(target)
+    if bridge_number is None and status == "provisioning":
+        owner = bridge_number_owner(role, user_id, for_user_id)
+        if owner is None or not await svc.plan_grants_bridge_number(owner):
+            status = "unavailable"
     return ApiResponse(
         success=True,
         data=BridgeNumberResponse(
@@ -264,11 +282,8 @@ async def claim_bridge_number(
     telephony for a number. Creators claim their own; a representative claims
     for the creator it manages through `for_user_id`.
     """
-    if role == "creator":
-        target = user_id
-    elif role == "representative" and for_user_id:
-        target = for_user_id
-    else:
+    target = bridge_number_owner(role, user_id, for_user_id)
+    if target is None:
         raise HTTPException(
             status_code=403,
             detail="Bridge numbers are only available for creator accounts",
