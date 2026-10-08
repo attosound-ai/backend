@@ -294,6 +294,11 @@ func sessionIDFromClaims(c *fiber.Ctx) (uuid.UUID, error) {
 
 // mapSignupErr maps service-layer sentinel errors to HTTP statuses.
 func mapSignupErr(c *fiber.Ctx, err error) error {
+	// The OTP service refusing the person (wrong code, too many attempts, too
+	// many codes asked for) answers with its own status and words.
+	if status, ok := services.OTPRefusal(err); ok {
+		return c.Status(status).JSON(models.APIResponse{Success: false, Error: err.Error()})
+	}
 	switch {
 	case errors.Is(err, services.ErrSignupSessionNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(models.APIResponse{Success: false, Error: err.Error()})

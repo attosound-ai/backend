@@ -43,10 +43,29 @@ var (
 // matched, so a mistyped code answered 500: the server error alarm fired for
 // a person who had typed one wrong digit, and it could not tell that apart
 // from a real failure.
-type otpRejected struct{ reason string }
+type otpRejected struct {
+	reason string
+	// status is the answer of the OTP service itself: 401 for a wrong code,
+	// 429 when the person ran out of attempts or asked for too many codes.
+	status int
+}
 
 func (e *otpRejected) Error() string        { return e.reason }
 func (e *otpRejected) Is(target error) bool { return target == ErrInvalidOTP }
+
+// OTPRefusal tells a handler that err is the OTP service saying no to the
+// person (not failing), and with which status it said so. Asking for too many
+// codes used to come out as 500 like everything else it refused.
+func OTPRefusal(err error) (status int, ok bool) {
+	var refusal *otpRejected
+	if !errors.As(err, &refusal) {
+		return 0, false
+	}
+	if refusal.status == http.StatusTooManyRequests {
+		return http.StatusTooManyRequests, true
+	}
+	return http.StatusUnauthorized, true
+}
 
 // SignupSessionTTL controls how long a started/verified session stays usable.
 // Past this, the cron flips it to abandoned; the unique partial index then
@@ -794,20 +813,28 @@ func (s *SignupService) sendOTP(identifier string, idType models.IdentifierType,
 	jsonBody, _ := json.Marshal(body)
 	resp, err := s.httpClient.Post(s.otpServiceURL+"/otp/send", "application/json", bytes.NewReader(jsonBody))
 	if err != nil {
-		return errors.New("failed to send code")
+		return ErrOTPUnavailable
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var otpResp struct {
-			Error string `json:"error"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&otpResp)
-		if otpResp.Error != "" {
-			return errors.New(otpResp.Error)
-		}
-		return errors.New("failed to send code")
+	if resp.StatusCode == http.StatusOK {
+		return nil
 	}
-	return nil
+	// The code could not be sent (the OTP service or the mail and SMS
+	// providers behind it failed): a real failure, and it answers as one.
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return ErrOTPUnavailable
+	}
+	// The OTP service said no to the person: too many codes asked for, a
+	// number it cannot send to. Its words and its status go back as they are.
+	var otpResp struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&otpResp)
+	reason := otpResp.Error
+	if reason == "" {
+		reason = "the code could not be sent"
+	}
+	return &otpRejected{reason: reason, status: resp.StatusCode}
 }
 
 func (s *SignupService) verifyOTP(identifier string, idType models.IdentifierType, code string) error {
@@ -839,7 +866,7 @@ func (s *SignupService) verifyOTP(identifier string, idType models.IdentifierTyp
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&otpResp)
 	if otpResp.Error != "" {
-		return &otpRejected{reason: otpResp.Error}
+		return &otpRejected{reason: otpResp.Error, status: resp.StatusCode}
 	}
 	return ErrInvalidOTP
 }
