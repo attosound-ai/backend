@@ -153,7 +153,7 @@ func (s *OTPService) checkSendLimits(ctx context.Context, phone, clientIP string
 func (s *OTPService) SendOTP(ctx context.Context, phone, email, locale, emailTemplate, clientIP string) error {
 	target := s.resolveTarget(phone, email)
 
-	if !s.cfg.BypassOTP {
+	if !s.cfg.SkipSendLimits {
 		if err := s.checkSendLimits(ctx, target.PrimaryIdentifier, clientIP); err != nil {
 			return err
 		}
@@ -203,7 +203,8 @@ func (s *OTPService) SendOTP(ctx context.Context, phone, email, locale, emailTem
 
 // VerifyCode verifies the OTP code for the given phone number.
 func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
-	// Dev bypass: accept "000000" when BYPASS_OTP=true (check BEFORE block/rate limits)
+	// Laptop only: "000000" stands in for the code (before block and limits).
+	// cfg.BypassOTP is never true where codes are really sent.
 	if s.cfg.BypassOTP && code == "000000" {
 		log.Printf("[OTP] Bypass code accepted for %s (dev mode)", phone)
 		_ = s.repo.DeleteOTP(ctx, phone)

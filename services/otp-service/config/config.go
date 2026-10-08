@@ -40,8 +40,38 @@ type Config struct {
 	// Email service (preferred over SMTP)
 	EmailServiceURL string
 
-	// Dev-only: accept "000000" as valid OTP
+	// The fixed code "000000" stands in for a real one. Only ever true where
+	// no code is really sent (see fixedCodeAllowed), whatever BYPASS_OTP says.
 	BypassOTP bool
+
+	// BYPASS_OTP=true was asked for where the fixed code is refused.
+	BypassRefused bool
+
+	// The limits on asking for codes (wait between two, per hour, per day,
+	// per address) are skipped.
+	SkipSendLimits bool
+}
+
+// deployed is true on any Railway environment: Railway sets these itself.
+func deployed() bool {
+	for _, key := range []string{"RAILWAY_ENVIRONMENT_NAME", "RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID", "RAILWAY_PROJECT_ID"} {
+		if os.Getenv(key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// fixedCodeAllowed says whether "000000" may stand in for a real code.
+//
+// On Oct 7 2026 production was found running with BYPASS_OTP=true: with
+// nothing but a public username, POST /auth/reset-password {otp: "000000"}
+// set a new password on any account, and the same code opened a signup or a
+// login by phone. The switch was written for a laptop, where codes are
+// printed to the console instead of sent. So that is the only place it works:
+// asked for explicitly, not on a deployment, and with no real delivery.
+func fixedCodeAllowed(asked bool, deliveryProvider string, isDeployed bool) bool {
+	return asked && !isDeployed && deliveryProvider == "console"
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -72,9 +102,17 @@ func Load() *Config {
 		SMTPFrom:     getEnv("SMTP_FROM", "noreply@attosound.com"),
 
 		EmailServiceURL: getEnv("EMAIL_SERVICE_URL", "http://email-service:3005"),
-
-		BypassOTP: getEnv("BYPASS_OTP", "false") == "true",
 	}
+
+	bypassAsked := getEnv("BYPASS_OTP", "false") == "true"
+	cfg.BypassOTP = fixedCodeAllowed(bypassAsked, cfg.DeliveryProvider, deployed())
+	cfg.BypassRefused = bypassAsked && !cfg.BypassOTP
+	// Production has sent codes without limits for as long as BYPASS_OTP has
+	// been on there. Refusing the fixed code must not switch the limits on by
+	// surprise: the per address one counts the address of the service that
+	// calls this one, so every user would share it. They keep following
+	// BYPASS_OTP until OTP_SKIP_SEND_LIMITS says otherwise.
+	cfg.SkipSendLimits = getEnv("OTP_SKIP_SEND_LIMITS", strconv.FormatBool(bypassAsked)) == "true"
 	return cfg
 }
 
