@@ -28,11 +28,25 @@ var (
 	ErrSignupSessionExpired   = errors.New("signup session expired or abandoned")
 	ErrSignupAlreadyExists    = errors.New("identifier already has an account")
 	ErrInvalidOTP             = errors.New("invalid or expired code")
+	ErrOTPUnavailable         = errors.New("verification is temporarily unavailable, try again in a moment")
 	ErrOTPNotVerified         = errors.New("otp not verified for this session")
 	ErrMissingRequired        = errors.New("missing required fields")
 	ErrUsernameTaken          = errors.New("username already taken")
 	ErrPhoneAlreadyRegistered = errors.New("phone number already registered")
 )
+
+// otpRejected is the OTP service refusing a code, in its own words ("invalid
+// code, 4 attempts remaining"). The words go to the app as they are, and the
+// handler still sees an invalid code.
+//
+// Until Oct 7 2026 those words travelled as a plain error, which no sentinel
+// matched, so a mistyped code answered 500: the server error alarm fired for
+// a person who had typed one wrong digit, and it could not tell that apart
+// from a real failure.
+type otpRejected struct{ reason string }
+
+func (e *otpRejected) Error() string        { return e.reason }
+func (e *otpRejected) Is(target error) bool { return target == ErrInvalidOTP }
 
 // SignupSessionTTL controls how long a started/verified session stays usable.
 // Past this, the cron flips it to abandoned; the unique partial index then
@@ -809,20 +823,25 @@ func (s *SignupService) verifyOTP(identifier string, idType models.IdentifierTyp
 	jsonBody, _ := json.Marshal(body)
 	resp, err := s.httpClient.Post(s.otpServiceURL+"/otp/verify", "application/json", bytes.NewReader(jsonBody))
 	if err != nil {
-		return ErrInvalidOTP
+		// The OTP service did not answer: nothing is known about the code, so
+		// the person is not told it is wrong.
+		return ErrOTPUnavailable
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var otpResp struct {
-			Error string `json:"error"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&otpResp)
-		if otpResp.Error != "" {
-			return errors.New(otpResp.Error)
-		}
-		return ErrInvalidOTP
+	if resp.StatusCode == http.StatusOK {
+		return nil
 	}
-	return nil
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return ErrOTPUnavailable
+	}
+	var otpResp struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&otpResp)
+	if otpResp.Error != "" {
+		return &otpRejected{reason: otpResp.Error}
+	}
+	return ErrInvalidOTP
 }
 
 func (s *SignupService) publishUserCreated(user *models.User, locale string) {

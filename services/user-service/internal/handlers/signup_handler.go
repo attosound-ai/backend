@@ -303,6 +303,8 @@ func mapSignupErr(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(models.APIResponse{Success: false, Error: err.Error()})
 	case errors.Is(err, services.ErrInvalidOTP):
 		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{Success: false, Error: err.Error()})
+	case errors.Is(err, services.ErrOTPUnavailable):
+		return c.Status(fiber.StatusServiceUnavailable).JSON(models.APIResponse{Success: false, Error: err.Error()})
 	case errors.Is(err, services.ErrOTPNotVerified), errors.Is(err, services.ErrMissingRequired):
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{Success: false, Error: err.Error()})
 	default:
