@@ -73,6 +73,27 @@ export class CallsController {
     return { success: true };
   }
 
+  /**
+   * End a call through Twilio, for when the app's own disconnect failed or
+   * Twilio's Disconnected event never came. Responds with the statuses read
+   * back afterwards; `verified` is true only when every leg has ended.
+   */
+  @Post(":callSid/hangup")
+  async forceHangup(
+    @Param("callSid") callSid: string,
+    @Body("reason") reason: string | undefined,
+    @Headers("x-user-id") userId: string,
+    @Headers("authorization") authHeader: string,
+  ) {
+    const uid = this.resolveUserId(userId, authHeader);
+    const result = await this.callsService.forceHangup(
+      callSid,
+      uid,
+      typeof reason === "string" ? reason.slice(0, 64) : null,
+    );
+    return { success: true, data: result };
+  }
+
   /** List audio segments for a call. */
   @Get(":callSid/segments")
   async listSegments(

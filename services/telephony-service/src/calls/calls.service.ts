@@ -8,6 +8,7 @@ import { Call } from "../entities/call.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
 import { AnalyticsService } from "../analytics/analytics.service";
 import { ChildLeg, siblingsToCancel } from "./decline-siblings";
+import { endingStatus, isEnded, LegInfo, legsToEnd, ownsLeg } from "./forced-hangup";
 
 @Injectable()
 export class CallsService {
@@ -63,6 +64,74 @@ export class CallsService {
       }
     }
     return canceled;
+  }
+
+  /**
+   * End a call through Twilio when the app could not (see forced-hangup.ts).
+   * Returns each leg's status read back from Twilio after the request, and
+   * `verified` only when every leg reads as ended. Throws NotFound for a leg
+   * that does not exist or is not the user's.
+   */
+  async forceHangup(
+    callSid: string,
+    userId: string,
+    reason: string | null,
+  ): Promise<{ verified: boolean; legs: { sid: string; status: string }[] }> {
+    const fetchLeg = async (sid: string): Promise<LegInfo | null> => {
+      try {
+        const c = await this.twilioClient.calls(sid).fetch();
+        return {
+          sid: c.sid,
+          status: String(c.status),
+          to: c.to ?? null,
+          from: c.from ?? null,
+          parentCallSid: c.parentCallSid ?? null,
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    const leg = await fetchLeg(callSid);
+    if (!leg || !ownsLeg(leg, userId)) throw new NotFoundException("Call not found");
+    const parent = leg.parentCallSid ? await fetchLeg(leg.parentCallSid) : null;
+
+    const before = [leg, parent].filter((l): l is LegInfo => l != null);
+    const errors: string[] = [];
+    for (const sid of legsToEnd(leg, parent)) {
+      const current = before.find((l) => l.sid === sid);
+      try {
+        await this.twilioClient
+          .calls(sid)
+          .update({ status: endingStatus(current?.status ?? "in-progress") });
+      } catch (err) {
+        errors.push(`${sid}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    const after = await Promise.all(before.map((l) => fetchLeg(l.sid)));
+    const legs = before.map((l, i) => ({ sid: l.sid, status: after[i]?.status ?? "unknown" }));
+    const verified = legs.every((l) => isEnded(l.status));
+
+    this.analytics.capture(userId, "backend_call_forced_hangup", {
+      call_sid: callSid,
+      parent_call_sid: leg.parentCallSid,
+      reason,
+      status_before: leg.status,
+      parent_status_before: parent?.status ?? null,
+      already_ended: before.every((l) => isEnded(l.status)),
+      verified,
+      legs,
+      errors: errors.length ? errors : null,
+    });
+    this.logger.log(
+      "Forced hangup call=%s by user %s verified=%s legs=%j",
+      callSid,
+      userId,
+      verified,
+      legs,
+    );
+    return { verified, legs };
   }
 
   /** Find the user assigned to a Twilio phone number. */
