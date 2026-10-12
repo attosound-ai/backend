@@ -9,6 +9,7 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { jwt as TwilioJwt } from "twilio";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { verifiedUserIdFromBearer } from "../common/verified-user-id";
 
 const { AccessToken } = TwilioJwt;
 const { VoiceGrant } = AccessToken;
@@ -86,18 +87,8 @@ export class TokensController {
     };
   }
 
-  /** Extract user ID from the Authorization Bearer JWT. */
+  /** The user ID from a Bearer JWT signed with our secret (see verified-user-id.ts). */
   private extractUserIdFromJwt(authHeader: string): string | null {
-    if (!authHeader?.startsWith("Bearer ")) return null;
-
-    try {
-      const jwtToken = authHeader.slice(7);
-      const payload = JSON.parse(
-        Buffer.from(jwtToken.split(".")[1], "base64").toString(),
-      );
-      return payload.sub || payload.user_id || null;
-    } catch {
-      return null;
-    }
+    return verifiedUserIdFromBearer(authHeader);
   }
 }

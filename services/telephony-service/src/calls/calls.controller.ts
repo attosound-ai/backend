@@ -11,6 +11,7 @@ import {
 } from "@nestjs/common";
 import { CallsService } from "./calls.service";
 import { AudioStorageService } from "../media/audio-storage.service";
+import { resolveVerifiedUserId } from "../common/verified-user-id";
 
 @Controller("telephony/calls")
 export class CallsController {
@@ -97,20 +98,6 @@ export class CallsController {
   }
 
   private resolveUserId(headerUserId: string, authHeader: string): string {
-    if (headerUserId) return headerUserId;
-
-    if (authHeader?.startsWith("Bearer ")) {
-      try {
-        const payload = JSON.parse(
-          Buffer.from(authHeader.slice(7).split(".")[1], "base64").toString(),
-        );
-        const uid = payload.sub || payload.user_id;
-        if (uid) return String(uid);
-      } catch {
-        // fall through
-      }
-    }
-
-    throw new UnauthorizedException("User ID not found");
+    return resolveVerifiedUserId(headerUserId, authHeader);
   }
 }
