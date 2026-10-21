@@ -6,9 +6,12 @@ impl TransformationPresets {
     /// Avatar: face-detection crop, multiple sizes eager-generated.
     pub fn avatar_eager() -> String {
         [
-            "c_thumb,g_face,w_40,h_40,f_auto,q_auto",
-            "c_thumb,g_face,w_80,h_80,f_auto,q_auto",
-            "c_thumb,g_face,w_200,h_200,f_auto,q_auto",
+            // Same sizes as the app presets (front lib/media/cloudinaryUrl.ts),
+            // sized for 3x screens since Oct 3 2026.
+            "c_thumb,g_face,w_120,h_120,f_auto,q_auto",
+            "c_thumb,g_face,w_160,h_160,f_auto,q_auto",
+            "c_thumb,g_face,w_240,h_240,f_auto,q_auto",
+            "c_thumb,g_face,w_360,h_360,f_auto,q_auto",
         ]
         .join("|")
     }
@@ -45,5 +48,24 @@ impl TransformationPresets {
     /// Reel (vertical video): generate a vertical thumbnail.
     pub fn reel_thumbnail_eager() -> String {
         "c_limit,w_480,h_854,f_jpg,q_auto/jpg".to_string()
+    }
+
+    /// Adaptive-bitrate HLS stream (auto streaming profile).
+    /// Transcoding is heavy, so this MUST be generated asynchronously
+    /// (`eager_async=true`) — otherwise the upload request would block until
+    /// every rendition is ready. Pre-generating on upload means the first
+    /// viewer plays instantly instead of waiting for on-the-fly derivation.
+    pub fn video_streaming_eager() -> String {
+        "sp_auto/m3u8".to_string()
+    }
+
+    /// Video upload: HLS stream + first-frame thumbnail (both eager, async).
+    pub fn video_eager() -> String {
+        [Self::video_streaming_eager(), Self::video_thumbnail_eager()].join("|")
+    }
+
+    /// Reel upload: HLS stream + vertical first-frame thumbnail (both eager, async).
+    pub fn reel_eager() -> String {
+        [Self::video_streaming_eager(), Self::reel_thumbnail_eager()].join("|")
     }
 }

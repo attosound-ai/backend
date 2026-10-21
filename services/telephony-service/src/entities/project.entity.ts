@@ -8,6 +8,7 @@ import {
 } from "typeorm";
 import { AudioSegment } from "./audio-segment.entity";
 import { TimelineClip } from "./timeline-clip.entity";
+import type { ProjectSettings } from "../projects/project-settings";
 
 @Entity("projects")
 export class Project {
@@ -38,6 +39,10 @@ export class Project {
       pan?: number;
     }
   >;
+
+  /** Editor settings (master effects, exporter preferences). See project-settings.ts. */
+  @Column({ type: "jsonb", default: {} })
+  settings: ProjectSettings;
 
   @CreateDateColumn({ type: "timestamptz" })
   createdAt: Date;

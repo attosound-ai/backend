@@ -8,6 +8,8 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { jwt as TwilioJwt } from "twilio";
+import { AnalyticsService } from "../analytics/analytics.service";
+import { verifiedUserIdFromBearer } from "../common/verified-user-id";
 
 const { AccessToken } = TwilioJwt;
 const { VoiceGrant } = AccessToken;
@@ -16,7 +18,10 @@ const { VoiceGrant } = AccessToken;
 export class TokensController {
   private readonly logger = new Logger(TokensController.name);
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly analytics: AnalyticsService,
+  ) {}
 
   /**
    * Generate a Twilio Access Token with a VoiceGrant for the authenticated user.
@@ -70,24 +75,20 @@ export class TokensController {
       `Voice token generated: identity=${identity} platform=${platform || "unknown"} pushCredSid=${pushCredentialSid}`,
     );
 
+    this.analytics.capture(resolvedUserId, "backend_voice_token_issued", {
+      identity,
+      platform: platform || "unknown",
+      has_push_cred: !!pushCredentialSid,
+    });
+
     return {
       token: token.toJwt(),
       identity,
     };
   }
 
-  /** Extract user ID from the Authorization Bearer JWT. */
+  /** The user ID from a Bearer JWT signed with our secret (see verified-user-id.ts). */
   private extractUserIdFromJwt(authHeader: string): string | null {
-    if (!authHeader?.startsWith("Bearer ")) return null;
-
-    try {
-      const jwtToken = authHeader.slice(7);
-      const payload = JSON.parse(
-        Buffer.from(jwtToken.split(".")[1], "base64").toString(),
-      );
-      return payload.sub || payload.user_id || null;
-    } catch {
-      return null;
-    }
+    return verifiedUserIdFromBearer(authHeader);
   }
 }

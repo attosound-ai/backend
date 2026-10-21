@@ -1,7 +1,14 @@
-"""Plan-to-entitlements mapping — single source of truth.
+"""Entitlement enum, entitlement catalog and the plan seed.
 
-Pure data + pure functions, no I/O or database dependency.
-Importable by any module that needs to check feature access.
+The runtime source of truth for plans is the database (see
+app/plan_catalog.py). This module keeps three things:
+
+* the Entitlement enum, the closed list of feature keys the apps understand,
+* ENTITLEMENT_CATALOG, labels the admin UI shows next to each key,
+* the SEED_* tables used to fill the plans table on first boot.
+
+The sync helpers at the bottom only look at the seed. They exist for tests
+and for code paths that cannot reach the database.
 """
 
 import enum
@@ -22,7 +29,27 @@ class Entitlement(str, enum.Enum):
     BRIDGE_NUMBER = "bridge_number"
 
 
-PLAN_ENTITLEMENTS: dict[str, frozenset[Entitlement]] = {
+ENTITLEMENT_KEYS: frozenset[str] = frozenset(e.value for e in Entitlement)
+
+# Plain labels for the admin UI. Order matters, it is the display order.
+ENTITLEMENT_CATALOG: list[dict[str, str]] = [
+    {"key": "browse_search", "label": "Browse and search", "description": "Discover creators and recordings."},
+    {"key": "listen", "label": "Listen", "description": "Play recordings and mixes."},
+    {"key": "comment", "label": "Comment", "description": "Comment on and engage with content."},
+    {"key": "record_upload", "label": "Record and upload", "description": "Record calls and upload content."},
+    {"key": "advanced_production", "label": "Advanced production", "description": "Multitrack mixing and production tools."},
+    {"key": "ai_avatars", "label": "AI avatars", "description": "Generate short AI avatar videos."},
+    {"key": "enhanced_analytics", "label": "Enhanced analytics", "description": "Detailed listener and engagement analytics."},
+    {"key": "priority_discovery", "label": "Priority discovery", "description": "Boosted placement in discovery feeds."},
+    {"key": "talent_dashboard", "label": "Talent dashboard", "description": "Talent analytics and discovery dashboard."},
+    {"key": "exportable_reports", "label": "Exportable reports", "description": "Download data reports."},
+    {"key": "early_access", "label": "Early access", "description": "Early access to emerging talent."},
+    {"key": "bridge_number", "label": "Bridge phone number", "description": "A dedicated phone number that records calls."},
+]
+
+# ── Seed tables (first boot only) ──────────────────────────────────
+
+SEED_PLAN_ENTITLEMENTS: dict[str, frozenset[Entitlement]] = {
     "connect_free": frozenset(
         {Entitlement.BROWSE_SEARCH, Entitlement.LISTEN, Entitlement.COMMENT}
     ),
@@ -63,22 +90,22 @@ PLAN_ENTITLEMENTS: dict[str, frozenset[Entitlement]] = {
     ),
 }
 
-# Price in cents — used for upgrade validation (higher price = valid upgrade target)
-PLAN_PRICES_ORDER: dict[str, int] = {
+# Price in cents. A higher price is a valid upgrade target.
+SEED_PLAN_PRICES_CENTS: dict[str, int] = {
     "connect_free": 0,
     "record": 9900,
     "record_pro": 13900,
     "connect_pro": 199900,
 }
 
-PLAN_DISPLAY_NAMES: dict[str, str] = {
+SEED_PLAN_DISPLAY_NAMES: dict[str, str] = {
     "connect_free": "Connect",
     "record": "Record",
     "record_pro": "Record Pro",
     "connect_pro": "Connect Pro",
 }
 
-PLAN_FEATURES: dict[str, list[str]] = {
+SEED_PLAN_FEATURES: dict[str, list[str]] = {
     "connect_free": [
         "Search and discover creators",
         "Listen to recordings",
@@ -93,7 +120,7 @@ PLAN_FEATURES: dict[str, list[str]] = {
     ],
     "record_pro": [
         "Advanced production suite",
-        "AI avatar videos (4-10 sec)",
+        "AI avatar videos (4 to 10 sec)",
         "Unlimited recordings",
         "Enhanced analytics",
         "Priority discovery algorithm",
@@ -110,17 +137,35 @@ PLAN_FEATURES: dict[str, list[str]] = {
     ],
 }
 
+# Billing metadata per seed plan: (billing_period, duration_days, popular, sort_order).
+SEED_PLAN_BILLING: dict[str, tuple[str, int, bool, int]] = {
+    "connect_free": ("forever", 36500, False, 0),
+    "record": ("year", 365, False, 1),
+    "record_pro": ("year", 365, True, 2),
+    "connect_pro": ("year", 365, False, 3),
+}
+
+SEED_FREE_PLAN_KEY = "connect_free"
+
+# Backwards compatible aliases for older imports.
+PLAN_ENTITLEMENTS = SEED_PLAN_ENTITLEMENTS
+PLAN_PRICES_ORDER = SEED_PLAN_PRICES_CENTS
+PLAN_DISPLAY_NAMES = SEED_PLAN_DISPLAY_NAMES
+PLAN_FEATURES = SEED_PLAN_FEATURES
+
+
+# ── Sync helpers over the seed ─────────────────────────────────────
 
 def get_entitlements(plan: str) -> frozenset[Entitlement]:
-    """Return the entitlements for a plan, defaulting to connect_free."""
-    return PLAN_ENTITLEMENTS.get(plan, PLAN_ENTITLEMENTS["connect_free"])
+    """Seed entitlements for a plan, defaulting to the free plan."""
+    return SEED_PLAN_ENTITLEMENTS.get(plan, SEED_PLAN_ENTITLEMENTS[SEED_FREE_PLAN_KEY])
 
 
 def has_entitlement(plan: str, entitlement: Entitlement) -> bool:
-    """Check if a plan includes a specific entitlement."""
+    """Check whether a seed plan includes an entitlement."""
     return entitlement in get_entitlements(plan)
 
 
 def can_upgrade(current: str, target: str) -> bool:
-    """Return True if target plan is more expensive than current plan."""
-    return PLAN_PRICES_ORDER.get(target, 0) > PLAN_PRICES_ORDER.get(current, 0)
+    """True when the target seed plan costs more than the current one."""
+    return SEED_PLAN_PRICES_CENTS.get(target, 0) > SEED_PLAN_PRICES_CENTS.get(current, 0)

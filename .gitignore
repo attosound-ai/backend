@@ -24,6 +24,7 @@ target/
 _build/
 deps/
 *.beam
+erl_crash.dump
 
 # TypeScript build output
 dist/

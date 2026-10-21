@@ -11,6 +11,7 @@ import { GrpcClientsService } from "../grpc/grpc-clients.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
 import { PushService } from "../push/push.service";
 import { CommentResponseDto } from "./dto/interaction.dto";
+import { visibleComments } from "./visible-comments";
 
 @Injectable()
 export class InteractionsService {
@@ -139,21 +140,16 @@ export class InteractionsService {
     text: string,
     parentId?: string,
   ): Promise<CommentResponseDto> {
-    if (parentId) {
-      const parent = await this.prisma.comment.findUnique({
-        where: { id: parentId },
-      });
-      if (!parent || parent.contentId !== contentId) {
-        throw new NotFoundException("Parent comment not found");
-      }
-    }
+    const threadId = parentId
+      ? await this.threadOf(parentId, contentId)
+      : null;
 
     const comment = await this.prisma.comment.create({
       data: {
         userId,
         contentId,
         text,
-        parentId: parentId || null,
+        parentId: threadId,
       },
     });
 
@@ -210,6 +206,35 @@ export class InteractionsService {
     };
   }
 
+  /**
+   * The comment a new reply hangs from. The list shows one level of replies,
+   * so an answer to a reply joins the thread of that reply; hung from the
+   * reply itself nobody would ever see it. A deleted comment takes no
+   * replies, for the same reason.
+   */
+  private async threadOf(parentId: string, contentId: string): Promise<string> {
+    const parent = await this.prisma.comment.findUnique({
+      where: { id: parentId },
+    });
+    if (!parent || parent.isDeleted || parent.contentId !== contentId) {
+      throw new NotFoundException("Parent comment not found");
+    }
+    if (!parent.parentId) return parent.id;
+
+    const thread = await this.prisma.comment.findUnique({
+      where: { id: parent.parentId },
+    });
+    if (!thread || thread.isDeleted) {
+      throw new NotFoundException("Parent comment not found");
+    }
+    return thread.id;
+  }
+
+  /** The number the post shows: only what the list of comments can show. */
+  private countVisibleComments(contentId: string): Promise<number> {
+    return this.prisma.comment.count({ where: visibleComments(contentId) });
+  }
+
   async getComments(
     contentId: string,
     page: number,
@@ -227,10 +252,11 @@ export class InteractionsService {
         skip,
         take: limit,
         include: {
+          // Every reply: the app has no "view more replies", so a cap here
+          // (it was 3) hid the fourth one from everybody, its author included.
           replies: {
             where: { isDeleted: false },
             orderBy: { createdAt: "asc" },
-            take: 3,
           },
         },
       }),
@@ -360,7 +386,13 @@ export class InteractionsService {
       data: { isDeleted: true, deletedAt: new Date() },
     });
 
-    await this.counts.decrement("comments", comment.contentId);
+    // Counted again, not one taken off: a comment leaves with its replies,
+    // and counting also repairs a number that had drifted before.
+    await this.counts.set(
+      "comments",
+      comment.contentId,
+      await this.countVisibleComments(comment.contentId),
+    );
 
     await this.kafkaProducer.send("interaction.deleted", {
       id: commentId,
@@ -553,7 +585,7 @@ export class InteractionsService {
           this.prisma.interaction.count({ where: { contentId, type: "LIKE" } }),
         ),
         this.counts.getOrCompute("comments", contentId, () =>
-          this.prisma.comment.count({ where: { contentId } }),
+          this.countVisibleComments(contentId),
         ),
         this.counts.getOrCompute("shares", contentId, () =>
           this.prisma.interaction.count({
@@ -639,7 +671,7 @@ export class InteractionsService {
           }),
           this.prisma.comment.groupBy({
             by: ["contentId"],
-            where: { contentId: { in: missingIds } },
+            where: visibleComments({ in: missingIds }),
             _count: { contentId: true },
           }),
           this.prisma.interaction.groupBy({

@@ -1,11 +1,19 @@
 import jwt
-from fastapi import Request, HTTPException
+from fastapi import HTTPException, Request
 
 from app.config import settings
 
 # signup_pending tokens are scoped to /signup/* on user-service. Reject them
 # anywhere else with 403 — the token is valid, the route is just out of scope.
 SCOPE_SIGNUP_PENDING = "signup_pending"
+
+# Payment paths served without a JWT.
+PUBLIC_PAYMENT_PATHS = frozenset(
+    {
+        "/payments/subscriptions/plans",
+        "/payments/subscriptions/paywall",
+    }
+)
 
 
 def _decode_token(authorization: str) -> dict:
@@ -23,10 +31,10 @@ def _decode_token(authorization: str) -> dict:
             algorithms=["HS256"],
             options={"verify_iss": False},
         )
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail="Token expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
 
     if not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Token missing subject")
@@ -43,33 +51,37 @@ def _extract_user_id_from_token(authorization: str) -> str:
 
 
 async def get_current_user_id(request: Request) -> str:
-    """Extract user ID from JWT Authorization header or X-User-ID fallback."""
-    # Try JWT first (frontend sends Bearer tokens)
+    """Extract user ID from the Bearer JWT.
+
+    The X-User-ID fallback was removed (Bug #6): with Kong stripping the
+    header at the edge a client-supplied value never reached this code
+    anyway, but the fallback left the service vulnerable to anyone that
+    could reach it directly inside the VPC. JWT is the only trust path.
+    """
     authorization = request.headers.get("Authorization")
     if authorization:
         return _extract_user_id_from_token(authorization)
-
-    # Fallback: X-User-ID header (internal service-to-service calls)
-    user_id = request.headers.get("X-User-ID")
-    if user_id:
-        return user_id
-
     raise HTTPException(status_code=401, detail="Missing authentication")
 
 
 async def get_current_user_role(request: Request) -> str:
-    """Extract X-User-Role from request headers."""
-    return request.headers.get("X-User-Role", "user")
+    """Return the user's role from the Bearer JWT, defaulting to 'user'."""
+    authorization = request.headers.get("Authorization")
+    if authorization:
+        claims = _decode_token(authorization)
+        role = claims.get("role")
+        if isinstance(role, str) and role:
+            return role
+    return "user"
 
 
 async def require_creator(request: Request) -> str:
-    """FastAPI dependency: 403 unless the JWT belongs to a creator account.
+    """FastAPI dependency: 403 unless the Bearer JWT belongs to a creator
+    account. Returns the user_id when allowed.
 
-    Returns the user_id when allowed. Used to gate endpoints that only
-    creators should be able to call (subscription upgrades/downgrades).
-
-    Service-to-service callers using `X-User-ID` header are trusted —
-    they're internal Kafka consumers / other services and not user-driven.
+    The X-User-ID fallback was removed (Bug #6) — same reasoning as in
+    `get_current_user_id`. Any internal caller must now present a valid
+    JWT, including Kafka-event-replayers and operator tools.
     """
     authorization = request.headers.get("Authorization")
     if authorization:
@@ -80,10 +92,6 @@ async def require_creator(request: Request) -> str:
                 detail="Subscriptions are only available for creator accounts",
             )
         return claims["sub"]
-
-    user_id = request.headers.get("X-User-ID")
-    if user_id:
-        return user_id
 
     raise HTTPException(status_code=401, detail="Missing authentication")
 
@@ -105,17 +113,22 @@ class AuthMiddleware:
             req = StarletteRequest(scope, receive)
             path = req.url.path
 
-            # Enforce auth on payment routes (skip webhook, plans listing, and health)
+            # Enforce auth on payment routes (skip webhook, the public plan
+            # catalog endpoints, and health). Admin routes live under
+            # /api/v1/admin and carry their own shared secret check.
+            # JWT-only: the X-User-ID fallback was removed as part of the Bug
+            # #6 hardening pass. A request lacking Authorization is rejected
+            # here even if it carries an X-User-ID header (which Kong already
+            # strips at the edge anyway).
             needs_auth = (
                 path.startswith("/payments/")
                 and not path.endswith("/webhook")
-                and path != "/payments/subscriptions/plans"
+                and path not in PUBLIC_PAYMENT_PATHS
             )
             if needs_auth:
                 authorization = req.headers.get("Authorization")
-                user_id = req.headers.get("X-User-ID")
 
-                if not authorization and not user_id:
+                if not authorization:
                     from starlette.responses import JSONResponse
 
                     response = JSONResponse(

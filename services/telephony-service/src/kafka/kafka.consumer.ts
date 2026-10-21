@@ -18,6 +18,7 @@ import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entit
 import { Project } from "../entities/project.entity";
 import { TimelineClip } from "../entities/timeline-clip.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
+import { AnalyticsService } from "../analytics/analytics.service";
 
 @Injectable()
 export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
@@ -40,6 +41,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly timelineClipRepo: Repository<TimelineClip>,
     @InjectRepository(AudioSegment)
     private readonly audioSegmentRepo: Repository<AudioSegment>,
+    private readonly analytics: AnalyticsService,
   ) {
     const brokers =
       this.config.get<string[]>("kafka.brokers") ?? ["localhost:9092"];
@@ -128,6 +130,22 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Never hand a number to an account that no longer exists. On Oct 1
+    // 2026 a claim raced the account deletion: the payment event arrived a
+    // tenth of a second after this service had released the user's number
+    // and purged its rows, and a new number was assigned to a deleted user.
+    if (!(await this.userExists(userId))) {
+      this.logger.warn(
+        "payment.completed for user %s, who no longer exists: no number assigned",
+        userId,
+      );
+      this.analytics.capture(userId, "backend_number_provision_skipped", {
+        reason: "user_deleted",
+        subscription_id: subscriptionId || null,
+      });
+      return;
+    }
+
     try {
       const phoneNumber = await this.numberProvisioning.assignNumberToUser(
         userId,
@@ -139,6 +157,10 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         phoneNumber,
         userId,
       );
+      this.analytics.capture(userId, "backend_number_provisioned", {
+        phone_number: phoneNumber,
+        subscription_id: subscriptionId || null,
+      });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.logger.error(
@@ -146,6 +168,10 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         userId,
         reason,
       );
+      this.analytics.capture(userId, "backend_number_provision_failed", {
+        reason,
+        subscription_id: subscriptionId || null,
+      });
       try {
         await this.numberProvisioning.publishProvisioningFailed(userId, reason);
       } catch (kafkaErr) {
@@ -175,12 +201,29 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     if (userIds.length === 0) return;
 
     for (const userId of userIds) {
-      // 1. Release Twilio number (in-memory lookup, doesn't depend on DB).
+      // 1. Give the number back for good. A real Twilio number is deleted
+      //    from the account (it bills while it exists); a dev placeholder
+      //    returns to the pool. Runs BEFORE the row purge below so the
+      //    provisioned row is still there to find.
       try {
-        await this.numberProvisioning.releaseNumber(userId);
-        this.logger.log(`Released Twilio number for deleted user ${userId}`);
+        const released =
+          await this.numberProvisioning.releaseNumbersForDeletedUser(userId);
+        if (released.length > 0) {
+          this.logger.log(
+            `Released ${released.join(", ")} for deleted user ${userId}`,
+          );
+          this.analytics.capture(userId, "backend_number_released_on_delete", {
+            phone_numbers: released,
+          });
+        }
       } catch (err) {
-        this.logger.warn(`No Twilio number to release for user ${userId}: ${err}`);
+        this.logger.error(
+          `Failed to release Twilio number for deleted user ${userId}: ${err}`,
+        );
+        this.analytics.capture(userId, "backend_number_release_failed", {
+          reason: err instanceof Error ? err.message : String(err),
+          trigger: "user_deleted",
+        });
       }
 
       // 2. Delete S3/MinIO audio files for this user.
@@ -232,6 +275,11 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
             `${projectsResult.affected ?? 0} projects, ` +
             `${assignmentsResult.affected ?? 0} phone_number_assignments`,
         );
+        this.analytics.capture(userId, "backend_user_deleted_cleanup", {
+          calls_purged: callsResult.affected ?? 0,
+          projects_purged: projectsResult.affected ?? 0,
+          assignments_purged: assignmentsResult.affected ?? 0,
+        });
       } catch (err) {
         this.logger.error(
           `Failed to purge telephony DB for user ${userId}: ${(err as Error).message}`,
@@ -240,6 +288,25 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.log(`Telephony cleanup done for users: ${userIds.join(", ")}`);
+  }
+
+  /**
+   * Whether the account still exists. The services share one Postgres and
+   * `users` is the source of truth. If the lookup itself fails the answer is
+   * yes: a missed number for a real creator is worse than a number the
+   * deletion audit will reclaim.
+   */
+  private async userExists(userId: string): Promise<boolean> {
+    try {
+      const rows: unknown[] = await this.callRepo.query(
+        "SELECT 1 FROM users WHERE id::text = $1 LIMIT 1",
+        [String(userId)],
+      );
+      return rows.length > 0;
+    } catch (err) {
+      this.logger.warn(`users lookup failed for ${userId}: ${err}`);
+      return true;
+    }
   }
 
   /** When subscription is cancelled, release the user's number back to pool. */
@@ -255,6 +322,9 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     try {
       await this.numberProvisioning.releaseNumber(userId);
       this.logger.log("Number released for user %s after cancellation", userId);
+      this.analytics.capture(userId, "backend_number_released", {
+        reason: "subscription_cancelled",
+      });
     } catch (err) {
       this.logger.error(
         "Failed to release number for user %s: %s",

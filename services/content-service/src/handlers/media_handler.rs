@@ -78,11 +78,16 @@ pub async fn sign_upload(
         user_id, body.context, folder, public_id
     );
 
+    // Video/reel eager transforms (HLS) are transcoded asynchronously so the
+    // upload isn't blocked while Cloudinary builds the stream renditions.
+    let eager_async = CloudinaryClient::context_is_async(&body.context);
+
     let params = cloudinary.sign_upload(
         folder,
         &public_id,
         &body.resource_type,
         eager.as_deref(),
+        eager_async,
     );
 
     HttpResponse::Ok().json(json!({

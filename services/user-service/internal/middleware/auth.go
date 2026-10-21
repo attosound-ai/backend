@@ -23,7 +23,15 @@ func derefStr(s *string) string {
 const (
 	ScopeUser          = "user"           // full session for a confirmed user
 	ScopeSignupPending = "signup_pending" // limited token for in-progress signup
+	ScopeService       = "service"        // this service calling a sibling one, never a person
 )
+
+// ServiceTokenSubject is the subject of a service token. It is not a number,
+// so it can never be mistaken for a user ID.
+const ServiceTokenSubject = "service:user-service"
+
+// ServiceTokenIssuer tells a service token apart from a user session.
+const ServiceTokenIssuer = "atto-sound-user-service-internal"
 
 // JWTClaims holds the custom claims stored in JWT tokens.
 // Scope gates which endpoints a token can reach: a signup_pending token must
@@ -152,6 +160,28 @@ func (m *JWTManager) GenerateSignupToken(sessionID string, ttl time.Duration) (s
 		return "", 0, err
 	}
 	return signed, int64(ttl.Seconds()), nil
+}
+
+// GenerateServiceToken issues a short lived token for a call from this service
+// to a sibling one whose HTTP routes only trust a JWT signed with the shared
+// secret (the social service guard accepts nothing else, not even from the
+// private network). It names no user and carries no role, so the receiver
+// treats it with the lowest privilege, and RequireAuth here rejects it because
+// its scope is not ScopeUser.
+func (m *JWTManager) GenerateServiceToken(ttl time.Duration) (string, error) {
+	now := time.Now()
+	claims := JWTClaims{
+		UserID: ServiceTokenSubject,
+		Scope:  ScopeService,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   ServiceTokenSubject,
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			Issuer:    ServiceTokenIssuer,
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(m.secret)
 }
 
 // SignupSessionID extracts the bare UUID from a signup_pending claim.

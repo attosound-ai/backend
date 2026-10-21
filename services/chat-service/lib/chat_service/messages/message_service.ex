@@ -5,12 +5,15 @@ defmodule ChatService.Messages.MessageService do
   Handles sending messages (insert into Cassandra, update conversations,
   broadcast via Phoenix Channel, publish to Kafka) and retrieving message history.
   """
+  alias ChatService.Messages.EditPolicy
 
   alias ChatService.Messages.Message
   alias ChatService.Messages.Authorizer
   alias ChatService.Messages.Persistence
   alias ChatService.Messages.EventPublisher
+  alias ChatService.Messages.ConversationPreview
   alias ChatService.Messages.ReactionCleaner
+  alias ChatService.Messages.ThreadInbox
   alias ChatService.Conversations.ConversationService
   alias ChatService.Reactions.ReactionService
   alias ChatService.KafkaProducer
@@ -36,10 +39,12 @@ defmodule ChatService.Messages.MessageService do
     reply_to_id = Keyword.get(opts, :reply_to_id)
     reply_to_content = Keyword.get(opts, :reply_to_content)
     reply_to_sender = Keyword.get(opts, :reply_to_sender)
+    metadata = Keyword.get(opts, :metadata)
+    thread_id = Keyword.get(opts, :thread_id)
 
     query = """
-    INSERT INTO messages (conversation_id, message_id, sender_id, content, content_type, is_read, created_at, reply_to_id, reply_to_content, reply_to_sender)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (conversation_id, message_id, sender_id, content, content_type, is_read, created_at, reply_to_id, reply_to_content, reply_to_sender, metadata, thread_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     params = %{
@@ -52,7 +57,9 @@ defmodule ChatService.Messages.MessageService do
       "created_at" => {"timestamp", now},
       "reply_to_id" => {"text", reply_to_id || ""},
       "reply_to_content" => {"text", reply_to_content || ""},
-      "reply_to_sender" => {"text", reply_to_sender || ""}
+      "reply_to_sender" => {"text", reply_to_sender || ""},
+      "metadata" => {"text", Message.encode_metadata(metadata)},
+      "thread_id" => {"text", thread_id || ""}
     }
 
     case Repo.execute_prepared(query, params) do
@@ -67,13 +74,43 @@ defmodule ChatService.Messages.MessageService do
           reply_to_id: reply_to_id,
           reply_to_content: reply_to_content,
           reply_to_sender: reply_to_sender,
+          metadata: Message.decode_metadata(metadata),
+          thread_id: thread_id,
           created_at: now
         }
 
-        ConversationService.update_last_message(conversation_id, sender_id, content, now)
+        if thread_id do
+          index_thread_message(conversation_id, thread_id, message_id, now)
+          # The inbox row is written after the index so its reply count, which
+          # is counted rather than incremented, already sees this reply.
+          ThreadInbox.index_reply(
+            conversation_id,
+            thread_id,
+            sender_id,
+            root_preview(conversation_id, thread_id),
+            preview_for(content, content_type, nil),
+            now
+          )
+        end
+
+        # Media messages carry JSON in `content`; the list shows a type label.
+        ConversationService.update_last_message(
+          conversation_id,
+          sender_id,
+          preview_for(content, content_type, thread_id),
+          now
+        )
 
         broadcast_message(conversation_id, message)
         recipient_id = Keyword.get(opts, :recipient_id)
+
+        notify_participants(
+          conversation_id,
+          sender_id,
+          recipient_id,
+          conversation_updated_payload(conversation_id, sender_id, content, content_type)
+        )
+
         publish_kafka_event(message, recipient_id)
 
         {:ok, message}
@@ -94,13 +131,21 @@ defmodule ChatService.Messages.MessageService do
     before = Keyword.get(opts, :before)
     limit = Keyword.get(opts, :limit, @default_limit)
     limit = min(limit, 100)
+    # A reader who deleted this chat only sees what arrived after they did.
+    # The bound is inlined because it is a timestamp this service wrote, and
+    # maxTimeuuid needs a literal to take part in the clustering range.
+    since =
+      case Keyword.get(opts, :since) do
+        %DateTime{} = at -> " AND message_id > maxTimeuuid('#{DateTime.to_iso8601(at)}')"
+        _ -> ""
+      end
 
     {query, params} =
       if before do
         {
           """
           SELECT * FROM messages
-          WHERE conversation_id = ? AND message_id < ?
+          WHERE conversation_id = ? AND message_id < ?#{since}
           ORDER BY message_id DESC
           LIMIT ?
           """,
@@ -114,7 +159,7 @@ defmodule ChatService.Messages.MessageService do
         {
           """
           SELECT * FROM messages
-          WHERE conversation_id = ?
+          WHERE conversation_id = ?#{since}
           ORDER BY message_id DESC
           LIMIT ?
           """,
@@ -143,13 +188,20 @@ defmodule ChatService.Messages.MessageService do
 
         # Load reactions for all messages in batch
         message_ids = Enum.map(messages, & &1.message_id)
+
         reactions_map =
           case ReactionService.get_reactions_batch(message_ids) do
             {:ok, map} -> map
             _ -> %{}
           end
 
-        {:ok, %{messages: messages, reactions: reactions_map, next_cursor: next_cursor, has_more: has_more}}
+        {:ok,
+         %{
+           messages: messages,
+           reactions: reactions_map,
+           next_cursor: next_cursor,
+           has_more: has_more
+         }}
 
       {:error, reason} ->
         Logger.error("Failed to get messages: #{inspect(reason)}")
@@ -198,48 +250,76 @@ defmodule ChatService.Messages.MessageService do
   end
 
   @doc """
-  Edit a message's content. Only the original sender can edit.
+  Edit a message's content, iMessage rules (ChatService.Messages.EditPolicy):
+  only the sender, text only, within 15 minutes, at most 5 edits. The replaced
+  version goes to `edit_history` so "Edited" can show previous versions.
   """
-  def edit_message(message_id, conversation_id, sender_id, new_content) do
-    # Verify sender owns the message
-    case verify_sender(message_id, conversation_id, sender_id) do
-      :ok ->
-        now = DateTime.utc_now()
+  def edit_message(message_id, conversation_id, sender_id, new_content, opts \\ []) do
+    with {:ok, row} <- fetch_for_edit(message_id, conversation_id),
+         history = EditPolicy.decode(row && row["edit_history"]),
+         now = DateTime.utc_now(),
+         :ok <- EditPolicy.check(row, sender_id, history, now, opts) do
+      new_history =
+        EditPolicy.append(history, row["content"], row["edited_at"] || row["created_at"])
 
-        query = """
-        UPDATE messages
-        SET content = ?, is_edited = true, edited_at = ?
-        WHERE conversation_id = ? AND message_id = ?
-        """
+      query = """
+      UPDATE messages
+      SET content = ?, is_edited = true, edited_at = ?, edit_history = ?
+      WHERE conversation_id = ? AND message_id = ?
+      """
 
-        params = %{
-          "content" => {"text", new_content},
-          "edited_at" => {"timestamp", now},
-          "conversation_id" => {"uuid", conversation_id},
-          "message_id" => {"timeuuid", message_id}
-        }
+      params = %{
+        "content" => {"text", new_content},
+        "edited_at" => {"timestamp", now},
+        "edit_history" => {"text", Jason.encode!(new_history)},
+        "conversation_id" => {"uuid", conversation_id},
+        "message_id" => {"timeuuid", message_id}
+      }
 
-        case Repo.execute_prepared(query, params) do
-          {:ok, _} ->
-            payload = %{
-              message_id: message_id,
-              conversation_id: conversation_id,
-              sender_id: sender_id,
-              content: new_content,
-              is_edited: true,
-              edited_at: DateTime.to_iso8601(now)
-            }
+      case Repo.execute_prepared(query, params) do
+        {:ok, _} ->
+          payload = %{
+            message_id: message_id,
+            conversation_id: conversation_id,
+            sender_id: sender_id,
+            content: new_content,
+            is_edited: true,
+            edited_at: DateTime.to_iso8601(now),
+            edit_history: new_history,
+            edits_left: max(EditPolicy.max_edits() - length(new_history), 0)
+          }
 
-            broadcast_event(conversation_id, :message_edited, payload)
-            {:ok, payload}
+          broadcast_event(conversation_id, :message_edited, payload)
+          {:ok, payload}
 
-          {:error, reason} ->
-            Logger.error("Failed to edit message: #{inspect(reason)}")
-            {:error, :update_failed}
+        {:error, reason} ->
+          Logger.error("Failed to edit message: #{inspect(reason)}")
+          {:error, :update_failed}
+      end
+    end
+  end
+
+  defp fetch_for_edit(message_id, conversation_id) do
+    query = """
+    SELECT sender_id, content, content_type, is_deleted, created_at, edited_at, edit_history
+    FROM messages
+    WHERE conversation_id = ? AND message_id = ?
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id}
+    }
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, result} ->
+        case result |> Enum.to_list() |> List.first() do
+          nil -> {:error, :not_found}
+          row -> {:ok, row}
         end
 
-      {:error, reason} ->
-        {:error, reason}
+      {:error, _} ->
+        {:error, :query_failed}
     end
   end
 
@@ -282,6 +362,9 @@ defmodule ChatService.Messages.MessageService do
       }
 
       :ok = EventPublisher.publish_deleted(payload)
+      # After the thread knows: the list of both people stops showing the
+      # text of a message that is gone.
+      :ok = ConversationPreview.message_deleted(message_id, conversation_id, user_id)
       {:ok, payload}
     end
   end
@@ -320,6 +403,29 @@ defmodule ChatService.Messages.MessageService do
     )
   end
 
+  # Both participants' user channels, so the conversation list and the badge
+  # update live. This used to live only in the channel's handle_in, so a
+  # message sent over REST (every photo, audio and video, and any text sent
+  # while the sender's socket was down) reached the other phone as a push but
+  # never moved the open conversation list (client, Oct 3 2026: "if I'm in
+  # the message section I won't get it until I close the app").
+  defp notify_participants(_conversation_id, _sender_id, nil, _payload), do: :ok
+
+  defp notify_participants(_conversation_id, sender_id, recipient_id, payload) do
+    ChatServiceWeb.Endpoint.broadcast("user:#{sender_id}", "conversation_updated", payload)
+
+    if to_string(recipient_id) != to_string(sender_id) do
+      ChatServiceWeb.Endpoint.broadcast("user:#{recipient_id}", "conversation_updated", payload)
+
+      ChatServiceWeb.Endpoint.broadcast("user:#{recipient_id}", "new_notification", %{
+        type: "message",
+        actor_id: sender_id
+      })
+    end
+
+    :ok
+  end
+
   defp broadcast_message(conversation_id, %Message{} = message) do
     Phoenix.PubSub.broadcast(
       ChatService.PubSub,
@@ -329,28 +435,234 @@ defmodule ChatService.Messages.MessageService do
   end
 
   defp publish_kafka_event(%Message{} = message, recipient_id \\ nil) do
-    data =
-      %{
-        conversation_id: message.conversation_id,
-        message_id: message.message_id,
-        sender_id: message.sender_id,
-        content: message.content,
-        content_type: message.content_type,
-        created_at: format_datetime(message.created_at)
-      }
-      |> then(fn d ->
-        if recipient_id, do: Map.put(d, :recipient_id, recipient_id), else: d
-      end)
-
     event = %{
       event: "message.sent",
-      data: data,
+      data: message_sent_data(message, recipient_id),
       timestamp: DateTime.to_iso8601(DateTime.utc_now())
     }
 
     KafkaProducer.produce("message.sent", message.conversation_id, event)
   end
 
+  @doc """
+  The `data` of the `message.sent` Kafka event.
+
+  `metadata` travels with it because a media message keeps only its hosted
+  URL in `content`: whoever writes the push needs the type and the details
+  (voice note length, file name, shared contact) to describe the message
+  instead of showing that URL. Absent when the message has none, the same
+  way `recipient_id` is.
+  """
+  def message_sent_data(%Message{} = message, recipient_id \\ nil) do
+    %{
+      conversation_id: message.conversation_id,
+      message_id: message.message_id,
+      sender_id: message.sender_id,
+      content: message.content,
+      content_type: message.content_type,
+      created_at: format_datetime(message.created_at)
+    }
+    |> put_present(:recipient_id, recipient_id)
+    |> put_present(:metadata, message.metadata)
+  end
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, _key, value) when value == %{}, do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
+
   defp format_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
   defp format_datetime(other), do: to_string(other)
+
+  @doc """
+  One message by id.
+  """
+  def get_message(conversation_id, message_id) do
+    query = "SELECT * FROM messages WHERE conversation_id = ? AND message_id = ?"
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id}
+    }
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, page} ->
+        case Enum.to_list(page) do
+          [row | _] -> {:ok, Message.from_row(row)}
+          [] -> {:error, :not_found}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Messages of one thread (Slack style), oldest first, including the root.
+  """
+  def get_thread_messages(conversation_id, thread_id) do
+    query = """
+    SELECT message_id FROM thread_messages WHERE conversation_id = ? AND thread_id = ?
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "thread_id" => {"text", thread_id}
+    }
+
+    with {:ok, page} <- Repo.execute_prepared(query, params) do
+      ids = [thread_id | Enum.map(page, &to_string(&1["message_id"]))] |> Enum.uniq()
+
+      messages =
+        ids
+        |> Enum.map(fn id -> get_message(conversation_id, id) end)
+        |> Enum.flat_map(fn
+          {:ok, msg} -> [msg]
+          _ -> []
+        end)
+        |> Enum.sort_by(& &1.created_at, {:asc, DateTime})
+
+      {:ok, messages}
+    end
+  end
+
+  @doc """
+  Pin a message in a conversation (Telegram and WhatsApp keep a bar with it
+  under the header). Both participants of a private chat may pin, and the
+  pinned set lives in its own table so the bar costs one small read.
+  """
+  def pin_message(conversation_id, message_id, user_id) do
+    now = DateTime.utc_now()
+
+    insert = """
+    INSERT INTO pinned_messages (conversation_id, message_id, pinned_by, pinned_at)
+    VALUES (?, ?, ?, ?)
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id},
+      "pinned_by" => {"text", to_string(user_id)},
+      "pinned_at" => {"timestamp", now}
+    }
+
+    with {:ok, _} <- Repo.execute_prepared(insert, params),
+         {:ok, message} <- get_message(conversation_id, message_id) do
+      payload = %{
+        conversation_id: conversation_id,
+        message_id: message_id,
+        pinned_by: to_string(user_id),
+        pinned_at: DateTime.to_iso8601(now),
+        message: Message.to_map(message)
+      }
+
+      broadcast_event(conversation_id, :message_pinned, payload)
+      {:ok, payload}
+    end
+  end
+
+  @doc """
+  Remove a message from the pinned set.
+  """
+  def unpin_message(conversation_id, message_id, user_id) do
+    query = """
+    DELETE FROM pinned_messages WHERE conversation_id = ? AND message_id = ?
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "message_id" => {"timeuuid", message_id}
+    }
+
+    with {:ok, _} <- Repo.execute_prepared(query, params) do
+      payload = %{
+        conversation_id: conversation_id,
+        message_id: message_id,
+        unpinned_by: to_string(user_id)
+      }
+
+      broadcast_event(conversation_id, :message_unpinned, payload)
+      {:ok, payload}
+    end
+  end
+
+  @doc """
+  Every pinned message of a conversation, newest first. Rows whose message is
+  gone (deleted for everyone) are dropped, so the bar never points nowhere.
+  """
+  def get_pinned_messages(conversation_id) do
+    query = """
+    SELECT message_id, pinned_by, pinned_at FROM pinned_messages
+    WHERE conversation_id = ?
+    """
+
+    params = %{"conversation_id" => {"uuid", conversation_id}}
+
+    with {:ok, page} <- Repo.execute_prepared(query, params) do
+      messages =
+        page
+        |> Enum.to_list()
+        |> Enum.map(&to_string(&1["message_id"]))
+        |> Enum.flat_map(fn id ->
+          case get_message(conversation_id, id) do
+            {:ok, %Message{is_deleted: true}} -> []
+            {:ok, msg} -> [msg]
+            _ -> []
+          end
+        end)
+        |> Enum.sort_by(& &1.created_at, {:desc, DateTime})
+
+      {:ok, messages}
+    end
+  end
+
+  defp index_thread_message(conversation_id, thread_id, message_id, now) do
+    query = """
+    INSERT INTO thread_messages (conversation_id, thread_id, message_id, created_at)
+    VALUES (?, ?, ?, ?)
+    """
+
+    params = %{
+      "conversation_id" => {"uuid", conversation_id},
+      "thread_id" => {"text", thread_id},
+      "message_id" => {"timeuuid", message_id},
+      "created_at" => {"timestamp", now}
+    }
+
+    case Repo.execute_prepared(query, params) do
+      {:ok, _} -> :ok
+      {:error, reason} -> Logger.error("thread index failed: #{inspect(reason)}")
+    end
+  end
+
+  # The first line of the message that started the thread, for the inbox row.
+  defp root_preview(conversation_id, thread_id) do
+    case get_message(conversation_id, thread_id) do
+      {:ok, message} -> preview_for(message.content, message.content_type, nil)
+      _ -> ""
+    end
+  end
+
+  @doc """
+  What the phones get on `conversation_updated`. The app shows `last_message`
+  in the banner that drops in for a new message, and for a photo or a video
+  the raw content is the hosted address of the file (owner, Oct 6 2026: the
+  notification of a video "is the Cloudinary link"). So a media message goes
+  out as the same `[video]` marker the conversation list stores, which every
+  build already turns into its label, plus the type for the builds that
+  localise from it. Text is sent as written.
+  """
+  def conversation_updated_payload(conversation_id, sender_id, content, content_type) do
+    type = if is_binary(content_type) and content_type != "", do: content_type, else: "text"
+
+    %{
+      conversation_id: conversation_id,
+      last_message: preview_for(content, type, nil),
+      content_type: type,
+      sender_id: sender_id
+    }
+  end
+
+  defp preview_for(content, "text", nil), do: content
+  defp preview_for(content, "text", _thread), do: "[thread] " <> content
+  defp preview_for(_content, content_type, _thread), do: "[" <> content_type <> "]"
 end

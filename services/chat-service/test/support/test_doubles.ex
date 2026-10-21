@@ -76,4 +76,15 @@ defmodule ChatService.Test.Doubles do
       :ok
     end
   end
+
+  # ── ConversationPreview doubles ───────────────────────────────────────
+
+  defmodule ConversationPreview.Recording do
+    @behaviour ChatService.Messages.ConversationPreview
+    @impl true
+    def message_deleted(message_id, conversation_id, deleted_by) do
+      send(self(), {:conversation_preview_deleted, message_id, conversation_id, deleted_by})
+      :ok
+    end
+  end
 end
