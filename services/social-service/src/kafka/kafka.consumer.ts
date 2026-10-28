@@ -343,16 +343,73 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * content.updated -> invalidate cached content (future: notify likers)
+   * content.updated -> tell the people an edit tagged for the first time.
+   * content-service sends only those, so nobody hears twice (Oct 27 2026: the
+   * edit screen can tag people now, and before this an edit never told them).
    */
   private async handleContentUpdated(data: {
     content_id: string;
     author_id: string;
+    tagged_user_ids?: string[];
   }): Promise<void> {
     if (!data.content_id) return;
     this.logger.log(`Processing content.updated for content ${data.content_id}`);
     // No cache to invalidate currently (content is fetched via gRPC, not cached in Redis)
-    // This handler exists for future extensibility (e.g. re-index search, notify)
+    this.notifyTagged(data.content_id, data.author_id, data.tagged_user_ids);
+  }
+
+  /**
+   * A mention notification and push for each person tagged, the author left
+   * out. Used for a new post and for an edit that tags someone new.
+   */
+  private notifyTagged(
+    contentId: string,
+    authorId: string,
+    taggedUserIds: string[] | undefined,
+  ): void {
+    // Whoever the caption tags hears about it whether or not they follow the
+    // author, which is the whole point of being tagged (Instagram style
+    // tagging, Sep 2026). The author tagging themselves is dropped.
+    const taggedIds = Array.from(
+      new Set((taggedUserIds ?? []).map(String).filter(Boolean)),
+    ).filter((id) => id !== String(authorId));
+
+    if (taggedIds.length > 0) {
+      this.prisma.notification
+        .createMany({
+          data: taggedIds.map((recipientId) => ({
+            recipientId,
+            type: "mention",
+            actorId: authorId,
+            referenceId: contentId,
+            isRead: false,
+          })),
+        })
+        .catch((err) =>
+          this.logger.error(
+            `Failed to create mention notifications for content ${contentId}: ${err.message}`,
+          ),
+        );
+
+      this.grpcClients
+        .getUser(authorId)
+        .then((author) =>
+          this.pushService.sendPushBulk(
+            taggedIds,
+            "mention",
+            authorId,
+            author?.username || "Someone",
+            contentId,
+          ),
+        )
+        .catch((err) =>
+          this.logger.error(`Bulk push for mention failed: ${err.message}`),
+        );
+
+      this.logger.log(
+        `Content ${contentId} tagged ${taggedIds.length} people`,
+      );
+    }
   }
 
   /**
@@ -399,49 +456,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       `Content ${data.content_id} fanned out to ${followerIds.length} followers`,
     );
 
-    // Whoever the caption tags hears about it whether or not they follow the
-    // author, which is the whole point of being tagged (Instagram style
-    // tagging, Sep 2026). The author tagging themselves is dropped.
-    const taggedIds = Array.from(
-      new Set((data.tagged_user_ids ?? []).map(String).filter(Boolean)),
-    ).filter((id) => id !== String(data.author_id));
-
-    if (taggedIds.length > 0) {
-      this.prisma.notification
-        .createMany({
-          data: taggedIds.map((recipientId) => ({
-            recipientId,
-            type: "mention",
-            actorId: data.author_id,
-            referenceId: data.content_id,
-            isRead: false,
-          })),
-        })
-        .catch((err) =>
-          this.logger.error(
-            `Failed to create mention notifications for content ${data.content_id}: ${err.message}`,
-          ),
-        );
-
-      this.grpcClients
-        .getUser(data.author_id)
-        .then((author) =>
-          this.pushService.sendPushBulk(
-            taggedIds,
-            "mention",
-            data.author_id,
-            author?.username || "Someone",
-            data.content_id,
-          ),
-        )
-        .catch((err) =>
-          this.logger.error(`Bulk push for mention failed: ${err.message}`),
-        );
-
-      this.logger.log(
-        `Content ${data.content_id} tagged ${taggedIds.length} people`,
-      );
-    }
+    this.notifyTagged(data.content_id, data.author_id, data.tagged_user_ids);
 
     // Notify each follower that someone they follow just posted.
     // Bulk insert + bulk push are fire-and-forget so a slow notification
