@@ -157,10 +157,56 @@ func (h *UserHandler) GetUser(c *fiber.Ctx) error {
 		})
 	}
 
+	if !h.canSeePrivate(c, profile.ID) {
+		profile = profile.Public()
+	}
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
 		Data:    profile,
 	})
+}
+
+// viewerID is the signed in caller, or "" (set by RequireAuth or OptionalAuth).
+func viewerID(c *fiber.Ctx) string {
+	v, _ := c.Locals("userID").(string)
+	return v
+}
+
+// canSeePrivate: the caller is the owner of the profile or one of its linked
+// accounts (a representative and the creators it manages).
+func (h *UserHandler) canSeePrivate(c *fiber.Ctx, profileID uint64) bool {
+	viewer := viewerID(c)
+	if viewer == "" {
+		return false
+	}
+	if viewer == strconv.FormatUint(profileID, 10) {
+		return true
+	}
+	ids, err := h.userService.GetLinkedAccountIDsForUser(profileID)
+	if err != nil {
+		return false
+	}
+	for _, id := range ids {
+		if strconv.FormatUint(id, 10) == viewer {
+			return true
+		}
+	}
+	return false
+}
+
+// publicList strips every profile except the caller's own. Lists never carry
+// another account's private fields, linked or not.
+func publicList(c *fiber.Ctx, profiles []*models.UserProfile) []*models.UserProfile {
+	viewer := viewerID(c)
+	out := make([]*models.UserProfile, 0, len(profiles))
+	for _, p := range profiles {
+		if p != nil && viewer != "" && strconv.FormatUint(p.ID, 10) == viewer {
+			out = append(out, p)
+			continue
+		}
+		out = append(out, p.Public())
+	}
+	return out
 }
 
 // SearchUsers handles GET /users/search?q=term&limit=20
@@ -190,7 +236,7 @@ func (h *UserHandler) SearchUsers(c *fiber.Ctx) error {
 
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
-		Data:    profiles,
+		Data:    publicList(c, profiles),
 	})
 }
 
@@ -267,7 +313,7 @@ func (h *UserHandler) DiscoverUsers(c *fiber.Ctx) error {
 
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
-		Data:    profiles,
+		Data:    publicList(c, profiles),
 	})
 }
 

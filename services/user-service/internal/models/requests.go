@@ -318,3 +318,30 @@ type Login2FAResponse struct {
 	TempToken    string `json:"tempToken"`
 	MaskedTarget string `json:"maskedTarget"`
 }
+
+// Public returns the profile as anyone may see it: the person's own account,
+// and the accounts linked to it, get the full profile; everyone else gets this.
+// Until Nov 5 2026 GET /users/:id, /users/search and /users/discover served
+// inmate numbers, inmate state, phones, dates of birth, recording consent and
+// the representative link of any user to anyone, signed in or not.
+func (p *UserProfile) Public() *UserProfile {
+	if p == nil {
+		return nil
+	}
+	q := *p
+	q.Email = ""
+	q.PhoneCountryCode = nil
+	q.PhoneNumber = nil
+	q.InmateNumber = nil
+	q.InmateState = nil
+	q.CreatorName = nil
+	q.Relationship = nil
+	q.ConsentToRecording = nil
+	q.CreatorEmail = nil
+	q.CreatorPhone = nil
+	q.DateOfBirth = nil
+	q.TwoFactorEnabled = false
+	q.TwoFactorMethod = ""
+	q.RepresentativeID = nil
+	return &q
+}

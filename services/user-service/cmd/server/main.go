@@ -193,9 +193,9 @@ func main() {
 	users.Get("/inmates/lookup", inmateHandler.LookupInmate)
 
 	// User routes (public)
-	users.Get("/search", userHandler.SearchUsers)
+	users.Get("/search", middleware.OptionalAuth(jwtMgr), userHandler.SearchUsers)
 	users.Get("/discover", middleware.RequireAuth(jwtMgr), userHandler.DiscoverUsers)
-	users.Get("/:id", userHandler.GetUser)
+	users.Get("/:id", middleware.OptionalAuth(jwtMgr), userHandler.GetUser)
 	users.Get("/:id/followers", userHandler.GetFollowers)
 	users.Get("/:id/following", userHandler.GetFollowing)
 	// Internal/server-to-server: telephony-service uses this for TwiML fan-out.

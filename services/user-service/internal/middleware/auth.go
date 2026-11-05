@@ -284,6 +284,22 @@ func RequireAuth(jwtMgr *JWTManager) fiber.Handler {
 	}
 }
 
+// OptionalAuth reads a full user token when one is sent and never rejects:
+// public routes use it to tell the owner of a profile from everyone else.
+func OptionalAuth(jwtMgr *JWTManager) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		parts := strings.SplitN(c.Get("Authorization"), " ", 2)
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			if parsed, err := jwtMgr.ValidateToken(parts[1]); err == nil && parsed.EffectiveScope() == ScopeUser {
+				c.Locals("claims", parsed)
+				c.Locals("userID", parsed.UserID)
+				c.Locals("scope", parsed.EffectiveScope())
+			}
+		}
+		return c.Next()
+	}
+}
+
 // RequireSignupScope gates the /signup/* endpoints. The token must carry the
 // signup_pending scope; full user tokens are rejected so a confirmed user can
 // never accidentally drive signup endpoints with their session token.
