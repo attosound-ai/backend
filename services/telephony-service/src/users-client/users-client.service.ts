@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { CacheService } from "../cache/cache.service";
+import { internalHeaders } from "./internal-service-token";
 
 const CACHE_TTL_SECONDS = 300; // 5 minutes
 const NEGATIVE_CACHE_TTL_SECONDS = 60; // 1 minute for misses
@@ -24,6 +25,8 @@ export class UsersClientService {
   private readonly logger = new Logger(UsersClientService.name);
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  // Signs the service token user-service requires on its internal routes.
+  private readonly jwtSecret: string;
 
   constructor(
     config: ConfigService,
@@ -31,6 +34,7 @@ export class UsersClientService {
   ) {
     this.baseUrl = config.get<string>("userService.url") ?? "";
     this.timeoutMs = config.get<number>("userService.timeoutMs") ?? 500;
+    this.jwtSecret = config.get<string>("jwt.secret") ?? "";
   }
 
   /**
@@ -118,7 +122,7 @@ export class UsersClientService {
     try {
       const res = await fetch(
         `${this.baseUrl}/users/${userId}/linked-account-ids`,
-        { signal: controller.signal, headers: { Accept: "application/json" } },
+        { signal: controller.signal, headers: internalHeaders(this.jwtSecret) },
       );
       if (res.status === 404) return null;
       if (!res.ok) {
@@ -184,7 +188,7 @@ export class UsersClientService {
     try {
       const res = await fetch(`${this.baseUrl}/users/${userId}/push-tokens`, {
         signal: controller.signal,
-        headers: { Accept: "application/json" },
+        headers: internalHeaders(this.jwtSecret),
       });
       if (!res.ok) return [];
       const payload = (await res.json()) as unknown;
