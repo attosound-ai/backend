@@ -117,15 +117,13 @@ def test_no_free_plan_and_unknown_plan_means_no_cap():
     assert resolve_max_recording_seconds([row("paid", 9900, BASE)], "missing") is None
 
 
-def test_seed_caps_record_at_three_minutes_and_leaves_pro_unlimited():
-    assert SEED_PLAN_MAX_RECORDING_SECONDS.get("record") == 180
-    assert "record_pro" not in SEED_PLAN_MAX_RECORDING_SECONDS
+def test_seed_leaves_every_plan_without_a_cap():
+    # David, Nov 12 2026: everything without a limit for now.
+    assert SEED_PLAN_MAX_RECORDING_SECONDS == {}
 
 
-def test_seed_rows_carry_the_cap():
+def test_seed_rows_carry_no_cap():
     from app.plan_seed import seed_rows
 
     caps = {p.key: p.max_recording_seconds for p in seed_rows()}
-    assert caps["record"] == 180
-    assert caps["record_pro"] is None
-    assert caps["connect_free"] is None
+    assert caps == {"connect_free": None, "record": None, "record_pro": None, "connect_pro": None}

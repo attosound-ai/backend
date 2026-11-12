@@ -57,7 +57,7 @@ async def lifespan(_app: FastAPI):
         # subscriptions.plan used to be a Postgres enum; the plan catalog
         # needs a plain string so admin created plans can be assigned.
         await migrate_plan_column(conn)
-        # plans.max_recording_seconds (Nov 2026): nullable column, Record seeded at 180.
+        # plans.max_recording_seconds (Nov 2026): nullable column, no limit by default.
         await migrate_plan_limits(conn)
     logger.info("Database tables ensured")
 

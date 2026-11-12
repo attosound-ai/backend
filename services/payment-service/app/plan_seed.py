@@ -61,9 +61,11 @@ async def migrate_plan_column(conn: AsyncConnection) -> None:
 async def migrate_plan_limits(conn: AsyncConnection) -> bool:
     """Add plans.max_recording_seconds when it is missing. Returns True if added.
 
-    Additive only: the column is nullable and nothing is dropped or rewritten.
-    The seed caps are written once, in the same boot that adds the column, so a
-    value later edited (or cleared) from the admin dashboard is never put back.
+    Additive only: the column is nullable (no limit) and nothing is dropped or
+    rewritten. Seed caps, when there are any, are written once, in the same boot
+    that adds the column, so a value later edited (or cleared) from the admin
+    dashboard is never put back. Today the seed has none: every plan starts
+    without a limit (David, Nov 12 2026).
     """
     row = await conn.execute(
         text(

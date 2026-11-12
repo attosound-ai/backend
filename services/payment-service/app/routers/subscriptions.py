@@ -126,6 +126,8 @@ async def get_paywall(session: AsyncSession = Depends(get_session)) -> ApiRespon
             "required": len(paid) > 0,
             "freePlan": await plan_catalog.free_plan_key(session),
             "paidFeatures": paid,
+            # Off (the default): recording and editing are open to every plan.
+            "recordingRequiresPlan": await plan_catalog.require_paid_plan_to_record(session),
         },
     )
 

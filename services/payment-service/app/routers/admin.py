@@ -26,7 +26,7 @@ from app.billing_mode import stripe_mode
 from app.config import settings
 from app.database import get_session
 from app.entitlements import ENTITLEMENT_CATALOG, ENTITLEMENT_KEYS
-from app.models.plan import Plan, PlanEntitlement
+from app.models.plan import Plan, PlanEntitlement, PlanSetting
 from app.models.subscription import Subscription
 from app.schemas.transaction import ApiResponse
 
@@ -93,7 +93,13 @@ class PlanCreate(BaseModel):
     features: list[str] = Field(default_factory=list)
     entitlements: list[str] = Field(default_factory=list)
     # Longest recording and longest exported or posted project, in seconds.
-    max_recording_seconds: int | None = Field(default=None, ge=1, le=MAX_RECORDING_SECONDS_CEILING)
+    # Null or 0 is no limit.
+    max_recording_seconds: int | None = Field(default=None, ge=0, le=MAX_RECORDING_SECONDS_CEILING)
+
+    @field_validator("max_recording_seconds")
+    @classmethod
+    def _zero_is_no_limit(cls, value: int | None) -> int | None:
+        return value or None
 
     @field_validator("entitlements")
     @classmethod
@@ -126,8 +132,13 @@ class PlanUpdate(BaseModel):
     sort_order: int | None = None
     features: list[str] | None = None
     entitlements: list[str] | None = None
-    # Sending null clears the cap (no limit); leaving it out keeps the current one.
-    max_recording_seconds: int | None = Field(default=None, ge=1, le=MAX_RECORDING_SECONDS_CEILING)
+    # Sending null or 0 clears the cap (no limit); leaving it out keeps the current one.
+    max_recording_seconds: int | None = Field(default=None, ge=0, le=MAX_RECORDING_SECONDS_CEILING)
+
+    @field_validator("max_recording_seconds")
+    @classmethod
+    def _zero_is_no_limit(cls, value: int | None) -> int | None:
+        return value or None
 
     @field_validator("entitlements")
     @classmethod
@@ -145,6 +156,18 @@ class PlanUpdate(BaseModel):
         if value is None:
             return None
         return [f.strip() for f in value if f and f.strip()]
+
+
+class PlanSettingsBody(BaseModel):
+    """Catalog wide switches. Only the fields sent change."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
+
+    require_paid_plan_to_record: bool | None = None
+
+
+# Path segments under /plans that are not plan keys.
+RESERVED_PLAN_KEYS = frozenset({"settings"})
 
 
 class EntitlementsBody(BaseModel):
@@ -211,6 +234,12 @@ async def _get_plan_or_404(session: AsyncSession, key: str) -> Plan:
     return plan
 
 
+async def _settings_block(session: AsyncSession) -> dict[str, Any]:
+    return {
+        "requirePaidPlanToRecord": await plan_catalog.require_paid_plan_to_record(session),
+    }
+
+
 async def _paywall_block(session: AsyncSession) -> dict[str, Any]:
     paid = await plan_catalog.paid_features(session)
     return {
@@ -234,7 +263,34 @@ async def admin_list_plans(session: AsyncSession = Depends(get_session)) -> ApiR
             "plans": [plan_admin(p, counts.get(p.key, 0)) for p in plans],
             "entitlements": ENTITLEMENT_CATALOG,
             "paywall": await _paywall_block(session),
+            "settings": await _settings_block(session),
         },
+    )
+
+
+# Registered before /plans/{key} so "settings" is never read as a plan key.
+@router.put("/plans/settings", response_model=ApiResponse)
+async def admin_update_plan_settings(
+    body: PlanSettingsBody,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """Flip catalog wide switches: today, whether recording needs a paid plan."""
+    changes = body.model_dump(exclude_unset=True, exclude_none=True)
+    if "require_paid_plan_to_record" in changes:
+        key = plan_catalog.SETTING_REQUIRE_PAID_PLAN_TO_RECORD
+        row = await session.get(PlanSetting, key)
+        value = {"enabled": bool(changes["require_paid_plan_to_record"])}
+        if row is None:
+            session.add(PlanSetting(key=key, value=value))
+        else:
+            row.value = value
+            row.updated_at = datetime.now(UTC)
+        await session.commit()
+        plan_catalog.invalidate()
+        logger.info("Admin set %s to %s", key, value["enabled"])
+    return ApiResponse(
+        success=True,
+        data={"settings": await _settings_block(session), "paywall": await _paywall_block(session)},
     )
 
 
@@ -243,6 +299,8 @@ async def admin_create_plan(
     body: PlanCreate,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
+    if body.key in RESERVED_PLAN_KEYS:
+        raise HTTPException(status_code=400, detail=f"Reserved plan key: {body.key}")
     if await session.get(Plan, body.key) is not None:
         raise HTTPException(status_code=409, detail=f"Plan already exists: {body.key}")
 

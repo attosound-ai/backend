@@ -148,11 +148,15 @@ SEED_PLAN_BILLING: dict[str, tuple[str, int, bool, int]] = {
 SEED_FREE_PLAN_KEY = "connect_free"
 
 # Recording length cap per seed plan, in seconds. Plans not listed have no cap.
-# Agreed with the client on Sep 20 2026: Record stops at 3 minutes, Record Pro
-# has no limit. Editable afterwards from the admin dashboard.
-SEED_PLAN_MAX_RECORDING_SECONDS: dict[str, int] = {
-    "record": 180,
-}
+# The client agreed on Sep 20 2026 to Record at 3 minutes and Record Pro without
+# a limit, but David decided on Nov 12 2026 that for now everything stays
+# without a limit: the cap is set from the admin dashboard when he says so.
+SEED_PLAN_MAX_RECORDING_SECONDS: dict[str, int] = {}
+
+# Recording and editing for everyone while the "require a paid plan to record"
+# switch of the admin dashboard is off (David, Nov 12 2026: everything free for
+# now). With it on, each plan grants only what the catalog says.
+RECORDING_ENTITLEMENTS: frozenset[str] = frozenset({"record_upload", "advanced_production"})
 
 # Backwards compatible aliases for older imports.
 PLAN_ENTITLEMENTS = SEED_PLAN_ENTITLEMENTS

@@ -32,7 +32,8 @@ class Plan(Base):
     # Marketing bullet points shown on the paywall, a JSON list of strings.
     features: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     # Longest single recording and longest exported or posted project, in
-    # seconds. NULL means no limit. Record is seeded at 180 (client, Sep 20 2026).
+    # seconds. NULL means no limit, the default for every plan (David, Nov 12
+    # 2026); set from the admin dashboard.
     max_recording_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -56,6 +57,21 @@ class Plan(Base):
     @property
     def entitlement_keys(self) -> list[str]:
         return sorted(e.entitlement for e in self.entitlements)
+
+
+class PlanSetting(Base):
+    """Catalog wide switches the admin dashboard flips, one row per key."""
+
+    __tablename__ = "plan_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
+    )
 
 
 class PlanEntitlement(Base):

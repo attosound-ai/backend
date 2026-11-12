@@ -20,8 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.entitlements import SEED_FREE_PLAN_KEY
-from app.models.plan import Plan
+from app.entitlements import RECORDING_ENTITLEMENTS, SEED_FREE_PLAN_KEY
+from app.models.plan import Plan, PlanSetting
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +97,50 @@ _cache_loaded_at: float = 0.0
 
 def invalidate() -> None:
     """Drop the cached snapshot. Called after every admin mutation."""
-    global _cache, _cache_loaded_at
+    global _cache, _cache_loaded_at, _settings_cache, _settings_loaded_at
     _cache = None
     _cache_loaded_at = 0.0
+    _settings_cache = None
+    _settings_loaded_at = 0.0
+
+
+# ── Catalog switches (plan_settings) ───────────────────────────────
+
+# Off by default: recording and editing are open to every plan (David, Nov 12
+# 2026). On: each plan grants only its own catalog entitlements again.
+SETTING_REQUIRE_PAID_PLAN_TO_RECORD = "require_paid_plan_to_record"
+
+_settings_cache: dict[str, dict] | None = None
+_settings_loaded_at: float = 0.0
+
+
+def setting_flag(settings_rows: dict[str, dict], key: str, default: bool = False) -> bool:
+    """A boolean switch out of the stored rows ({"enabled": bool}); default when missing."""
+    value = settings_rows.get(key)
+    if isinstance(value, dict) and isinstance(value.get("enabled"), bool):
+        return value["enabled"]
+    return default
+
+
+async def settings_snapshot(session: AsyncSession) -> dict[str, dict]:
+    global _settings_cache, _settings_loaded_at
+    now = time.monotonic()
+    if _settings_cache is not None and now - _settings_loaded_at < CACHE_TTL_SECONDS:
+        return _settings_cache
+    result = await session.execute(select(PlanSetting))
+    rows = {row.key: dict(row.value or {}) for row in result.scalars().all()}
+    _settings_cache = rows
+    _settings_loaded_at = now
+    return rows
+
+
+async def require_paid_plan_to_record(session: AsyncSession) -> bool:
+    return setting_flag(await settings_snapshot(session), SETTING_REQUIRE_PAID_PLAN_TO_RECORD)
+
+
+def with_open_recording(entitlements: frozenset[str], require_paid_plan: bool) -> frozenset[str]:
+    """While the switch is off, every plan records and edits."""
+    return entitlements if require_paid_plan else entitlements | RECORDING_ENTITLEMENTS
 
 
 async def snapshot(session: AsyncSession) -> tuple[PlanRow, ...]:
@@ -176,13 +217,21 @@ async def free_plan_key(session: AsyncSession) -> str:
 
 
 async def entitlements_for(session: AsyncSession, plan_key: str) -> frozenset[str]:
-    """Entitlements of a plan. Unknown or inactive plans get the free plan's set."""
+    """Entitlements of a plan. Unknown or inactive plans get the free plan's set.
+
+    Recording and editing are added to every plan while the admin switch
+    "require a paid plan to record" is off.
+    """
     rows = await snapshot(session)
+    own: frozenset[str] | None = None
     for row in rows:
         if row.key == plan_key and row.active:
-            return row.entitlements
-    free = pick_free_plan(rows)
-    return free.entitlements if free else frozenset()
+            own = row.entitlements
+            break
+    if own is None:
+        free = pick_free_plan(rows)
+        own = free.entitlements if free else frozenset()
+    return with_open_recording(own, await require_paid_plan_to_record(session))
 
 
 async def max_recording_seconds_for(session: AsyncSession, plan_key: str) -> int | None:
@@ -220,11 +269,14 @@ async def can_upgrade(session: AsyncSession, current: str, target: str) -> bool:
 
 
 async def paid_features(session: AsyncSession) -> list[str]:
-    return compute_paid_features(await snapshot(session))
+    paid = compute_paid_features(await snapshot(session))
+    if await require_paid_plan_to_record(session):
+        return paid
+    return [f for f in paid if f not in RECORDING_ENTITLEMENTS]
 
 
 async def paywall_required(session: AsyncSession) -> bool:
-    return compute_paywall_required(await snapshot(session))
+    return len(await paid_features(session)) > 0
 
 
 async def stripe_price_id(session: AsyncSession, plan: str) -> str:

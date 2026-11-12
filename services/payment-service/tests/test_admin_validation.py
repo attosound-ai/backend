@@ -73,7 +73,13 @@ def test_recording_cap_is_optional_and_camel_case():
     assert plan.max_recording_seconds == 180
 
 
-@pytest.mark.parametrize("bad", [0, -5, 24 * 60 * 60 + 1])
+def test_zero_cap_means_no_limit():
+    assert PlanCreate.model_validate(_valid(maxRecordingSeconds=0)).max_recording_seconds is None
+    zero = PlanUpdate.model_validate({"maxRecordingSeconds": 0})
+    assert zero.model_dump(exclude_unset=True) == {"max_recording_seconds": None}
+
+
+@pytest.mark.parametrize("bad", [-1, -5, 24 * 60 * 60 + 1])
 def test_recording_cap_must_be_positive_and_at_most_a_day(bad):
     with pytest.raises(ValidationError):
         PlanCreate.model_validate(_valid(maxRecordingSeconds=bad))

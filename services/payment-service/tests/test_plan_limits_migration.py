@@ -34,13 +34,21 @@ def test_existing_column_is_left_alone():
     assert len(conn.statements) == 1
 
 
-def test_missing_column_is_added_and_record_gets_three_minutes():
+def test_missing_column_is_added_and_every_plan_stays_without_a_cap():
     conn = FakeConn(has_column=False)
     assert asyncio.run(migrate_plan_limits(conn)) is True
     sqls = [s for s, _ in conn.statements]
     assert any("ADD COLUMN IF NOT EXISTS max_recording_seconds INTEGER" in s for s in sqls)
     assert not any("DROP" in s.upper() for s in sqls)
-    updates = [p for s, p in conn.statements if s.startswith("UPDATE plans")]
-    assert updates == [{"seconds": 180, "key": "record"}]
-    # Only fills an empty value; never overwrites what the admin set.
-    assert all("max_recording_seconds IS NULL" in s for s in sqls if s.startswith("UPDATE"))
+    assert not any(s.startswith("UPDATE plans") for s in sqls)
+
+
+def test_a_seed_cap_only_fills_an_empty_value(monkeypatch):
+    from app import plan_seed
+
+    monkeypatch.setattr(plan_seed, "SEED_PLAN_MAX_RECORDING_SECONDS", {"record": 180})
+    conn = FakeConn(has_column=False)
+    asyncio.run(plan_seed.migrate_plan_limits(conn))
+    updates = [(s, p) for s, p in conn.statements if s.startswith("UPDATE plans")]
+    assert [p for _, p in updates] == [{"seconds": 180, "key": "record"}]
+    assert all("max_recording_seconds IS NULL" in s for s, _ in updates)
