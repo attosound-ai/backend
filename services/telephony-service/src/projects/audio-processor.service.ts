@@ -16,7 +16,9 @@ import {
   type MasterEffects,
 } from "./project-settings";
 import { Readable } from "stream";
-import { promises as fs } from "fs";
+import { pipeline } from "stream/promises";
+import { spawn } from "child_process";
+import { createWriteStream, promises as fs } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -29,6 +31,21 @@ import {
   tamanoDeContentRange,
   type CabeceraWav,
 } from "./wav-window";
+import {
+  deliveryDefaults,
+  mixFormat,
+  mixInputFilters,
+  planStorage,
+  storageFfmpegArgs,
+  storedContainerOf,
+  type MixInputFormat,
+  type ProbedAudio,
+  type StoragePlan,
+} from "./audio-format";
+import { PicosEnFlujo } from "./peak-stream";
+
+/** El binario de ffmpeg: el mismo que usa fluent-ffmpeg. */
+const FFMPEG_BIN = process.env.FFMPEG_PATH || "ffmpeg";
 
 @Injectable()
 export class AudioProcessorService {
@@ -183,6 +200,56 @@ export class AudioProcessorService {
     }
   }
 
+  /** Un objeto de S3 a un archivo local, en flujo (nunca entero en memoria). */
+  private async descargarA(bucket: string, key: string, path: string): Promise<void> {
+    const res = await this.s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    await pipeline(res.Body as Readable, createWriteStream(path));
+  }
+
+  /**
+   * Los picos de un segmento que no es WAV (los m4a de calidad completa),
+   * decodificándolo con ffmpeg en flujo. Para una ventana se decodifica solo
+   * su tramo (-ss y -t), que en AAC es búsqueda exacta porque ffmpeg decodifica
+   * desde el paquete anterior y descarta lo que sobra.
+   */
+  private async picosDecodificados(
+    segment: AudioSegment,
+    desde: number,
+    hasta: number,
+    pedidos: number,
+  ): Promise<number[]> {
+    const ext = storedContainerOf(segment) === "m4a" ? "m4a" : "wav";
+    const tmp = join(tmpdir(), `peaks-${randomUUID()}.${ext}`);
+    try {
+      await this.descargarA(segment.storageBucket, segment.storageKey, tmp);
+      const probe = await this.probeAudio(tmp);
+      const durSec = probe.durationMs > 0 ? probe.durationMs / 1000 : segment.durationMs / 1000;
+      const inicio = desde * durSec;
+      const largo = Math.max(0.001, (hasta - desde) * durSec);
+      const estimados = Math.round(largo * (probe.sampleRate || 48000));
+      const count = Math.max(1, Math.min(pedidos, 24000));
+      const acumulador = new PicosEnFlujo(estimados, count, probe.channels || 1);
+      const args = ["-v", "error", "-nostdin"];
+      if (desde > 0 || hasta < 1) args.push("-ss", inicio.toFixed(4), "-t", largo.toFixed(4));
+      args.push("-i", tmp, "-map", "0:a:0", "-vn", "-f", "s16le", "-acodec", "pcm_s16le", "-");
+      await new Promise<void>((resolve, reject) => {
+        const ff = spawn(FFMPEG_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
+        let err = "";
+        ff.stdout.on("data", (c: Buffer) => acumulador.push(c));
+        ff.stderr.on("data", (c: Buffer) => {
+          if (err.length < 2000) err += c.toString();
+        });
+        ff.on("error", reject);
+        ff.on("close", (code) =>
+          code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}: ${err.trim()}`)),
+        );
+      });
+      return acumulador.terminar();
+    } finally {
+      await fs.unlink(tmp).catch(() => {});
+    }
+  }
+
   async generateWaveformData(
     segmentId: string,
     numSamples: number,
@@ -212,6 +279,14 @@ export class AudioProcessorService {
     const tmpFile = join(tmpdir(), `waveform-${randomUUID()}.wav`);
 
     try {
+      // Calidad completa (m4a): no se deja leer por bytes, se decodifica.
+      // Mismo tope de cubos y misma caché que el WAV.
+      if (storedContainerOf(segment) === "m4a") {
+        const picos = await this.picosDecodificados(segment, desde, hasta, numSamples);
+        await this.cache.set(cacheKey, picos, this.cache.jitterTtl(14 * 86400));
+        return picos;
+      }
+
       // Por rango, y SOLO cuando se pide una ventana: es la diferencia entre
       // bajarse los doscientos megas del segmento o los veinte kilobytes que
       // se van a dibujar. La envolvente completa, que es la que pide todo el
@@ -336,36 +411,92 @@ export class AudioProcessorService {
     startMs: number,
     endMs: number,
   ): Promise<Buffer> {
-    const tmpInput = join(tmpdir(), `cut-in-${randomUUID()}.wav`);
     const tmpOutput = join(tmpdir(), `cut-out-${randomUUID()}.wav`);
-
     try {
-      // Download source file
-      const response = await this.s3.send(
-        new GetObjectCommand({ Bucket: bucket, Key: key }),
-      );
-      const chunks: Buffer[] = [];
-      for await (const chunk of response.Body as Readable) {
-        chunks.push(Buffer.from(chunk));
-      }
-      await fs.writeFile(tmpInput, Buffer.concat(chunks));
+      await this.cutSegmentToFile(bucket, key, startMs, endMs, tmpOutput);
+      return await fs.readFile(tmpOutput);
+    } finally {
+      await fs.unlink(tmpOutput).catch(() => {});
+    }
+  }
 
-      // Cut with ffmpeg
+  /**
+   * Corta un tramo de un segmento a un WAV PCM de 16 bits con la frecuencia y
+   * los canales del original, y dice cuáles son (leídos de la cabecera del
+   * WAV escrito, sin otro ffprobe). El original baja a disco en flujo: un
+   * segmento de 48 kHz ya no se junta entero en memoria.
+   */
+  async cutSegmentToFile(
+    bucket: string,
+    key: string,
+    startMs: number,
+    endMs: number,
+    outputPath: string,
+  ): Promise<MixInputFormat> {
+    const ext = key.toLowerCase().endsWith(".m4a") ? "m4a" : "wav";
+    const tmpInput = join(tmpdir(), `cut-in-${randomUUID()}.${ext}`);
+    try {
+      await this.descargarA(bucket, key, tmpInput);
       await new Promise<void>((resolve, reject) => {
         ffmpeg(tmpInput)
           .setStartTime(startMs / 1000)
           .setDuration((endMs - startMs) / 1000)
-          .output(tmpOutput)
+          .output(outputPath)
+          .outputOptions(["-map", "0:a:0", "-vn", "-c:a", "pcm_s16le", "-f", "wav"])
           .on("end", () => resolve())
           .on("error", (err: Error) => reject(err))
           .run();
       });
-
-      return await fs.readFile(tmpOutput);
+      return await this.formatoDeWav(outputPath);
     } finally {
       await fs.unlink(tmpInput).catch(() => {});
-      await fs.unlink(tmpOutput).catch(() => {});
     }
+  }
+
+  /** Frecuencia y canales de un WAV local, de su cabecera. */
+  private async formatoDeWav(path: string): Promise<MixInputFormat> {
+    const fh = await fs.open(path, "r");
+    try {
+      const head = Buffer.alloc(8192);
+      const { bytesRead } = await fh.read(head, 0, head.length, 0);
+      const cab = leerCabeceraWav(head.subarray(0, bytesRead));
+      if (cab && cab.sampleRate > 0) {
+        return { sampleRate: cab.sampleRate, channels: cab.channels };
+      }
+    } finally {
+      await fh.close();
+    }
+    const probe = await this.probeAudio(path);
+    return { sampleRate: probe.sampleRate || 8000, channels: probe.channels || 1 };
+  }
+
+  /**
+   * Deja un archivo subido en la forma en que se guarda (ver audio-format):
+   * WAV PCM a su frecuencia si es audio de teléfono, AAC en m4a a la
+   * frecuencia original hasta 48 kHz si no. Devuelve el archivo a guardar,
+   * el plan y lo que de verdad quedó escrito.
+   */
+  async prepareForStorage(
+    inputPath: string,
+    probe: ProbedAudio | null,
+  ): Promise<{ path: string; plan: StoragePlan; stored: ProbedAudio; encodeMs: number }> {
+    const plan = planStorage(probe);
+    if (plan.action === "keep" && probe) {
+      return { path: inputPath, plan, stored: probe, encodeMs: 0 };
+    }
+    const started = Date.now();
+    const outputPath = join(tmpdir(), `store-${randomUUID()}.${plan.container}`);
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(inputPath)
+        .output(outputPath)
+        .outputOptions(storageFfmpegArgs(plan))
+        .on("end", () => resolve())
+        .on("error", (err: Error) => reject(err))
+        .run();
+    });
+    const encodeMs = Date.now() - started;
+    const stored = await this.probeAudio(outputPath);
+    return { path: outputPath, plan, stored, encodeMs };
   }
 
   /**
@@ -454,7 +585,9 @@ export class AudioProcessorService {
   }
 
   /**
-   * Convert any supported audio file to WAV format.
+   * Convert any supported audio file to 8 kHz mono WAV (the old telephone
+   * contract). Imports no longer go through here: see prepareForStorage.
+   * Kept for callers that really want telephone audio.
    */
   async convertToWav(inputPath: string): Promise<string> {
     const outputPath = join(tmpdir(), `convert-${randomUUID()}.wav`);
@@ -479,12 +612,7 @@ export class AudioProcessorService {
    * identical format, so mixing that import with 8 kHz mono call recordings
    * produced a garbled or failed export. Probing the bytes removes the guess.
    */
-  async probeAudio(filePath: string): Promise<{
-    sampleRate: number;
-    channels: number;
-    codecName: string;
-    durationMs: number;
-  }> {
+  async probeAudio(filePath: string): Promise<ProbedAudio> {
     return new Promise((resolve, reject) => {
       ffmpeg.ffprobe(filePath, (err: Error | null, metadata: any) => {
         if (err) return reject(err);
@@ -495,6 +623,7 @@ export class AudioProcessorService {
           sampleRate: Number(stream?.sample_rate ?? 0),
           channels: Number(stream?.channels ?? 0),
           codecName: String(stream?.codec_name ?? ""),
+          formatName: String(metadata?.format?.format_name ?? ""),
           durationMs: Math.round(Number(metadata?.format?.duration ?? 0) * 1000),
         });
       });
@@ -538,8 +667,13 @@ export class AudioProcessorService {
       positionMs: number;
       volume: number;
       volumeExpr?: string | null;
+      /** Formato real del archivo cortado. */
+      format: MixInputFormat;
+      /** Duración del corte en ms, para el fundido de salida. */
+      durationMs: number;
     }[],
     outputPath: string,
+    target: { sampleRate: number; channels: 1 | 2 },
   ): Promise<void> {
     const EDGE_FADE_SEC = 0.004;
     await new Promise<void>((resolve, reject) => {
@@ -549,15 +683,27 @@ export class AudioProcessorService {
         cmd.input(p.file);
         const vol = Number.isFinite(p.volume) ? Math.max(0, p.volume) : 1;
         const delayMs = Math.max(0, Math.round(p.positionMs));
+        // Todas las entradas al formato de la mezcla antes de nada: un clip
+        // viejo de 8 kHz suena igual de rápido y en el mismo tono al lado de
+        // uno nuevo de 48 kHz.
+        const convert = mixInputFilters(p.format, target).join(",");
         // The clip's automation envelope runs before the static clip gain,
         // in the clip's own time base (adelay has not moved it yet).
         const envelope = p.volumeExpr
           ? `volume=volume='${p.volumeExpr}':eval=frame,`
           : "";
+        // Fundido de salida con la duración conocida. Antes era
+        // areverse,afade,areverse, y areverse guarda el clip ENTERO en
+        // memoria: 30 minutos a 48 kHz estéreo en flotante son 690 MB.
+        const durSec = Math.max(0, p.durationMs / 1000);
+        const fadeOut =
+          durSec > EDGE_FADE_SEC * 2
+            ? `afade=t=out:st=${(durSec - EDGE_FADE_SEC).toFixed(4)}:d=${EDGE_FADE_SEC},`
+            : "";
         chains.push(
-          `[${i}:a]${envelope}volume=${vol.toFixed(4)},` +
+          `[${i}:a]${convert},${envelope}volume=${vol.toFixed(4)},` +
             `afade=t=in:st=0:d=${EDGE_FADE_SEC},` +
-            `areverse,afade=t=in:st=0:d=${EDGE_FADE_SEC},areverse,` +
+            fadeOut +
             `adelay=${delayMs}:all=1[c${i}]`,
         );
       });
@@ -569,7 +715,7 @@ export class AudioProcessorService {
       cmd
         .complexFilter(filter, "out")
         .output(outputPath)
-        .outputOptions(["-f", "wav"])
+        .outputOptions(["-c:a", "pcm_s16le", "-f", "wav"])
         .on("end", () => resolve())
         .on("error", (err: Error) => reject(err))
         .run();
@@ -691,7 +837,13 @@ export class AudioProcessorService {
     master?: MasterEffects,
     options?: ExportOptions,
     automation?: Record<string, Array<[number, number]>>,
-  ): Promise<{ downloadUrl: string; fileSizeBytes: number }> {
+  ): Promise<{
+    downloadUrl: string;
+    fileSizeBytes: number;
+    sampleRate: number;
+    channels: number;
+    format: string;
+  }> {
     if (clips.length === 0) {
       throw new NotFoundException("No clips to export");
     }
@@ -713,14 +865,20 @@ export class AudioProcessorService {
       // timeline position (gaps = silence). Legacy rows that predate
       // positionInTimeline (null/undefined) fall back to sequential placement
       // by `order`, which reproduces the old concat behaviour for them only.
+      // Primero se corta todo, porque el formato de la mezcla depende de
+      // todos los clips: el mejor de ellos, hasta 48 kHz estéreo.
+      type Placed = {
+        file: string;
+        positionMs: number;
+        volume: number;
+        volumeExpr?: string | null;
+        format: MixInputFormat;
+        durationMs: number;
+      };
+      const lanesPlaced: Placed[][] = [];
       for (const [, laneClips] of byLane) {
         const sortedClips = [...laneClips].sort((a, b) => a.order - b.order);
-        const placed: {
-          file: string;
-          positionMs: number;
-          volume: number;
-          volumeExpr?: string | null;
-        }[] = [];
+        const placed: Placed[] = [];
         let sequentialCursorMs = 0;
 
         for (const clip of sortedClips) {
@@ -729,16 +887,15 @@ export class AudioProcessorService {
           });
           if (!segment) continue;
 
-          const cutBuffer = await this.cutSegment(
+          const tmpCut = join(tmpdir(), `clip-${randomUUID()}.wav`);
+          allTmpFiles.push(tmpCut);
+          const format = await this.cutSegmentToFile(
             segment.storageBucket,
             segment.storageKey,
             clip.startInSegment,
             clip.endInSegment,
+            tmpCut,
           );
-
-          const tmpCut = join(tmpdir(), `clip-${randomUUID()}.wav`);
-          await fs.writeFile(tmpCut, cutBuffer);
-          allTmpFiles.push(tmpCut);
 
           const hasPosition =
             typeof clip.positionInTimeline === "number" &&
@@ -757,13 +914,18 @@ export class AudioProcessorService {
             volumeExpr: Array.isArray(envelope)
               ? envelopeVolumeExpression(envelope)
               : null,
+            format,
+            durationMs: Math.max(0, clip.endInSegment - clip.startInSegment),
           });
         }
 
-        if (placed.length === 0) continue;
+        if (placed.length > 0) lanesPlaced.push(placed);
+      }
 
+      const target = mixFormat(lanesPlaced.flat().map((p) => p.format));
+      for (const placed of lanesPlaced) {
         const laneOutput = join(tmpdir(), `lane-${randomUUID()}.wav`);
-        await this.placeClipsOnLane(placed, laneOutput);
+        await this.placeClipsOnLane(placed, laneOutput, target);
         laneFiles.push(laneOutput);
         allTmpFiles.push(laneOutput);
       }
@@ -771,6 +933,13 @@ export class AudioProcessorService {
       if (laneFiles.length === 0) {
         throw new NotFoundException("No valid clips to export");
       }
+      this.logger.log(
+        "Export format: project=%s rate=%d channels=%d clips=%d",
+        projectId,
+        target.sampleRate,
+        target.channels,
+        lanesPlaced.flat().length,
+      );
 
       // Mix lanes together (or just use single lane output)
       await this.mixFiles(laneFiles, tmpOutput);
@@ -803,13 +972,10 @@ export class AudioProcessorService {
 
       // Master effects (the editor's Master Effects sheet) run on the mix
       // bus, before loudness normalisation so the level target still holds.
-      // The pipeline is 8 kHz mono; probe rather than assume so an EQ band
-      // above Nyquist is skipped instead of failing the export.
-      const masterFilters = masterFilterChain(
-        master,
-        (await this.probeAudio(finalOutput).catch(() => null))?.sampleRate ??
-          8000,
-      );
+      // The mix runs at its clips' best rate (8 kHz for a phone only
+      // project, up to 48 kHz); an EQ band above Nyquist is skipped instead of
+      // failing the export.
+      const masterFilters = masterFilterChain(master, target.sampleRate);
       if (masterFilters.length > 0) {
         const masteredOutput = join(
           tmpdir(),
@@ -820,9 +986,12 @@ export class AudioProcessorService {
         finalOutput = masteredOutput;
       }
 
-      // Encode to the exporter's format with its metadata and cover.
-      const plan = encodePlan(options);
-      const encoded = await this.encodeExport(finalOutput, plan, options);
+      // Encode to the exporter's format with its metadata and cover. Sin
+      // formato elegido, una mezcla de calidad completa sale en AAC 256 kbps
+      // (deliveryDefaults); una de teléfono, en WAV como siempre.
+      const delivery = deliveryDefaults(options, target.sampleRate);
+      const plan = encodePlan(delivery);
+      const encoded = await this.encodeExport(finalOutput, plan, delivery);
       if (encoded.tmpPath !== finalOutput) allTmpFiles.push(encoded.tmpPath);
 
       // Upload to S3
@@ -845,7 +1014,13 @@ export class AudioProcessorService {
         outputBuffer.length,
       );
 
-      return { downloadUrl, fileSizeBytes: outputBuffer.length };
+      return {
+        downloadUrl,
+        fileSizeBytes: outputBuffer.length,
+        sampleRate: delivery.sampleRate ?? target.sampleRate,
+        channels: delivery.channels ?? target.channels,
+        format: plan.extension,
+      };
     } finally {
       for (const f of allTmpFiles) {
         await fs.unlink(f).catch(() => {});

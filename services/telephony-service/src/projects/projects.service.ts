@@ -14,6 +14,7 @@ import { AudioStorageService } from "../media/audio-storage.service";
 import { AudioProcessorService } from "./audio-processor.service";
 import { AnalyticsService } from "../analytics/analytics.service";
 import { ProjectAccessService } from "./project-access";
+import { containerMime } from "./audio-format";
 
 /**
  * Mirror of the app's lane mixer rules (front laneMixer.computeLaneEffectiveVolume)
@@ -45,13 +46,12 @@ import { join } from "path";
 import { randomUUID } from "crypto";
 
 /**
- * The project pipeline's real audio contract: 8 kHz mono PCM WAV. Twilio call
- * recordings arrive at this rate, `convertToWav` forces it, the waveform reader
- * assumes mono int16, and `concatFiles` exports with `-c copy`, which requires
- * every clip on a lane to share it. Imports MUST be normalised to it or exports
- * break. Named here so the contract is stated once instead of hardcoded.
+ * The project pipeline's audio contract (since Nov 12 2026, see audio-format):
+ * telephone grade audio (16 kHz or less) is stored as PCM WAV at the rate it
+ * arrives, everything else as AAC in m4a at its own rate up to 48 kHz, mono or
+ * stereo as the source. Before, every import was forced to 8 kHz mono. The
+ * export converts every clip to one mix format, so old and new segments mix.
  */
-const TARGET_SAMPLE_RATE = 8000;
 
 @Injectable()
 export class ProjectsService {
@@ -437,7 +437,13 @@ export class ProjectsService {
     projectId: string,
     userId: string,
     options?: ExportOptions,
-  ): Promise<{ downloadUrl: string; fileSizeBytes: number }> {
+  ): Promise<{
+    downloadUrl: string;
+    fileSizeBytes: number;
+    sampleRate: number;
+    channels: number;
+    format: string;
+  }> {
     const project = await this.access.requireProject(projectId, userId);
 
     const clips = await this.clipRepo.find({
@@ -569,52 +575,66 @@ export class ProjectsService {
     try {
       // Normalise by PROBING THE BYTES, never by trusting the client's mime.
       // The old check (`mimetype === audio/wav`) let a 44.1 kHz stereo WAV through
-      // untouched while the row below recorded sampleRate 8000. Since `concatFiles`
-      // exports with `-c copy` (identical formats required across a lane), such an
-      // import silently corrupted exports when mixed with 8 kHz mono call
-      // recordings. It also meant `audio/vnd.wave` — the mime iOS actually sent for
-      // a real user import — fell through to a full ffmpeg resample by accident
-      // rather than by decision.
+      // untouched while the row below recorded sampleRate 8000. The plan
+      // (audio-format.planStorage) keeps telephone audio as PCM WAV at its rate,
+      // copies AAC that already fits into an m4a, and encodes the rest to AAC
+      // at the source rate up to 48 kHz: nothing is raised, nothing lowered
+      // below what arrived.
       const probe = await this.audioProcessor
         .probeAudio(tmpInput)
         .catch(() => null);
-      const alreadyNormalised =
-        probe !== null &&
-        probe.sampleRate === TARGET_SAMPLE_RATE &&
-        probe.channels === 1 &&
-        probe.codecName.startsWith("pcm_");
-      const wavPath = alreadyNormalised
-        ? tmpInput
-        : await this.audioProcessor.convertToWav(tmpInput);
+      const prepared = await this.audioProcessor.prepareForStorage(tmpInput, probe);
+      const storedPath = prepared.path;
+      const plan = prepared.plan;
 
       this.logger.log(
-        "Import normalise: project=%s mime=%s probed=%s skipped_ffmpeg=%s",
+        "Import store: project=%s mime=%s probed=%s action=%s stored=%s encode_ms=%d",
         projectId,
         file.mimetype,
         probe
           ? `${probe.sampleRate}Hz/${probe.channels}ch/${probe.codecName}`
           : "probe_failed",
-        alreadyNormalised,
+        plan.action,
+        `${prepared.stored.sampleRate}Hz/${prepared.stored.channels}ch/${prepared.stored.codecName}`,
+        prepared.encodeMs,
       );
 
-      // Duration from the NORMALISED file (what we actually store). Reuse the
-      // probe we already ran when the file needed no conversion — ffprobe is a
-      // PROCESS SPAWN, and on a cold container each one costs a meaningful slice
-      // of the request. Measured Aug 3: with the client now sending an
-      // already-normalised 1.2 MB file, the upload took 1.1 s and the SERVER took
-      // 5.3 s, so the tail is the bottleneck and every avoidable spawn counts.
+      // Duration from the STORED file (what the clip will index into). The
+      // probe of the kept file is reused, so a file that needs no work costs
+      // no extra spawn (measured Aug 3: every ffprobe is a slice of the tail).
       const durationMs =
-        alreadyNormalised && probe && probe.durationMs > 0
-          ? probe.durationMs
-          : await this.audioProcessor.getDurationMs(wavPath);
+        prepared.stored.durationMs > 0
+          ? prepared.stored.durationMs
+          : await this.audioProcessor.getDurationMs(storedPath);
 
       // Upload to S3
-      const wavBuffer = await fs.readFile(wavPath);
+      const storedBuffer = await fs.readFile(storedPath);
       const date = new Date().toISOString().slice(0, 10);
-      const storageKey = `imports/${date}/${projectId}/${randomUUID()}.wav`;
+      const storageKey = `imports/${date}/${projectId}/${randomUUID()}.${plan.container}`;
       const bucket = "atto-audio-segments";
 
-      await this.storageService.upload(storageKey, wavBuffer);
+      await this.storageService.upload(
+        storageKey,
+        storedBuffer,
+        containerMime(plan.container),
+      );
+      this.analytics.capture(userId, "backend_audio_stored", {
+        project_id: projectId,
+        action: plan.action,
+        container: plan.container,
+        source_mime: file.mimetype,
+        source_codec: probe?.codecName ?? null,
+        source_sample_rate: probe?.sampleRate ?? null,
+        source_channels: probe?.channels ?? null,
+        stored_sample_rate: prepared.stored.sampleRate,
+        stored_channels: prepared.stored.channels,
+        source_bytes: file.size ?? file.buffer?.length ?? null,
+        stored_bytes: storedBuffer.length,
+        duration_ms: durationMs,
+        encode_ms: prepared.encodeMs,
+        create_clip: createClip,
+      });
+      if (storedPath !== tmpInput) await fs.unlink(storedPath).catch(() => {});
 
       // Create AudioSegment (no callId for imported audio)
       const segment = this.segmentRepo.create({
@@ -625,14 +645,10 @@ export class ProjectsService {
         startMs: 0,
         endMs: durationMs,
         durationMs,
-        format: "wav",
-        // Record what was ACTUALLY stored. After the probe-then-convert above this
-        // is always the target rate, but hardcoding it was how the mismatch that
-        // corrupted exports stayed invisible.
-        sampleRate: alreadyNormalised
-          ? (probe?.sampleRate ?? TARGET_SAMPLE_RATE)
-          : TARGET_SAMPLE_RATE,
-        fileSizeBytes: wavBuffer.length,
+        format: plan.container,
+        // Record what was ACTUALLY stored, read back from the stored file.
+        sampleRate: prepared.stored.sampleRate || 8000,
+        fileSizeBytes: storedBuffer.length,
         storageBucket: bucket,
         storageKey,
         label: file.originalname.slice(0, 100),

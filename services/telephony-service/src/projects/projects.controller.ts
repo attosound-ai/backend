@@ -206,6 +206,13 @@ export class ProjectsController {
           "audio/m4a",
           "audio/x-m4a",
           "audio/aac",
+          // The studio recorder and text to speech write CAF; the server
+          // decodes anything ffmpeg can read, the plan decides how it is kept.
+          "audio/x-caf",
+          "audio/flac",
+          "audio/x-flac",
+          "audio/aiff",
+          "audio/x-aiff",
         ];
         if (allowed.includes(file.mimetype)) {
           cb(null, true);

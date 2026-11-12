@@ -27,9 +27,14 @@ export type ExportQuality = "low" | "medium" | "high";
 export interface ExportOptions {
   format?: ExportFormat;
   quality?: ExportQuality;
-  /** Output sample rate; the pipeline is 8 kHz so upsampling only pads. */
-  sampleRate?: 8000 | 22050 | 44100 | 48000;
-  channels?: 1 | 2;
+  /**
+   * Output sample rate. Absent: the mix's own rate, which is the best of its
+   * clips (8 kHz for a phone only project, up to 48 kHz). Asking for more than
+   * the clips carry only pads.
+   */
+  sampleRate?: 8000 | 22050 | 44100 | 48000 | null;
+  /** null or absent: the mix's own channels. */
+  channels?: 1 | 2 | null;
   title?: string;
   author?: string;
   isrc?: string;
