@@ -142,6 +142,11 @@ func (r *UserRepository) FindByIDs(ids []uint64) ([]models.User, error) {
 }
 
 // SearchUsers searches for users by username or display name with ILIKE.
+//
+// Never by email or phone: the route is open without a session and answers
+// with usernames, so matching those columns told anyone which account owns an
+// email or a phone, a few letters at a time ("@empresa.com", "860555"). It did
+// until Nov 12 2026.
 func (r *UserRepository) SearchUsers(query string, limit int) ([]models.User, error) {
 	var users []models.User
 	if limit <= 0 {
@@ -151,7 +156,7 @@ func (r *UserRepository) SearchUsers(query string, limit int) ([]models.User, er
 		limit = 100
 	}
 	pattern := "%" + query + "%"
-	err := r.db.Where("username ILIKE ? OR display_name ILIKE ? OR email ILIKE ? OR phone_number ILIKE ?", pattern, pattern, pattern, pattern).
+	err := r.db.Where("username ILIKE ? OR display_name ILIKE ?", pattern, pattern).
 		Limit(limit).
 		Order("username ASC").
 		Find(&users).Error

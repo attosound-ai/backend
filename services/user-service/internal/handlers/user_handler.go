@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,8 +18,20 @@ import (
 
 // UserHandler handles HTTP requests related to user profiles.
 type UserHandler struct {
-	userService   *services.UserService
+	userService *services.UserService
+	// profiles serves the routes that show one account to another (by id,
+	// search, discover). It is the same UserService; the interface lets the
+	// tests check what a stranger receives without a database.
+	profiles      profileSource
 	otpServiceURL string
+}
+
+// profileSource is what the profile routes read.
+type profileSource interface {
+	GetUserByID(ctx context.Context, id string) (*models.UserProfile, error)
+	SearchUsers(ctx context.Context, query string, limit int) ([]*models.UserProfile, error)
+	DiscoverUsers(ctx context.Context, excludeID uint64, limit int) ([]*models.UserProfile, error)
+	GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error)
 }
 
 // NewUserHandler creates a new UserHandler.
@@ -27,7 +40,7 @@ func NewUserHandler(userService *services.UserService, otpServiceURL ...string) 
 	if len(otpServiceURL) > 0 && otpServiceURL[0] != "" {
 		url = otpServiceURL[0]
 	}
-	return &UserHandler{userService: userService, otpServiceURL: url}
+	return &UserHandler{userService: userService, profiles: userService, otpServiceURL: url}
 }
 
 // GetPushTokens handles GET /users/:id/push-tokens.
@@ -143,7 +156,7 @@ func (h *UserHandler) GetUser(c *fiber.Ctx) error {
 		})
 	}
 
-	profile, err := h.userService.GetUserByID(c.Context(), id)
+	profile, err := h.profiles.GetUserByID(c.Context(), id)
 	if err != nil {
 		status := fiber.StatusInternalServerError
 		if err.Error() == "user not found" {
@@ -157,12 +170,13 @@ func (h *UserHandler) GetUser(c *fiber.Ctx) error {
 		})
 	}
 
-	if !h.canSeePrivate(c, profile.ID) {
-		profile = profile.Public()
+	var data interface{} = profile.Public()
+	if h.canSeePrivate(c, profile.ID) {
+		data = profile
 	}
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
-		Data:    profile,
+		Data:    data,
 	})
 }
 
@@ -182,7 +196,7 @@ func (h *UserHandler) canSeePrivate(c *fiber.Ctx, profileID uint64) bool {
 	if viewer == strconv.FormatUint(profileID, 10) {
 		return true
 	}
-	ids, err := h.userService.GetLinkedAccountIDsForUser(profileID)
+	ids, err := h.profiles.GetLinkedAccountIDsForUser(profileID)
 	if err != nil {
 		return false
 	}
@@ -194,13 +208,16 @@ func (h *UserHandler) canSeePrivate(c *fiber.Ctx, profileID uint64) bool {
 	return false
 }
 
-// publicList strips every profile except the caller's own. Lists never carry
-// another account's private fields, linked or not.
-func publicList(c *fiber.Ctx, profiles []*models.UserProfile) []*models.UserProfile {
+// publicList shows every profile as models.PublicProfile except the caller's
+// own. Lists never carry another account's private fields, linked or not.
+func publicList(c *fiber.Ctx, profiles []*models.UserProfile) []interface{} {
 	viewer := viewerID(c)
-	out := make([]*models.UserProfile, 0, len(profiles))
+	out := make([]interface{}, 0, len(profiles))
 	for _, p := range profiles {
-		if p != nil && viewer != "" && strconv.FormatUint(p.ID, 10) == viewer {
+		if p == nil {
+			continue
+		}
+		if viewer != "" && strconv.FormatUint(p.ID, 10) == viewer {
 			out = append(out, p)
 			continue
 		}
@@ -226,7 +243,7 @@ func (h *UserHandler) SearchUsers(c *fiber.Ctx) error {
 		}
 	}
 
-	profiles, err := h.userService.SearchUsers(c.Context(), query, limit)
+	profiles, err := h.profiles.SearchUsers(c.Context(), query, limit)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,
@@ -303,7 +320,7 @@ func (h *UserHandler) DiscoverUsers(c *fiber.Ctx) error {
 		}
 	}
 
-	profiles, err := h.userService.DiscoverUsers(c.Context(), uid, limit)
+	profiles, err := h.profiles.DiscoverUsers(c.Context(), uid, limit)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,
