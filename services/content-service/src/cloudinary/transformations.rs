@@ -7,11 +7,13 @@ impl TransformationPresets {
     pub fn avatar_eager() -> String {
         [
             // Same sizes as the app presets (front lib/media/cloudinaryUrl.ts),
-            // sized for 3x screens since Oct 3 2026.
-            "c_thumb,g_face,w_120,h_120,f_auto,q_auto",
-            "c_thumb,g_face,w_160,h_160,f_auto,q_auto",
-            "c_thumb,g_face,w_240,h_240,f_auto,q_auto",
-            "c_thumb,g_face,w_360,h_360,f_auto,q_auto",
+            // sized for 3x screens since Oct 3 2026. c_fill, not c_thumb:
+            // c_thumb zoomed into the face, so small circles showed a close up
+            // instead of the square the person framed (Nov 12 2026).
+            "c_fill,g_face,w_120,h_120,f_auto,q_auto",
+            "c_fill,g_face,w_160,h_160,f_auto,q_auto",
+            "c_fill,g_face,w_240,h_240,f_auto,q_auto",
+            "c_fill,g_face,w_360,h_360,f_auto,q_auto",
         ]
         .join("|")
     }
