@@ -209,7 +209,27 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID string, req *mod
 		return nil, errors.New("user not found")
 	}
 
+	s.publishUserUpdated(user.ID)
+
 	return user.ToProfile(), nil
+}
+
+// publishUserUpdated tells the other services that a profile changed.
+// social-service keeps each user in Redis for 10 minutes and only drops the
+// copy on user.updated, which nobody ever published: after a new profile
+// photo the feed, the comments, the followers and the notifications kept
+// showing the old one for up to 10 minutes (Nov 12 2026).
+func (s *UserService) publishUserUpdated(userID uint64) {
+	if s.producer == nil {
+		return
+	}
+	idStr := strconv.FormatUint(userID, 10)
+	go func() {
+		eventData := map[string]interface{}{"id": idStr}
+		if err := s.producer.Publish(context.Background(), "user.updated", idStr, eventData); err != nil {
+			log.Printf("[USER] Failed to publish user.updated event: %v", err)
+		}
+	}()
 }
 
 // VerifyUser marks a user as profile-verified and publishes a user.verified event.
