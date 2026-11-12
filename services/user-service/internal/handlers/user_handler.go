@@ -32,6 +32,18 @@ type profileSource interface {
 	SearchUsers(ctx context.Context, query string, limit int) ([]*models.UserProfile, error)
 	DiscoverUsers(ctx context.Context, excludeID uint64, limit int) ([]*models.UserProfile, error)
 	GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error)
+	GetActivePushTokensForUser(userID uint64) ([]models.PushToken, error)
+}
+
+// MountInternalRoutes registers the server to server routes under /users
+// behind guard (middleware.RequireInternalCallerOrOwner in production). Kept
+// here so cmd/server/main.go and the tests mount them the same way: a route
+// added without the guard would fail the tests.
+func (h *UserHandler) MountInternalRoutes(users fiber.Router, guard fiber.Handler) {
+	// telephony-service: TwiML fan out across a device's linked accounts.
+	users.Get("/:id/linked-account-ids", guard, h.GetLinkedAccountIDs)
+	// telephony-service: missed call push when the Voice SDK invite fails.
+	users.Get("/:id/push-tokens", guard, h.GetPushTokens)
 }
 
 // NewUserHandler creates a new UserHandler.
@@ -48,8 +60,8 @@ func NewUserHandler(userService *services.UserService, otpServiceURL ...string) 
 // Returns the active Expo push tokens registered for the user, so
 // telephony-service can fall back to a regular APNS/FCM push when an
 // incoming-call invite fails to reach the Voice SDK (no answer / unreachable
-// device). Same trust posture as GET /users/:id/linked-account-ids —
-// consumed only on the private network, no JWT required.
+// device). Only a sibling service token or the owner's session reaches it
+// (see MountInternalRoutes); until Nov 12 2026 it answered anyone.
 //
 // Response shape: { success: true, data: { tokens: [{token, platform,
 // deviceId}, ...] } }.
@@ -69,7 +81,7 @@ func (h *UserHandler) GetPushTokens(c *fiber.Ctx) error {
 		})
 	}
 
-	tokens, err := h.userService.GetActivePushTokensForUser(id)
+	tokens, err := h.profiles.GetActivePushTokensForUser(id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,
@@ -126,7 +138,7 @@ func (h *UserHandler) GetLinkedAccountIDs(c *fiber.Ctx) error {
 		})
 	}
 
-	ids, err := h.userService.GetLinkedAccountIDsForUser(id)
+	ids, err := h.profiles.GetLinkedAccountIDsForUser(id)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,

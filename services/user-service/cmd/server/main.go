@@ -198,16 +198,11 @@ func main() {
 	users.Get("/:id", middleware.OptionalAuth(jwtMgr), userHandler.GetUser)
 	users.Get("/:id/followers", userHandler.GetFollowers)
 	users.Get("/:id/following", userHandler.GetFollowing)
-	// Internal/server-to-server: telephony-service uses this for TwiML fan-out.
-	// Returns { userIds: [int, ...] } — the linked account group for the
-	// given user. No JWT required (same trust posture as GET /users/:id),
-	// scoped to a single id-only field so it does not leak the linkage graph
-	// via the regular profile endpoint.
-	users.Get("/:id/linked-account-ids", userHandler.GetLinkedAccountIDs)
-	// Internal/server-to-server: telephony-service consumes this to send
-	// "missed call" fallback pushes when the Voice SDK invite fails to
-	// reach the device. Same trust posture as the routes above.
-	users.Get("/:id/push-tokens", userHandler.GetPushTokens)
+	// Server to server only (telephony-service): linked account ids and push
+	// tokens. Until Nov 12 2026 they answered anyone, through Kong and through
+	// this service's own public domain. Now a sibling service token or the
+	// owner's own session is required; Kong also blocks the paths.
+	userHandler.MountInternalRoutes(users, middleware.RequireInternalCallerOrOwner(jwtMgr, "id"))
 
 	// ── Signup session cleanup worker ──
 	// Hourly: mark expired sessions abandoned. Grace period 24h before purge so
