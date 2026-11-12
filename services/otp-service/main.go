@@ -71,6 +71,13 @@ func main() {
 	}
 
 	otpService := services.NewOTPService(cfg, repo, delivery, emailDelivery)
+	if ready, reason := cfg.VerifyReady(); ready {
+		fallback := cfg.SMSFallback == config.SMSFallbackMessages
+		otpService.WithSMSVerifier(providers.NewTwilioVerify(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioVerifyServiceSID), fallback)
+		log.Printf("[DELIVERY] SMS codes through Twilio Verify (%s), fallback to the old provider when Verify is down: %v", cfg.TwilioVerifyServiceSID, fallback)
+	} else if reason != "" {
+		log.Printf("[DELIVERY] OTP_SMS_PROVIDER=verify ignored (%s): SMS codes keep going through %s", reason, cfg.DeliveryProvider)
+	}
 	otpHandler := handlers.NewOTPHandler(otpService)
 	healthHandler := handlers.NewHealthHandler()
 

@@ -8,7 +8,7 @@ var railwayKeys = []string{"RAILWAY_ENVIRONMENT_NAME", "RAILWAY_ENVIRONMENT", "R
 
 func setEnv(t *testing.T, env map[string]string) {
 	t.Helper()
-	for _, key := range append([]string{"BYPASS_OTP", "DELIVERY_PROVIDER", "OTP_SKIP_SEND_LIMITS"}, railwayKeys...) {
+	for _, key := range append([]string{"BYPASS_OTP", "DELIVERY_PROVIDER", "OTP_SKIP_SEND_LIMITS", "OTP_SMS_PROVIDER", "OTP_SMS_FALLBACK", "TWILIO_VERIFY_SERVICE_SID", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"}, railwayKeys...) {
 		t.Setenv(key, "")
 	}
 	for key, value := range env {
@@ -50,6 +50,11 @@ func TestFixedCodeOnlyWhereNoCodeIsReallySent(t *testing.T) {
 		{
 			name: "real SMS outside Railway",
 			env:  map[string]string{"BYPASS_OTP": "true", "DELIVERY_PROVIDER": "twilio"},
+			want: false,
+		},
+		{
+			name: "a laptop sending real codes with Twilio Verify",
+			env:  map[string]string{"BYPASS_OTP": "true", "DELIVERY_PROVIDER": "console", "OTP_SMS_PROVIDER": "verify"},
 			want: false,
 		},
 		{
@@ -114,6 +119,51 @@ func TestSendLimitsStayAsTheyWere(t *testing.T) {
 			}
 			if cfg.BypassOTP {
 				t.Fatalf("the fixed code must stay refused on a deployment")
+			}
+		})
+	}
+}
+
+func TestVerifySettings(t *testing.T) {
+	full := map[string]string{"OTP_SMS_PROVIDER": "verify", "TWILIO_ACCOUNT_SID": "ACx", "TWILIO_AUTH_TOKEN": "y", "TWILIO_VERIFY_SERVICE_SID": "VAz"}
+	with := func(changes map[string]string) map[string]string {
+		env := map[string]string{}
+		for k, v := range full {
+			env[k] = v
+		}
+		for k, v := range changes {
+			env[k] = v
+		}
+		return env
+	}
+	cases := []struct {
+		name     string
+		env      map[string]string
+		ready    bool
+		fallback string
+	}{
+		{"nothing set: the old provider, no fallback", map[string]string{}, false, "none"},
+		{"everything set", full, true, "none"},
+		{"in capitals", with(map[string]string{"OTP_SMS_PROVIDER": " Verify "}), true, "none"},
+		{"fallback asked for", with(map[string]string{"OTP_SMS_FALLBACK": "messages"}), true, "messages"},
+		{"no service SID", with(map[string]string{"TWILIO_VERIFY_SERVICE_SID": ""}), false, "none"},
+		{"a messaging service SID by mistake", with(map[string]string{"TWILIO_VERIFY_SERVICE_SID": "MG123"}), false, "none"},
+		{"no auth token", with(map[string]string{"TWILIO_AUTH_TOKEN": ""}), false, "none"},
+		{"switched off", with(map[string]string{"OTP_SMS_PROVIDER": "messages"}), false, "none"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			setEnv(t, c.env)
+			cfg := Load()
+			ready, why := cfg.VerifyReady()
+			if ready != c.ready {
+				t.Fatalf("ready %v (%s), want %v", ready, why, c.ready)
+			}
+			if !ready && cfg.SMSProvider == SMSProviderVerify && why == "" {
+				t.Fatalf("asked for and not ready must say why")
+			}
+			if cfg.SMSFallback != c.fallback {
+				t.Fatalf("fallback %q, want %q", cfg.SMSFallback, c.fallback)
 			}
 		})
 	}
