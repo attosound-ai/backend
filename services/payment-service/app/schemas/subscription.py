@@ -66,6 +66,9 @@ class SubscriptionResponse(BaseModel):
     transaction_id: str | None = None
     entitlements: list[str] = []
     pending_change: PendingPlanChange | None = None
+    # Longest recording, and longest exported or posted project, in seconds.
+    # Null means no limit. Comes from the plan catalog (admin editable).
+    max_recording_seconds: int | None = None
     created_at: str
     updated_at: str
 

@@ -53,6 +53,9 @@ class PlanRow:
     sort_order: int
     features: tuple[str, ...] = ()
     entitlements: frozenset[str] = field(default_factory=frozenset)
+    # Longest recording, and longest exported or posted project, in seconds.
+    # None means no limit.
+    max_recording_seconds: int | None = None
 
     @property
     def price_dollars(self) -> str:
@@ -74,7 +77,16 @@ def row_from_model(plan: Plan) -> PlanRow:
         sort_order=int(plan.sort_order or 0),
         features=tuple(plan.features or []),
         entitlements=frozenset(e.entitlement for e in plan.entitlements),
+        max_recording_seconds=_positive_or_none(plan.max_recording_seconds),
     )
+
+
+def _positive_or_none(value: int | None) -> int | None:
+    """A cap of zero or less makes no sense; it reads as no limit."""
+    if value is None:
+        return None
+    seconds = int(value)
+    return seconds if seconds > 0 else None
 
 
 # ── Cache ──────────────────────────────────────────────────────────
@@ -128,6 +140,18 @@ def compute_paid_features(rows: list[PlanRow] | tuple[PlanRow, ...]) -> list[str
     return sorted(paid - free_entitlements)
 
 
+def resolve_max_recording_seconds(
+    rows: list[PlanRow] | tuple[PlanRow, ...], plan_key: str
+) -> int | None:
+    """Recording cap of a plan. Unknown or inactive plans get the free plan's cap,
+    the same fallback entitlements_for uses."""
+    for row in rows:
+        if row.key == plan_key and row.active:
+            return row.max_recording_seconds
+    free = pick_free_plan(rows)
+    return free.max_recording_seconds if free else None
+
+
 def compute_paywall_required(rows: list[PlanRow] | tuple[PlanRow, ...]) -> bool:
     return len(compute_paid_features(rows)) > 0
 
@@ -159,6 +183,11 @@ async def entitlements_for(session: AsyncSession, plan_key: str) -> frozenset[st
             return row.entitlements
     free = pick_free_plan(rows)
     return free.entitlements if free else frozenset()
+
+
+async def max_recording_seconds_for(session: AsyncSession, plan_key: str) -> int | None:
+    """Recording cap of a plan in seconds, or None for no limit."""
+    return resolve_max_recording_seconds(await snapshot(session), plan_key)
 
 
 async def price_cents(session: AsyncSession, plan: str) -> int:

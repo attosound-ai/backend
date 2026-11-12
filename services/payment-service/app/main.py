@@ -18,7 +18,7 @@ from app.kafka.consumer import start_consumer, stop_consumer
 from app.kafka.producer import stop_producer
 from app.middleware.auth import AuthMiddleware
 from app.models import Base
-from app.plan_seed import migrate_plan_column, seed_plans_if_empty
+from app.plan_seed import migrate_plan_column, migrate_plan_limits, seed_plans_if_empty
 from app.routers.admin import router as admin_router
 from app.routers.health import router as health_router
 from app.routers.payments import router as payments_router
@@ -57,6 +57,8 @@ async def lifespan(_app: FastAPI):
         # subscriptions.plan used to be a Postgres enum; the plan catalog
         # needs a plain string so admin created plans can be assigned.
         await migrate_plan_column(conn)
+        # plans.max_recording_seconds (Nov 2026): nullable column, Record seeded at 180.
+        await migrate_plan_limits(conn)
     logger.info("Database tables ensured")
 
     # First boot on an existing database: copy the hardcoded plans into the

@@ -48,7 +48,11 @@ def _txn_to_response(txn: Transaction) -> TransactionResponse:
     )
 
 
-def _sub_to_response(sub: Subscription, entitlements: frozenset[str] | set[str]) -> SubscriptionResponse:
+def _sub_to_response(
+    sub: Subscription,
+    entitlements: frozenset[str] | set[str],
+    max_recording_seconds: int | None = None,
+) -> SubscriptionResponse:
     """Convert a Subscription ORM model to an API response schema."""
     plan_str = sub.plan if isinstance(sub.plan, str) else sub.plan.value
     pending = None
@@ -67,6 +71,7 @@ def _sub_to_response(sub: Subscription, entitlements: frozenset[str] | set[str])
         transaction_id=str(sub.transaction_id) if sub.transaction_id else None,
         entitlements=sorted(entitlements),
         pending_change=pending,
+        max_recording_seconds=max_recording_seconds,
         created_at=sub.created_at.isoformat() if sub.created_at else "",
         updated_at=sub.updated_at.isoformat() if sub.updated_at else "",
     )
@@ -82,7 +87,8 @@ class PaymentService:
     async def _to_response(self, sub: Subscription) -> SubscriptionResponse:
         plan_str = sub.plan if isinstance(sub.plan, str) else sub.plan.value
         entitlements = await plan_catalog.entitlements_for(self.session, plan_str)
-        return _sub_to_response(sub, entitlements)
+        cap = await plan_catalog.max_recording_seconds_for(self.session, plan_str)
+        return _sub_to_response(sub, entitlements, cap)
 
     # ── Transactions ──────────────────────────────────────────────
 

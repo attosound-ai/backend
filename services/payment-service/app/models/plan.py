@@ -31,6 +31,9 @@ class Plan(Base):
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Marketing bullet points shown on the paywall, a JSON list of strings.
     features: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # Longest single recording and longest exported or posted project, in
+    # seconds. NULL means no limit. Record is seeded at 180 (client, Sep 20 2026).
+    max_recording_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

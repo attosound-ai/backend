@@ -13,6 +13,7 @@ from app.entitlements import (
     SEED_PLAN_DISPLAY_NAMES,
     SEED_PLAN_ENTITLEMENTS,
     SEED_PLAN_FEATURES,
+    SEED_PLAN_MAX_RECORDING_SECONDS,
     SEED_PLAN_PRICES_CENTS,
 )
 from app.models.plan import Plan, PlanEntitlement
@@ -57,6 +58,36 @@ async def migrate_plan_column(conn: AsyncConnection) -> None:
     )
 
 
+async def migrate_plan_limits(conn: AsyncConnection) -> bool:
+    """Add plans.max_recording_seconds when it is missing. Returns True if added.
+
+    Additive only: the column is nullable and nothing is dropped or rewritten.
+    The seed caps are written once, in the same boot that adds the column, so a
+    value later edited (or cleared) from the admin dashboard is never put back.
+    """
+    row = await conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'plans' AND column_name = 'max_recording_seconds'"
+        )
+    )
+    if row.scalar() is not None:
+        return False
+    logger.info("Adding plans.max_recording_seconds")
+    await conn.execute(
+        text("ALTER TABLE plans ADD COLUMN IF NOT EXISTS max_recording_seconds INTEGER")
+    )
+    for key, seconds in SEED_PLAN_MAX_RECORDING_SECONDS.items():
+        await conn.execute(
+            text(
+                "UPDATE plans SET max_recording_seconds = :seconds "
+                "WHERE key = :key AND max_recording_seconds IS NULL"
+            ),
+            {"seconds": seconds, "key": key},
+        )
+    return True
+
+
 def seed_rows() -> list[Plan]:
     """Plan ORM rows built from the hardcoded seed tables."""
     rows: list[Plan] = []
@@ -75,6 +106,7 @@ def seed_rows() -> list[Plan]:
                 active=True,
                 sort_order=sort_order,
                 features=list(SEED_PLAN_FEATURES[key]),
+                max_recording_seconds=SEED_PLAN_MAX_RECORDING_SECONDS.get(key),
                 entitlements=[
                     PlanEntitlement(entitlement=e.value)
                     for e in sorted(SEED_PLAN_ENTITLEMENTS[key], key=lambda e: e.value)

@@ -84,3 +84,48 @@ def test_no_free_plan_means_every_paid_entitlement_is_paid():
 def test_price_dollars_formats_two_decimals():
     assert row("x", 13900, set()).price_dollars == "139.00"
     assert row("y", 0, set()).price_dollars == "0.00"
+
+
+# ── Recording cap (Nov 2026) ───────────────────────────────────────
+
+from dataclasses import replace  # noqa: E402
+
+from app.entitlements import SEED_PLAN_MAX_RECORDING_SECONDS  # noqa: E402
+from app.plan_catalog import resolve_max_recording_seconds  # noqa: E402
+
+
+def test_cap_of_a_known_active_plan():
+    rows = [
+        row("connect_free", 0, BASE),
+        replace(row("record", 9900, BASE, sort=1), max_recording_seconds=180),
+        row("record_pro", 13900, BASE, sort=2),
+    ]
+    assert resolve_max_recording_seconds(rows, "record") == 180
+    assert resolve_max_recording_seconds(rows, "record_pro") is None
+
+
+def test_unknown_or_inactive_plan_gets_the_free_plan_cap():
+    rows = [
+        replace(row("connect_free", 0, BASE), max_recording_seconds=60),
+        replace(row("old", 5000, BASE, active=False, sort=1), max_recording_seconds=999),
+    ]
+    assert resolve_max_recording_seconds(rows, "old") == 60
+    assert resolve_max_recording_seconds(rows, "missing") == 60
+
+
+def test_no_free_plan_and_unknown_plan_means_no_cap():
+    assert resolve_max_recording_seconds([row("paid", 9900, BASE)], "missing") is None
+
+
+def test_seed_caps_record_at_three_minutes_and_leaves_pro_unlimited():
+    assert SEED_PLAN_MAX_RECORDING_SECONDS.get("record") == 180
+    assert "record_pro" not in SEED_PLAN_MAX_RECORDING_SECONDS
+
+
+def test_seed_rows_carry_the_cap():
+    from app.plan_seed import seed_rows
+
+    caps = {p.key: p.max_recording_seconds for p in seed_rows()}
+    assert caps["record"] == 180
+    assert caps["record_pro"] is None
+    assert caps["connect_free"] is None

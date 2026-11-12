@@ -37,6 +37,7 @@ def plan_to_public(row: PlanRow) -> dict:
         "features": list(row.features),
         "entitlements": sorted(row.entitlements),
         "popular": row.popular,
+        "maxRecordingSeconds": row.max_recording_seconds,
     }
 
 
@@ -86,6 +87,7 @@ async def get_my_subscription(
             starts_at="",
             expires_at="",
             entitlements=sorted(await plan_catalog.entitlements_for(session, free_key)),
+            max_recording_seconds=await plan_catalog.max_recording_seconds_for(session, free_key),
             created_at="",
             updated_at="",
         )
@@ -138,7 +140,11 @@ async def get_my_entitlements(
     sub = await svc.get_active_subscription(user_id)
     plan = sub.plan if sub else await plan_catalog.free_plan_key(session)
     entitlements = sorted(await plan_catalog.entitlements_for(session, plan))
-    return ApiResponse(success=True, data={"plan": plan, "entitlements": entitlements})
+    cap = await plan_catalog.max_recording_seconds_for(session, plan)
+    return ApiResponse(
+        success=True,
+        data={"plan": plan, "entitlements": entitlements, "maxRecordingSeconds": cap},
+    )
 
 
 @router.post("/me/select-plan", response_model=ApiResponse)

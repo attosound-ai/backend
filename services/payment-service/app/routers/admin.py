@@ -36,6 +36,8 @@ PLAN_KEY_PATTERN = r"^[a-z][a-z0-9_]{1,63}$"
 PLACEHOLDER_NUMBER_PREFIX = "+1500555"
 REAL_NUMBER_MONTHLY_COST_CENTS = 115
 DEFAULT_DURATION_DAYS = {"year": 365, "month": 30, "forever": 36500}
+# Upper bound for a plan's recording cap: 24 hours. Null means no limit.
+MAX_RECORDING_SECONDS_CEILING = 24 * 60 * 60
 
 
 # ── Auth dependency ────────────────────────────────────────────────
@@ -90,6 +92,8 @@ class PlanCreate(BaseModel):
     sort_order: int = 0
     features: list[str] = Field(default_factory=list)
     entitlements: list[str] = Field(default_factory=list)
+    # Longest recording and longest exported or posted project, in seconds.
+    max_recording_seconds: int | None = Field(default=None, ge=1, le=MAX_RECORDING_SECONDS_CEILING)
 
     @field_validator("entitlements")
     @classmethod
@@ -122,6 +126,8 @@ class PlanUpdate(BaseModel):
     sort_order: int | None = None
     features: list[str] | None = None
     entitlements: list[str] | None = None
+    # Sending null clears the cap (no limit); leaving it out keeps the current one.
+    max_recording_seconds: int | None = Field(default=None, ge=1, le=MAX_RECORDING_SECONDS_CEILING)
 
     @field_validator("entitlements")
     @classmethod
@@ -173,6 +179,7 @@ def plan_admin(plan: Plan, subscribers: int) -> dict[str, Any]:
         "sortOrder": int(plan.sort_order or 0),
         "features": list(plan.features or []),
         "entitlements": plan.entitlement_keys,
+        "maxRecordingSeconds": plan.max_recording_seconds,
         "subscribers": subscribers,
         "createdAt": _iso(plan.created_at),
         "updatedAt": _iso(plan.updated_at),
@@ -252,6 +259,7 @@ async def admin_create_plan(
         active=body.active,
         sort_order=body.sort_order,
         features=body.features,
+        max_recording_seconds=body.max_recording_seconds,
         entitlements=[PlanEntitlement(entitlement=e) for e in body.entitlements],
     )
     session.add(plan)

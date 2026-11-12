@@ -65,3 +65,24 @@ def test_entitlements_body_validates_keys():
     assert EntitlementsBody.model_validate({"entitlements": ["comment", "listen"]}).entitlements == ["comment", "listen"]
     with pytest.raises(ValidationError):
         EntitlementsBody.model_validate({"entitlements": ["nope"]})
+
+
+def test_recording_cap_is_optional_and_camel_case():
+    assert PlanCreate.model_validate(_valid()).max_recording_seconds is None
+    plan = PlanCreate.model_validate(_valid(maxRecordingSeconds=180))
+    assert plan.max_recording_seconds == 180
+
+
+@pytest.mark.parametrize("bad", [0, -5, 24 * 60 * 60 + 1])
+def test_recording_cap_must_be_positive_and_at_most_a_day(bad):
+    with pytest.raises(ValidationError):
+        PlanCreate.model_validate(_valid(maxRecordingSeconds=bad))
+    with pytest.raises(ValidationError):
+        PlanUpdate.model_validate({"maxRecordingSeconds": bad})
+
+
+def test_update_null_cap_clears_it_and_missing_cap_keeps_it():
+    cleared = PlanUpdate.model_validate({"maxRecordingSeconds": None})
+    assert cleared.model_dump(exclude_unset=True) == {"max_recording_seconds": None}
+    untouched = PlanUpdate.model_validate({"name": "Record"})
+    assert "max_recording_seconds" not in untouched.model_dump(exclude_unset=True)
