@@ -76,6 +76,25 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		return nil, errors.New("username already taken")
 	}
 
+	// One creator per inmate number and state (Nov 2026). This legacy route
+	// creates no managed creator for a representative, so only a creator
+	// registering its own number is checked. The state rides in
+	// representativeFields when the client sends it; without one, any creator
+	// with the number counts.
+	if models.Role(req.Role) == models.RoleCreator && req.InmateNumber != nil {
+		state := ""
+		if req.RepresentativeFields != nil {
+			state = req.RepresentativeFields.InmateState
+		}
+		if err := ensureInmateNumberFree(s.repo.FindCreatorsByInmateNumber, *req.InmateNumber, state); err != nil {
+			if errors.Is(err, ErrInmateNumberTaken) {
+				return nil, err
+			}
+			log.Printf("[AUTH] Failed to check inmate number: %v", err)
+			return nil, errors.New("internal error checking inmate number")
+		}
+	}
+
 	// Hash password
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {

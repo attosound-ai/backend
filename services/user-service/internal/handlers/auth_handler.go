@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"errors"
+
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
 	"github.com/atto-sound/user-service/internal/services"
@@ -63,6 +65,13 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 
 	result, err := h.authService.Register(c.Context(), &req)
 	if err != nil {
+		if errors.Is(err, services.ErrInmateNumberTaken) {
+			return c.Status(fiber.StatusConflict).JSON(models.APIResponse{
+				Success: false,
+				Error:   err.Error(),
+				Code:    services.InmateNumberTakenCode,
+			})
+		}
 		status := fiber.StatusInternalServerError
 		if err.Error() == "email already registered" || err.Error() == "username already taken" {
 			status = fiber.StatusConflict

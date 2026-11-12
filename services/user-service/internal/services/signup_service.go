@@ -342,10 +342,29 @@ func (s *SignupService) PatchDraft(
 		return nil, "", err
 	}
 
+	// The step that captures the inmate number (the own account's inmate step,
+	// the representative's consent step) is refused here when a creator already
+	// holds that number, so the person learns it on that screen and not at the
+	// very end. Nothing is saved on a refusal. Complete checks again.
+	if patch.InmateNumber != nil || patch.InmateState != nil || patch.Role != nil {
+		if err := s.checkInmateNumber(&session.Draft); err != nil {
+			return nil, "", err
+		}
+	}
+
 	if err := s.signupRepo.Update(session); err != nil {
 		return nil, "", fmt.Errorf("update session draft: %w", err)
 	}
 	return session, NextStepFor(session), nil
+}
+
+// checkInmateNumber refuses a draft that would create a creator for an inmate
+// number another creator already holds in the same state.
+func (s *SignupService) checkInmateNumber(d *models.SignupDraft) error {
+	if !draftCreatesCreator(d) {
+		return nil
+	}
+	return ensureInmateNumberFree(s.userRepo.FindCreatorsByInmateNumber, *d.InmateNumber, strVal(d.InmateState))
 }
 
 // CompleteResult is what's returned after promoting a session to a real user.
@@ -394,6 +413,12 @@ func (s *SignupService) Complete(ctx context.Context, sessionID uuid.UUID) (*Com
 		} else if existing != nil {
 			return nil, ErrPhoneAlreadyRegistered
 		}
+	}
+	// One creator per inmate number and state. Checked again here, not only on
+	// the step that captured the number: a draft saved before this rule, or a
+	// creator who registered the same number in the meantime, stops here.
+	if err := s.checkInmateNumber(&d); err != nil {
+		return nil, err
 	}
 
 	user := &models.User{
@@ -744,7 +769,8 @@ func mergeDraft(base, patch *models.SignupDraft) {
 		base.Avatar = patch.Avatar
 	}
 	if patch.InmateNumber != nil {
-		base.InmateNumber = patch.InmateNumber
+		n := strings.TrimSpace(*patch.InmateNumber)
+		base.InmateNumber = &n
 	}
 	if patch.CreatorName != nil {
 		base.CreatorName = patch.CreatorName

@@ -119,6 +119,28 @@ func (r *UserRepository) FindByUsername(username string) (*models.User, error) {
 	return &user, nil
 }
 
+// FindCreatorsByInmateNumber returns the creators (live, not soft deleted)
+// whose inmate number normalizes to normalized, the output of
+// validation.NormalizeInmateNumber. Only creators count: a representative
+// keeps its creator's number on its own row, and that is the same person, not
+// a second account. The state is left to the caller (validation.SameInmateState).
+//
+// The SQL repeats NormalizeInmateNumber: upper case, keep only A to Z and 0 to
+// 9, drop leading zeros.
+func (r *UserRepository) FindCreatorsByInmateNumber(normalized string) ([]models.User, error) {
+	if normalized == "" {
+		return nil, nil
+	}
+	var users []models.User
+	err := r.db.
+		Where("role = ?", models.RoleCreator).
+		Where("inmate_number IS NOT NULL").
+		Where("ltrim(regexp_replace(upper(inmate_number), '[^A-Z0-9]', '', 'g'), '0') = ?", normalized).
+		Order("id").
+		Find(&users).Error
+	return users, err
+}
+
 // FindCredentialsByUserID retrieves credentials for a given user ID.
 func (r *UserRepository) FindCredentialsByUserID(userID uint64) (*models.UserCredentials, error) {
 	var creds models.UserCredentials

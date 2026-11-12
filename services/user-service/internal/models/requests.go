@@ -110,6 +110,9 @@ type APIResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
+	// Code is a stable machine readable reason for an error the app reacts to
+	// on its own (INMATE_NUMBER_TAKEN). Error stays human readable.
+	Code string `json:"code,omitempty"`
 }
 
 // AuthResponse combines user profile with tokens.

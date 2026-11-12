@@ -300,6 +300,8 @@ func mapSignupErr(c *fiber.Ctx, err error) error {
 		return c.Status(status).JSON(models.APIResponse{Success: false, Error: err.Error()})
 	}
 	switch {
+	case errors.Is(err, services.ErrInmateNumberTaken):
+		return c.Status(fiber.StatusConflict).JSON(models.APIResponse{Success: false, Error: err.Error(), Code: services.InmateNumberTakenCode})
 	case errors.Is(err, services.ErrSignupSessionNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(models.APIResponse{Success: false, Error: err.Error()})
 	case errors.Is(err, services.ErrSignupSessionExpired):
