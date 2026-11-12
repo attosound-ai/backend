@@ -504,6 +504,12 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 	if err != nil {
 		return nil, errors.New("invalid or expired refresh token")
 	}
+	// Only a session renews a session. Until Nov 12 2026 the 2FA temporary
+	// token (password only) was exchanged here for a full pair, skipping the
+	// second factor.
+	if !middleware.IsSessionToken(claims) {
+		return nil, errors.New("invalid or expired refresh token")
+	}
 
 	userID, err := strconv.ParseUint(claims.UserID, 10, 64)
 	if err != nil {

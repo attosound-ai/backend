@@ -94,6 +94,10 @@ func (s *UserGRPCServer) ValidateToken(ctx context.Context, req *ValidateTokenRe
 	if err != nil {
 		return &ValidateTokenResponse{Valid: false}, nil
 	}
+	// The 2FA temporary token is not a session for any caller.
+	if claims.EffectiveScope() == middleware.Scope2FAPending {
+		return &ValidateTokenResponse{Valid: false}, nil
+	}
 
 	return &ValidateTokenResponse{
 		Valid:  true,

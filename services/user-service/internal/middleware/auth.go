@@ -24,7 +24,19 @@ const (
 	ScopeUser          = "user"           // full session for a confirmed user
 	ScopeSignupPending = "signup_pending" // limited token for in-progress signup
 	ScopeService       = "service"        // this service calling a sibling one, never a person
+	// Scope2FAPending: the password was right, the second factor is still
+	// missing. Only POST /auth/login/2fa accepts it.
+	Scope2FAPending = "2fa_pending"
 )
+
+// TwoFactorIssuer is the issuer of the 2FA temporary token. Tokens issued
+// before Nov 12 2026 carry only this issuer (no scope, numeric sub), so the
+// issuer alone already marks one.
+const TwoFactorIssuer = "atto-sound-2fa"
+
+// twoFactorSubjectPrefix namespaces the 2FA token's subject ("2fa:123") so a
+// sibling service that only reads sub can never take it for user 123.
+const twoFactorSubjectPrefix = "2fa:"
 
 // ServiceTokenSubject is the subject of a service token. It is not a number,
 // so it can never be mistaken for a user ID.
@@ -48,10 +60,22 @@ type JWTClaims struct {
 // EffectiveScope returns the scope to enforce, defaulting to ScopeUser when
 // the claim is missing (older tokens issued before scopes existed).
 func (c *JWTClaims) EffectiveScope() string {
+	// The 2FA temporary token is never a session, whatever its scope says.
+	// Until Nov 12 2026 it had no scope at all and passed as ScopeUser: the
+	// password alone opened /auth/me and every other route for 5 minutes.
+	if c.Issuer == TwoFactorIssuer || c.Scope == Scope2FAPending {
+		return Scope2FAPending
+	}
 	if c.Scope == "" {
 		return ScopeUser
 	}
 	return c.Scope
+}
+
+// IsSessionToken says whether a verified token is a signed in session
+// (access or refresh), as opposed to a signup, service or 2FA token.
+func IsSessionToken(c *JWTClaims) bool {
+	return c != nil && c.EffectiveScope() == ScopeUser
 }
 
 // JWTManager handles token generation and validation.
@@ -199,11 +223,12 @@ func SignupSessionID(claims *JWTClaims) string {
 // Generate2FAToken creates a short-lived JWT (5 min) for the 2FA verification step.
 func (m *JWTManager) Generate2FAToken(userID uint64) (string, error) {
 	now := time.Now()
-	idStr := strconv.FormatUint(userID, 10)
+	sub := twoFactorSubjectPrefix + strconv.FormatUint(userID, 10)
 	claims := JWTClaims{
-		UserID: idStr,
+		UserID: sub,
+		Scope:  Scope2FAPending,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   idStr,
+			Subject:   sub,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(5 * time.Minute)),
 			Issuer:    "atto-sound-2fa",
@@ -219,9 +244,12 @@ func (m *JWTManager) Validate2FAToken(tokenStr string) (*JWTClaims, error) {
 	if err != nil {
 		return nil, err
 	}
-	if claims.Issuer != "atto-sound-2fa" {
+	if claims.Issuer != TwoFactorIssuer {
 		return nil, jwt.ErrSignatureInvalid
 	}
+	// New tokens say "2fa:123"; the ones issued before Nov 12 2026 say "123".
+	// Callers always get the bare user id.
+	claims.UserID = strings.TrimPrefix(claims.UserID, twoFactorSubjectPrefix)
 	return claims, nil
 }
 
@@ -251,6 +279,11 @@ func extractClaims(c *fiber.Ctx, jwtMgr *JWTManager) (claims *JWTClaims, done bo
 	}
 
 	parsed, err := jwtMgr.ValidateToken(parts[1])
+	// The 2FA temporary token only works on POST /auth/login/2fa, which reads
+	// it from the body. As a bearer token it is not a credential at all.
+	if err == nil && parsed.EffectiveScope() == Scope2FAPending {
+		err = jwt.ErrSignatureInvalid
+	}
 	if err != nil {
 		_ = c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
 			Success: false,
