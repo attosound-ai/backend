@@ -7,6 +7,12 @@ from app.config import settings
 # anywhere else with 403 — the token is valid, the route is just out of scope.
 SCOPE_SIGNUP_PENDING = "signup_pending"
 
+# The 2FA temporary token is handed out after the password alone, before the
+# second factor, and is signed with the shared secret. It is never a session
+# (Nov 12 2026). Old shape: only the issuer. New shape: issuer and scope.
+ISSUER_TWO_FACTOR = "atto-sound-2fa"
+SCOPE_TWO_FACTOR_PENDING = "2fa_pending"
+
 # Payment paths served without a JWT.
 PUBLIC_PAYMENT_PATHS = frozenset(
     {
@@ -38,6 +44,11 @@ def _decode_token(authorization: str) -> dict:
 
     if not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Token missing subject")
+    if (
+        payload.get("iss") == ISSUER_TWO_FACTOR
+        or payload.get("scope") == SCOPE_TWO_FACTOR_PENDING
+    ):
+        raise HTTPException(status_code=401, detail="Invalid token")
     if payload.get("scope") == SCOPE_SIGNUP_PENDING:
         raise HTTPException(
             status_code=403, detail="insufficient_scope: finish registration first"
