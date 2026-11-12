@@ -15,12 +15,19 @@ interface JwtPayload {
   email: string;
   role: string;
   scope?: string;
+  iss?: string;
 }
 
 // Tokens carrying this scope are limited to /signup/* on user-service and
 // MUST NOT reach the social service. Treat their presence here as 403 rather
 // than 401 — the token is valid, just out of scope.
 const SCOPE_SIGNUP_PENDING = 'signup_pending';
+
+// The 2FA temporary token is handed out after the password alone, before the
+// second factor, and is signed with the same secret. It is never a session
+// (Nov 12 2026): old shape has only the issuer, new one also the scope.
+const ISSUER_TWO_FACTOR = 'atto-sound-2fa';
+const SCOPE_TWO_FACTOR_PENDING = '2fa_pending';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -45,6 +52,12 @@ export class AuthGuard implements CanActivate {
     const token = authHeader.slice(7);
     try {
       const payload = jwt.verify(token, this.jwtSecret) as JwtPayload;
+      if (
+        payload.iss === ISSUER_TWO_FACTOR ||
+        payload.scope === SCOPE_TWO_FACTOR_PENDING
+      ) {
+        throw new Error('2FA temporary token is not a session');
+      }
       if (payload.scope === SCOPE_SIGNUP_PENDING) {
         throw new ForbiddenException(
           'insufficient_scope: finish registration first',
