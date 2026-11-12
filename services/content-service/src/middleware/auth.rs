@@ -2,6 +2,8 @@ use actix_web::HttpRequest;
 use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 use serde::Deserialize;
 
+use super::token_kind::is_two_factor_pending;
+
 /// JWT claims matching the user-service token structure.
 /// `sub` contains the user ID; `scope` distinguishes full sessions from
 /// in-progress signup tokens that must not reach content endpoints.
@@ -10,6 +12,8 @@ struct Claims {
     sub: String,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    iss: Option<String>,
 }
 
 const SCOPE_SIGNUP_PENDING: &str = "signup_pending";
@@ -30,6 +34,14 @@ pub fn extract_user_id(req: &HttpRequest, jwt_secret: &str) -> Option<String> {
                 validation.validate_exp = false; // Let refresh flow handle expiry
                 if let Ok(data) = decode::<Claims>(token, &key, &validation) {
                     if data.claims.scope.as_deref() == Some(SCOPE_SIGNUP_PENDING) {
+                        return None;
+                    }
+                    // The 2FA temporary token (password only) is never a
+                    // session, and it does not fall back to X-User-ID either.
+                    if is_two_factor_pending(
+                        data.claims.iss.as_deref(),
+                        data.claims.scope.as_deref(),
+                    ) {
                         return None;
                     }
                     return Some(data.claims.sub);
