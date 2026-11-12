@@ -1,10 +1,18 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CountsRepository } from '../redis/repositories/counts.repository';
 import { FeedRepository } from '../redis/repositories/feed.repository';
 import { FollowGraphRepository } from '../redis/repositories/follow-graph.repository';
 import { RedisClientProvider } from '../redis/redis-client.provider';
-import { GrpcClientsService } from '../grpc/grpc-clients.service';
+import {
+  ContentUnavailableError,
+  GrpcClientsService,
+} from '../grpc/grpc-clients.service';
 import { InteractionsService } from '../interactions/interactions.service';
 import { FollowsService } from '../follows/follows.service';
 import { FeedPostDto } from './dto/feed.dto';
@@ -538,7 +546,18 @@ export class FeedService {
    * Get a single post with author info and interaction counts
    */
   async getPost(postId: string, currentUserId: string): Promise<FeedPostDto> {
-    const content = await this.grpcClients.getContent(postId);
+    // 404 only when the post is really gone: the app tells the person it was
+    // deleted. Content service not answering is a 503, which the app shows
+    // as "couldn't load" and retries.
+    let content;
+    try {
+      content = await this.grpcClients.getContentOrMissing(postId);
+    } catch (err) {
+      if (err instanceof ContentUnavailableError) {
+        throw new ServiceUnavailableException('Content service unavailable');
+      }
+      throw err;
+    }
 
     if (!content) {
       throw new NotFoundException('Post not found');

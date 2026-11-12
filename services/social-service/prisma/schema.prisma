@@ -133,6 +133,10 @@ model Notification {
   type        String
   actorId     String   @map("actor_id")
   referenceId String?  @map("reference_id")
+  // The comment a "comment" notice is about, so a tap opens that comment and
+  // not only the post (client ask, Oct 25 2026). Null on every other type and
+  // on comment notices written before Nov 12 2026.
+  commentId   String?  @map("comment_id")
   isRead      Boolean  @default(false) @map("is_read")
   createdAt   DateTime @default(now()) @map("created_at")
 

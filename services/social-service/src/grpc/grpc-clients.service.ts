@@ -6,6 +6,9 @@ import * as protoLoader from "@grpc/proto-loader";
 import * as path from "path";
 import * as fs from "fs";
 
+/** content-service did not answer; says nothing about whether the post exists. */
+export class ContentUnavailableError extends Error {}
+
 const USER_CACHE_TTL = 600; // 10 minutes
 const USER_NEGATIVE_TTL = 60; // 1 minute — short, since users do get created
 
@@ -270,6 +273,34 @@ export class GrpcClientsService implements OnModuleInit {
           } else {
             resolve(response);
           }
+        },
+      );
+    });
+  }
+
+  /**
+   * Like getContent, but tells "the post is not there" apart from "content
+   * service did not answer". getContent says null to both, so a timeout on
+   * the post screen read as a 404, and a post opened from a notice would now
+   * claim to be deleted when it was only slow (Nov 12 2026). Resolves null
+   * only on NOT_FOUND or a malformed id; any other failure rejects with
+   * ContentUnavailableError.
+   */
+  async getContentOrMissing(contentId: string): Promise<ContentResponse | null> {
+    return new Promise((resolve, reject) => {
+      this.contentClient.GetContent(
+        { content_id: contentId },
+        { deadline: this.deadline() },
+        (err: any, response: ContentResponse) => {
+          if (!err) return resolve(response);
+          if (
+            err.code === grpc.status.NOT_FOUND ||
+            err.code === grpc.status.INVALID_ARGUMENT
+          ) {
+            return resolve(null);
+          }
+          this.logger.error(`GetContent failed for ${contentId}: ${err.message}`);
+          reject(new ContentUnavailableError(err.message));
         },
       );
     });

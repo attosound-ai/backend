@@ -31,6 +31,7 @@ export class InteractionsService {
     type: string,
     actorId: string,
     referenceId: string,
+    commentId?: string,
   ): void {
     this.grpcClients.getUser(actorId).then((actor) => {
       this.pushService
@@ -40,6 +41,8 @@ export class InteractionsService {
           actorId,
           actor?.username || "Someone",
           referenceId,
+          undefined,
+          commentId,
         )
         .catch((err) => this.logger.error(`Push failed: ${err.message}`));
     });
@@ -163,6 +166,8 @@ export class InteractionsService {
           type: "comment",
           actorId: userId,
           referenceId: contentId,
+          // A tap on the notice opens this comment, not only the post.
+          commentId: comment.id,
         },
       });
 
@@ -171,8 +176,9 @@ export class InteractionsService {
         recipient_id: content.author_id,
         actor_id: userId,
         reference_id: contentId,
+        comment_id: comment.id,
       });
-      this.firePush(content.author_id, "comment", userId, contentId);
+      this.firePush(content.author_id, "comment", userId, contentId, comment.id);
     }
 
     await this.kafkaProducer.send("interaction.created", {
