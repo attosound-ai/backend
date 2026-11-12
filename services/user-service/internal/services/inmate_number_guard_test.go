@@ -94,11 +94,11 @@ func TestEnsureInmateNumberFree_LookupGetsTheNormalizedNumber(t *testing.T) {
 
 func TestConflictingCreator_IgnoresNonCreators(t *testing.T) {
 	rows := []models.User{repWith(1, "1", sp("CT")), {ID: 2, Role: models.RoleListener, InmateNumber: sp("1")}}
-	if c := conflictingCreator(rows, "CT"); c != nil {
+	if c := conflictingCreator(rows, "CT", 0); c != nil {
 		t.Fatalf("only creators count, got user %d", c.ID)
 	}
 	rows = append(rows, creatorWith(3, "1", sp("CT")))
-	if c := conflictingCreator(rows, "CT"); c == nil || c.ID != 3 {
+	if c := conflictingCreator(rows, "CT", 0); c == nil || c.ID != 3 {
 		t.Fatalf("want creator 3, got %+v", c)
 	}
 }
@@ -118,6 +118,40 @@ func TestDraftCreatesCreator(t *testing.T) {
 	}
 	for _, tc := range cases {
 		if got := draftCreatesCreator(&tc.d); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// An existing creator changing its own number: its own row never blocks it,
+// another creator with the number does.
+func TestEnsureInmateNumberFreeFor_OwnRowDoesNotCount(t *testing.T) {
+	ct := sp("CT")
+	db := fakeUsers(creatorWith(10, "334658", ct), creatorWith(11, "999000", ct))
+	if err := ensureInmateNumberFreeFor(db, "0334658", "CT", 10); err != nil {
+		t.Fatalf("creator 10 rewriting its own number: want nil, got %v", err)
+	}
+	if err := ensureInmateNumberFreeFor(db, "334658", "CT", 11); !errors.Is(err, ErrInmateNumberTaken) {
+		t.Fatalf("creator 11 taking creator 10's number: want ErrInmateNumberTaken, got %v", err)
+	}
+}
+
+func TestInmateIdentityChanged(t *testing.T) {
+	cur := &models.User{InmateNumber: sp("334658"), InmateState: sp("CT")}
+	cases := []struct {
+		name          string
+		number, state *string
+		want          bool
+	}{
+		{"nothing sent", nil, nil, false},
+		{"same number sent back", sp("334658"), nil, false},
+		{"same number written differently", sp(" 0334 658"), sp("ct"), false},
+		{"another number", sp("334659"), nil, true},
+		{"another state", nil, sp("NY"), true},
+		{"number cleared", sp(""), nil, true},
+	}
+	for _, tc := range cases {
+		if got := inmateIdentityChanged(cur, tc.number, tc.state); got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}

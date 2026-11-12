@@ -25,12 +25,13 @@ const InmateNumberTakenCode = "INMATE_NUMBER_TAKEN"
 // value (UserRepository.FindCreatorsByInmateNumber in production).
 type creatorLookup func(normalized string) ([]models.User, error)
 
-// conflictingCreator returns the first creator in existing that holds the
-// number in a state that can be the same as state, or nil. existing is
-// already filtered by number; this decides on the state.
-func conflictingCreator(existing []models.User, state string) *models.User {
+// conflictingCreator returns the first creator in existing, other than the
+// user excludeID (0 for none), that holds the number in a state that can be
+// the same as state, or nil. existing is already filtered by number; this
+// decides on the state.
+func conflictingCreator(existing []models.User, state string, excludeID uint64) *models.User {
 	for i := range existing {
-		if existing[i].Role != models.RoleCreator {
+		if existing[i].Role != models.RoleCreator || (excludeID != 0 && existing[i].ID == excludeID) {
 			continue
 		}
 		if validation.SameInmateState(strVal(existing[i].InmateState), state) {
@@ -49,6 +50,12 @@ func conflictingCreator(existing []models.User, state string) *models.User {
 // operator relink that gives an existing creator a new representative creates
 // no creator, so it never reaches here.
 func ensureInmateNumberFree(lookup creatorLookup, number, state string) error {
+	return ensureInmateNumberFreeFor(lookup, number, state, 0)
+}
+
+// ensureInmateNumberFreeFor is ensureInmateNumberFree for an existing creator
+// changing its own number: its own row (excludeID) does not count.
+func ensureInmateNumberFreeFor(lookup creatorLookup, number, state string, excludeID uint64) error {
 	normalized := validation.NormalizeInmateNumber(number)
 	if normalized == "" {
 		return nil
@@ -57,7 +64,7 @@ func ensureInmateNumberFree(lookup creatorLookup, number, state string) error {
 	if err != nil {
 		return fmt.Errorf("check inmate number: %w", err)
 	}
-	if conflictingCreator(existing, state) != nil {
+	if conflictingCreator(existing, state, excludeID) != nil {
 		return ErrInmateNumberTaken
 	}
 	return nil
@@ -74,6 +81,20 @@ func draftCreatesCreator(d *models.SignupDraft) bool {
 	switch models.Role(*d.Role) {
 	case models.RoleCreator, models.RoleRepresentative:
 		return validation.NormalizeInmateNumber(*d.InmateNumber) != ""
+	}
+	return false
+}
+
+// inmateIdentityChanged says whether a profile edit really moves a creator to
+// another inmate number or state. Only then is the number checked again: the
+// edit screens send the fields back unchanged, and the creators that already
+// share a number in production must still be able to save their profile.
+func inmateIdentityChanged(current *models.User, number, state *string) bool {
+	if number != nil && validation.NormalizeInmateNumber(*number) != validation.NormalizeInmateNumber(strVal(current.InmateNumber)) {
+		return true
+	}
+	if state != nil && validation.NormalizeInmateState(*state) != validation.NormalizeInmateState(strVal(current.InmateState)) {
+		return true
 	}
 	return false
 }

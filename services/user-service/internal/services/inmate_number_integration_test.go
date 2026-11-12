@@ -9,6 +9,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -183,3 +184,30 @@ func TestIntegrationInmate_RelinkToExistingCreatorStillWorks(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// Signing up with a free number and editing it afterwards to a taken one is
+// refused; saving the profile with the number unchanged still works, even for
+// creators that already share a number.
+func TestIntegrationInmate_ProfileEditCannotTakeANumber(t *testing.T) {
+	f := newInmateFixture(t)
+	ct := "CT"
+	other := &models.User{Username: "sneaky", DisplayName: "S", Role: models.RoleCreator, InmateNumber: sp("123123"), InmateState: &ct}
+	mustCreate(t, f.db, other)
+	us := NewUserService(f.users, kafka.NewProducer("127.0.0.1:1"))
+	id := strconv.FormatUint(other.ID, 10)
+
+	if _, err := us.UpdateProfile(context.Background(), id, &models.UpdateProfileRequest{InmateNumber: sp("334658")}); !errors.Is(err, ErrInmateNumberTaken) {
+		t.Fatalf("want ErrInmateNumberTaken, got %v", err)
+	}
+	// The creator that holds the number sends it back unchanged with a new bio.
+	bio := "new bio"
+	if _, err := us.UpdateProfile(context.Background(), strconv.FormatUint(f.creator.ID, 10),
+		&models.UpdateProfileRequest{Bio: &bio, InmateNumber: sp("0334 658"), InmateState: &ct}); err != nil {
+		t.Fatalf("unchanged number must save: %v", err)
+	}
+	// Its representative edits the number on its own row: not a creator, not checked.
+	if _, err := us.UpdateProfile(context.Background(), strconv.FormatUint(f.rep.ID, 10),
+		&models.UpdateProfileRequest{InmateNumber: sp("777001")}); err != nil {
+		t.Fatalf("a representative's own row is not checked: %v", err)
+	}
+}

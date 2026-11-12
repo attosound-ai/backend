@@ -194,6 +194,33 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID string, req *mod
 		updates["username"] = *req.Username
 	}
 
+	// One creator per inmate number and state, also when a creator edits its
+	// number afterwards (otherwise signing up with a free number and editing it
+	// to a taken one would get around the signup check). A representative's
+	// own row does not count, so its edit is not checked.
+	if req.InmateNumber != nil || req.InmateState != nil {
+		current, err := s.repo.FindByID(uid)
+		if err != nil || current == nil {
+			return nil, errors.New("user not found")
+		}
+		if current.Role == models.RoleCreator && inmateIdentityChanged(current, req.InmateNumber, req.InmateState) {
+			number, state := strVal(current.InmateNumber), strVal(current.InmateState)
+			if req.InmateNumber != nil {
+				number = *req.InmateNumber
+			}
+			if req.InmateState != nil {
+				state = *req.InmateState
+			}
+			if err := ensureInmateNumberFreeFor(s.repo.FindCreatorsByInmateNumber, number, state, uid); err != nil {
+				if errors.Is(err, ErrInmateNumberTaken) {
+					return nil, err
+				}
+				log.Printf("[USER] Error checking inmate number for %s: %v", userID, err)
+				return nil, errors.New("internal error")
+			}
+		}
+	}
+
 	// Representative identity fields — changing these revokes verification
 	repChanged := collectOptionalStringUpdates(updates, map[string]*string{
 		"creator_name":  req.CreatorName,

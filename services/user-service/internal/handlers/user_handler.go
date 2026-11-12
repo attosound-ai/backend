@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -313,6 +314,13 @@ func (h *UserHandler) UpdateProfile(c *fiber.Ctx) error {
 
 	profile, err := h.userService.UpdateProfile(c.Context(), claims.UserID, &req)
 	if err != nil {
+		if errors.Is(err, services.ErrInmateNumberTaken) {
+			return c.Status(fiber.StatusConflict).JSON(models.APIResponse{
+				Success: false,
+				Error:   err.Error(),
+				Code:    services.InmateNumberTakenCode,
+			})
+		}
 		status := fiber.StatusInternalServerError
 		if err.Error() == "user not found" {
 			status = fiber.StatusNotFound
