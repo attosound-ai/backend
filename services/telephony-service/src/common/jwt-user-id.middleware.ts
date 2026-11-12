@@ -1,6 +1,7 @@
 import { Injectable, NestMiddleware, Logger } from "@nestjs/common";
 import { Request, Response, NextFunction } from "express";
 import * as jwt from "jsonwebtoken";
+import { isTwoFactorPendingToken } from "./two-factor-token";
 
 /**
  * Verifies the Bearer JWT signature and overrides any client-supplied
@@ -65,6 +66,10 @@ export class JwtUserIdMiddleware implements NestMiddleware {
     const token = authHeader.slice(7);
     try {
       const payload = jwt.verify(token, this.secret) as Record<string, unknown>;
+      if (isTwoFactorPendingToken(payload)) {
+        // Password only, before the second factor: not a session.
+        throw new Error("2FA temporary token is not a session");
+      }
       const sub =
         typeof payload.sub === "string"
           ? payload.sub

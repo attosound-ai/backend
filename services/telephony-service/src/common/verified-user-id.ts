@@ -1,5 +1,6 @@
 import { UnauthorizedException } from "@nestjs/common";
 import * as jwt from "jsonwebtoken";
+import { isTwoFactorPendingToken } from "./two-factor-token";
 
 /**
  * The user behind a request, only from a JWT signed with our secret.
@@ -43,6 +44,8 @@ export function verifiedUserIdFromBearer(
     if (typeof payload.exp === "number" && nowS - payload.exp > EXPIRED_GRACE_S) {
       return null;
     }
+    // Password only, before the second factor: not a session.
+    if (isTwoFactorPendingToken(payload)) return null;
     return subOf(payload);
   } catch {
     return null;
