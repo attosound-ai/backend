@@ -113,7 +113,12 @@ defmodule ChatServiceWeb.ChatChannel do
       end
 
     extra_opts =
-      [metadata: payload["metadata"], thread_id: payload["thread_id"]]
+      [
+        metadata: payload["metadata"],
+        thread_id: payload["thread_id"],
+        # Optional: the same send twice is stored once (ClientKey).
+        client_key: payload["client_key"] || payload["clientKey"]
+      ]
       |> Enum.reject(fn {_k, v} -> is_nil(v) or v == "" end)
 
     with {:ok, conversation} <- ConversationService.find_conversation(user_id, conversation_id),

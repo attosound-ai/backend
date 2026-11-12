@@ -171,7 +171,9 @@ defmodule ChatServiceWeb.MessageController do
                 thread_id: blank_to_nil(params["threadId"]),
                 reply_to_id: blank_to_nil(params["replyToId"]),
                 reply_to_content: params["replyToContent"],
-                reply_to_sender: params["replyToSender"]
+                reply_to_sender: params["replyToSender"],
+                # Optional: the same send twice is stored once (ClientKey).
+                client_key: params["clientKey"] || params["client_key"]
               ]
               |> Enum.reject(fn {_k, v} -> is_nil(v) end)
 

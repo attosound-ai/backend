@@ -211,6 +211,10 @@ defmodule ChatService.Application do
       """
     ]
 
+    # Nov 2026: client keys, so a text the app sends twice is stored once
+    # (ChatService.Messages.ClientKey). A new table, nothing else changes.
+    statements = statements ++ [ChatService.Messages.ClientKeyStore.table_ddl(keyspace)]
+
     Enum.each(statements, fn stmt ->
       case Xandra.execute(conn, stmt) do
         {:ok, _} -> :ok

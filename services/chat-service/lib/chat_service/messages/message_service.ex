@@ -14,6 +14,7 @@ defmodule ChatService.Messages.MessageService do
   alias ChatService.Messages.ConversationPreview
   alias ChatService.Messages.ReactionCleaner
   alias ChatService.Messages.ThreadInbox
+  alias ChatService.Messages.ClientKey
   alias ChatService.Conversations.ConversationService
   alias ChatService.Reactions.ReactionService
   alias ChatService.KafkaProducer
@@ -32,10 +33,28 @@ defmodule ChatService.Messages.MessageService do
   3. Update both participants' conversation entries
   4. Broadcast the message via Phoenix PubSub (for Channels)
   5. Publish a Kafka event
+
+  A send that carries a client key (`:client_key`, or `clientKey` in the
+  metadata) is stored once: sending it again returns the message the first
+  send created, without storing, broadcasting or publishing anything (see
+  `ChatService.Messages.ClientKey`). Sends without a key work as before.
   """
   def send_message(sender_id, conversation_id, content, content_type \\ "text", opts \\ []) do
-    now = DateTime.utc_now()
     message_id = UUID.uuid1()
+
+    ClientKey.dedupe(
+      conversation_id,
+      sender_id,
+      ClientKey.from_opts(opts),
+      message_id,
+      fn ->
+        insert_message(message_id, sender_id, conversation_id, content, content_type, opts)
+      end
+    )
+  end
+
+  defp insert_message(message_id, sender_id, conversation_id, content, content_type, opts) do
+    now = DateTime.utc_now()
     reply_to_id = Keyword.get(opts, :reply_to_id)
     reply_to_content = Keyword.get(opts, :reply_to_content)
     reply_to_sender = Keyword.get(opts, :reply_to_sender)
