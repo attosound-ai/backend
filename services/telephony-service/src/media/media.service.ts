@@ -254,6 +254,11 @@ export class MediaService {
     };
   }
 
+  /** Drop a session without saving anything (a stream that failed its checks). */
+  discardSession(streamSid: string): boolean {
+    return this.sessions.delete(streamSid);
+  }
+
   /** Check if a session exists. */
   hasSession(streamSid: string): boolean {
     return this.sessions.has(streamSid);

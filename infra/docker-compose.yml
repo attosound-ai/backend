@@ -552,6 +552,8 @@ services:
       TWILIO_PUSH_CREDENTIAL_SID_ANDROID: ${TWILIO_PUSH_CREDENTIAL_SID_ANDROID:-}
       TWILIO_DEV_MODE: ${TWILIO_DEV_MODE:-true}
       WEBHOOK_BASE_URL: ${WEBHOOK_BASE_URL:-http://localhost:3009}
+      # log (default) or enforce: X-Twilio-Signature on the media stream socket.
+      MEDIA_STREAM_SIGNATURE: ${MEDIA_STREAM_SIGNATURE:-log}
       S3_ENDPOINT: http://minio:9000
       S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://192.168.0.65:9002}
       S3_ACCESS_KEY: atto_minio

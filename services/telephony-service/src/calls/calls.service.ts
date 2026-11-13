@@ -10,6 +10,15 @@ import { AnalyticsService } from "../analytics/analytics.service";
 import { ChildLeg, siblingsToCancel } from "./decline-siblings";
 import { endingStatus, isEnded, LegInfo, legsToEnd, ownsLeg } from "./forced-hangup";
 
+/** Statuses after which a call row can no longer carry a stream. */
+const ENDED_CALL_STATUSES = new Set([
+  "completed",
+  "no-answer",
+  "busy",
+  "failed",
+  "canceled",
+]);
+
 @Injectable()
 export class CallsService {
   private readonly logger = new Logger(CallsService.name);
@@ -321,6 +330,57 @@ export class CallsService {
       call_status_at_attach: callStatusAtAttach,
     });
     return { streamSid: stream.sid };
+  }
+
+  /**
+   * Is a Media Stream `start` frame for a live call of ours? Checked after the
+   * handshake signature (media-stream-auth.ts), as a second lock: the callId
+   * custom parameter (set by startStream) must name a call row of the userId
+   * parameter that has not ended, and Twilio must report the streamed leg
+   * (start.callSid, the SDK leg, not the parent stored in the row) as
+   * in-progress. When Twilio cannot be reached the database check decides,
+   * so a Twilio API hiccup does not cost a recording.
+   */
+  async verifyStreamCall(
+    callSid: string,
+    callId: string,
+    userId: string,
+  ): Promise<{ ok: boolean; reason: string; twilioStatus: string | null }> {
+    const no = (reason: string, twilioStatus: string | null = null) => ({
+      ok: false,
+      reason,
+      twilioStatus,
+    });
+    if (typeof callSid !== "string" || !/^CA[0-9a-f]{32}$/i.test(callSid)) {
+      return no("bad_call_sid");
+    }
+    if (
+      typeof callId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callId)
+    ) {
+      return no("bad_call_id");
+    }
+    const row = await this.callRepo.findOne({ where: { id: callId } });
+    if (!row) return no("call_not_found");
+    if (!userId || String(row.userId) !== String(userId)) return no("user_mismatch");
+    if (row.endedAt || ENDED_CALL_STATUSES.has(row.status)) {
+      return no(`call_ended_${row.status}`);
+    }
+    try {
+      const leg = await this.twilioClient.calls(callSid).fetch();
+      const status = String(leg.status);
+      if (status !== "in-progress") return no("leg_not_live", status);
+      return { ok: true, reason: "live", twilioStatus: status };
+    } catch (err) {
+      const e = err as { status?: number };
+      if (e?.status === 404) return no("leg_not_found");
+      this.logger.warn(
+        "Stream leg lookup failed sid=%s: %s",
+        callSid,
+        err instanceof Error ? err.message : String(err),
+      );
+      return { ok: true, reason: "twilio_unreachable", twilioStatus: null };
+    }
   }
 
   /** Stop a Twilio Media Stream on an active call by stream SID. */

@@ -13,6 +13,7 @@ import { AudioSegment } from "../entities/audio-segment.entity";
 import { AudioStorageService } from "../media/audio-storage.service";
 import { AudioProcessorService } from "./audio-processor.service";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { ProjectAccessService } from "./project-access";
 
 /**
  * Mirror of the app's lane mixer rules (front laneMixer.computeLaneEffectiveVolume)
@@ -66,6 +67,7 @@ export class ProjectsService {
     private readonly storageService: AudioStorageService,
     private readonly audioProcessor: AudioProcessorService,
     private readonly analytics: AnalyticsService,
+    private readonly access: ProjectAccessService,
   ) {}
 
   async createProject(
@@ -119,10 +121,7 @@ export class ProjectsService {
     segments: (AudioSegment & { downloadUrl: string })[];
     clips: TimelineClip[];
   }> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    const project = await this.access.requireProject(projectId, userId);
 
     const segments = await this.segmentRepo.find({
       where: { projectId },
@@ -169,10 +168,7 @@ export class ProjectsService {
     },
   ): Promise<Project> {
     // Ownership check first.
-    const existing = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!existing) throw new NotFoundException("Project not found");
+    const existing = await this.access.requireProject(projectId, userId);
 
     // Build the partial update payload. We go via `update()` (direct
     // UPDATE SQL) instead of `save()` because TypeORM's dirty tracking
@@ -192,21 +188,18 @@ export class ProjectsService {
     }
 
     if (Object.keys(patch).length > 0) {
-      await this.projectRepo.update({ id: projectId, userId }, patch);
+      await this.projectRepo.update({ id: projectId }, patch);
     }
 
     // Re-read to return the canonical persisted state.
     const fresh = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
+      where: { id: projectId },
     });
     return fresh!;
   }
 
   async deleteProject(projectId: string, userId: string): Promise<void> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    const project = await this.access.requireProject(projectId, userId);
 
     await this.projectRepo.remove(project);
     this.logger.log("Project deleted: id=%s user=%s", projectId, userId);
@@ -226,15 +219,12 @@ export class ProjectsService {
      */
     positionInTimeline?: number,
   ): Promise<AudioSegment> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    const project = await this.access.requireProject(projectId, userId);
 
-    const segment = await this.segmentRepo.findOne({
-      where: { id: segmentId },
-    });
-    if (!segment) throw new NotFoundException("Segment not found");
+    // The segment must be the caller's too (or their linked group's), never
+    // just any id: this is what let a foreign call recording be pulled into
+    // the caller's project and exported. Foreign answers like missing (404).
+    const segment = await this.access.requireSegment(segmentId, userId);
 
     segment.projectId = projectId;
     const saved = await this.segmentRepo.save(segment);
@@ -308,10 +298,7 @@ export class ProjectsService {
     projectId: string,
     userId: string,
   ): Promise<void> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    const project = await this.access.requireProject(projectId, userId);
 
     const segment = await this.segmentRepo.findOne({
       where: { id: segmentId, projectId },
@@ -329,10 +316,7 @@ export class ProjectsService {
     projectId: string,
     userId: string,
   ): Promise<TimelineClip[]> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    await this.access.requireProject(projectId, userId);
 
     return this.clipRepo.find({
       where: { projectId },
@@ -355,10 +339,18 @@ export class ProjectsService {
       effects?: Record<string, unknown> | null;
     }[],
   ): Promise<TimelineClip[]> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    const project = await this.access.requireProject(projectId, userId);
+
+    // Every segment a clip points at (played render and dry source) must be
+    // reachable by the caller; the export mixes whatever segmentId says.
+    await this.access.assertSegmentsReachable(
+      clips.flatMap((c) =>
+        [c.segmentId, c.sourceSegmentId].filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ),
+      ),
+      userId,
+    );
 
     // Replace all clips: delete existing, insert new
     await this.clipRepo.delete({ projectId });
@@ -426,10 +418,13 @@ export class ProjectsService {
 
   async getWaveformData(
     segmentId: string,
+    userId: string,
     samples: number,
     fromRatio = 0,
     toRatio = 1,
   ): Promise<number[]> {
+    // Checked before the waveform cache, which is keyed by segment only.
+    await this.access.requireSegment(segmentId, userId);
     return this.audioProcessor.generateWaveformData(
       segmentId,
       samples,
@@ -443,10 +438,7 @@ export class ProjectsService {
     userId: string,
     options?: ExportOptions,
   ): Promise<{ downloadUrl: string; fileSizeBytes: number }> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    const project = await this.access.requireProject(projectId, userId);
 
     const clips = await this.clipRepo.find({
       where: { projectId },
@@ -503,7 +495,7 @@ export class ProjectsService {
     if (options && Object.keys(options).length > 0) {
       // Remember the exporter's picks for the next mixdown.
       await this.projectRepo.update(
-        { id: projectId, userId },
+        { id: projectId },
         { settings: { ...settings, exportPrefs: rememberedExportPrefs(exportOptions) } },
       );
     }
@@ -527,16 +519,13 @@ export class ProjectsService {
     userId: string,
     file: Express.Multer.File,
   ): Promise<{ coverKey: string }> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    const project = await this.access.requireProject(projectId, userId);
     const ext = file.mimetype === "image/png" ? "png" : "jpg";
     const coverKey = `exports/covers/${projectId}/${randomUUID()}.${ext}`;
     await this.storageService.upload(coverKey, file.buffer, file.mimetype);
     const settings = (project.settings ?? {}) as ProjectSettings;
     await this.projectRepo.update(
-      { id: projectId, userId },
+      { id: projectId },
       {
         settings: {
           ...settings,
@@ -568,10 +557,7 @@ export class ProjectsService {
      */
     createClip = true,
   ): Promise<TimelineClip | AudioSegment> {
-    const project = await this.projectRepo.findOne({
-      where: { id: projectId, userId },
-    });
-    if (!project) throw new NotFoundException("Project not found");
+    const project = await this.access.requireProject(projectId, userId);
 
     // Write uploaded file to temp
     const tmpInput = join(
