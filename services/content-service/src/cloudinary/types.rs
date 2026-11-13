@@ -17,6 +17,9 @@ pub struct SignedUploadParams {
     /// blocking the upload response.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub eager_async: bool,
+    /// Incoming transformation, signed: the app sends it back as is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transformation: Option<String>,
     pub resource_type: String,
     #[serde(flatten)]
     pub extra_params: HashMap<String, String>,

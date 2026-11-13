@@ -69,7 +69,7 @@ pub async fn sign_upload(
             return HttpResponse::BadRequest().json(json!({
                 "success": false,
                 "data": null,
-                "error": "Invalid context. Must be: avatar, content, audio, chat, video, or reel"
+                "error": "Invalid context. Must be: avatar, content, audio, chat, video, reel, or square"
             }));
         }
     };
@@ -87,12 +87,15 @@ pub async fn sign_upload(
     // upload isn't blocked while Cloudinary builds the stream renditions.
     let eager_async = CloudinaryClient::context_is_async(&body.context);
 
+    let incoming = CloudinaryClient::incoming_transformation(&body.context);
+
     let params = cloudinary.sign_upload(
         folder,
         &public_id,
         &body.resource_type,
         eager.as_deref(),
         eager_async,
+        incoming.as_deref(),
     );
 
     HttpResponse::Ok().json(json!({

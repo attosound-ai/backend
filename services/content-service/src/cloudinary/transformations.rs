@@ -28,6 +28,14 @@ impl TransformationPresets {
         .join("|")
     }
 
+    /// Square: pad a framed picture to a 1080 square with black, centred.
+    /// The app's frame editor keeps the bands even (the picture centred on
+    /// the short axis), so this is exactly what the person framed. A picture
+    /// that is already square is only sized, never cut.
+    pub fn square_incoming() -> String {
+        "c_pad,w_1080,h_1080,b_black".to_string()
+    }
+
     /// Audio: no visual transformations needed.
     pub fn audio_eager() -> Option<String> {
         None
