@@ -5,6 +5,8 @@ import { internalHeaders } from "./internal-service-token";
 
 const CACHE_TTL_SECONDS = 300; // 5 minutes
 const NEGATIVE_CACHE_TTL_SECONDS = 60; // 1 minute for misses
+// Account in deletion grace: short, so a recovered account rings again soon.
+const DEACTIVATED_CACHE_TTL_SECONDS = 60;
 const NEGATIVE_CACHE_VALUE = "__missing__";
 
 /**
@@ -109,6 +111,54 @@ export class UsersClientService {
       NEGATIVE_CACHE_TTL_SECONDS,
     );
     return fallback();
+  }
+
+  /**
+   * Is the bridge owner's account deactivated (pending deletion, 30 day
+   * grace since Nov 12 2026)? The number stays assigned until the final
+   * deletion, but its calls must not ring: nobody is signed in to it.
+   *
+   * Read from the same /linked-account-ids answer (`ownerDeactivated`).
+   * Cached 60 s only, so a recovered account rings again within a minute.
+   * Fail-soft: any error, or a user-service without the field, answers
+   * false and the call rings as before.
+   */
+  async isOwnerDeactivated(userId: string): Promise<boolean> {
+    if (!userId || !this.baseUrl) return false;
+    const cacheKey = `users:deactivated:${userId}`;
+    const cached = await this.cache.get<string>(cacheKey);
+    if (cached === "1") return true;
+    if (cached === "0") return false;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/users/${userId}/linked-account-ids`,
+        // The route only answers internal callers since Nov 12 2026: without
+        // the service token it is a 401 and every bridge would ring.
+        { signal: controller.signal, headers: internalHeaders(this.jwtSecret) },
+      );
+      if (!res.ok) return false;
+      const payload = (await res.json()) as Record<string, unknown> | null;
+      const data = (payload?.data ?? payload) as Record<string, unknown> | null;
+      const deactivated = data?.ownerDeactivated === true;
+      await this.cache.set(
+        cacheKey,
+        deactivated ? "1" : "0",
+        DEACTIVATED_CACHE_TTL_SECONDS,
+      );
+      return deactivated;
+    } catch (err) {
+      this.logger.warn(
+        "deactivated lookup failed for userId=%s: %s",
+        userId,
+        err instanceof Error ? err.message : String(err),
+      );
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async fetchLinkedAccountIds(

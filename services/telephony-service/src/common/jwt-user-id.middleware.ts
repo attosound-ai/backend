@@ -2,6 +2,8 @@ import { Injectable, NestMiddleware, Logger } from "@nestjs/common";
 import { Request, Response, NextFunction } from "express";
 import * as jwt from "jsonwebtoken";
 import { isTwoFactorPendingToken } from "./two-factor-token";
+import { ExpiredSessionCheck } from "./expired-session-check";
+import { EXPIRED_GRACE_S } from "./verified-user-id";
 
 /**
  * Verifies the Bearer JWT signature and overrides any client-supplied
@@ -34,6 +36,15 @@ import { isTwoFactorPendingToken } from "./two-factor-token";
 export class JwtUserIdMiddleware implements NestMiddleware {
   private readonly logger = new Logger(JwtUserIdMiddleware.name);
   private readonly secret = process.env.JWT_SECRET || "";
+  // Nov 12 2026: an expired token inside the VoIP grace is only honoured
+  // while user-service says its session is still open (see
+  // expired-session-check.ts). Static: one cache for every request.
+  static sessions = new ExpiredSessionCheck(
+    (process.env.USER_SERVICE_URL || "http://localhost:8080").replace(
+      /\/$/,
+      "",
+    ),
+  );
 
   /** Path prefixes that must NOT be touched by this middleware. */
   private static readonly SKIP_PREFIXES = [
@@ -42,7 +53,7 @@ export class JwtUserIdMiddleware implements NestMiddleware {
     "/health",
   ];
 
-  use(req: Request, _res: Response, next: NextFunction): void {
+  async use(req: Request, res: Response, next: NextFunction): Promise<void> {
     const path = req.path || req.url || "";
     if (JwtUserIdMiddleware.SKIP_PREFIXES.some((p) => path.startsWith(p))) {
       // Defensive: even on skipped paths, drop a client-supplied X-User-ID
@@ -94,8 +105,43 @@ export class JwtUserIdMiddleware implements NestMiddleware {
         err instanceof Error ? err.message : String(err),
       );
       delete req.headers["x-user-id"];
+      // An expired token the controllers would still honour (VoIP grace):
+      // refused here when its session was closed since (password reset,
+      // deletion request), so the close reaches the calls path too.
+      if (err instanceof jwt.TokenExpiredError && this.inExpiredGrace(token)) {
+        const verdict = await JwtUserIdMiddleware.sessions.check(token);
+        if (verdict === "closed") {
+          this.logger.warn(
+            "Expired token of a closed session refused (%s)",
+            path,
+          );
+          res.status(401).json({ statusCode: 401, message: "Session closed" });
+          return;
+        }
+        if (verdict === "unknown") {
+          this.logger.warn(
+            "Session check unavailable; expired token kept under the grace (%s)",
+            path,
+          );
+        }
+      }
     }
 
     next();
+  }
+
+  /** Signed by us, expired, and still inside EXPIRED_GRACE_S. */
+  private inExpiredGrace(token: string): boolean {
+    try {
+      const payload = jwt.verify(token, this.secret, {
+        ignoreExpiration: true,
+      }) as jwt.JwtPayload;
+      const nowS = Math.floor(Date.now() / 1000);
+      return (
+        typeof payload.exp === "number" && nowS - payload.exp <= EXPIRED_GRACE_S
+      );
+    } catch {
+      return false;
+    }
   }
 }

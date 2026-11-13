@@ -67,6 +67,27 @@ export class WebhooksController {
       return;
     }
 
+    // Account pending deletion (30 day grace, Nov 12 2026): the number
+    // stays assigned to it until the final deletion so a recovered account
+    // keeps it, but nobody is signed in, so the call does not ring.
+    if (await this.usersClient.isOwnerDeactivated(String(assignment.userId))) {
+      this.logger.warn(
+        "Bridge owner %s is pending deletion; rejecting call %s",
+        assignment.userId,
+        callSid,
+      );
+      this.analytics.capture(null, "backend_call_rejected_deactivated", {
+        call_sid: callSid,
+        from,
+        to,
+        owner_user_id: assignment.userId,
+      });
+      response.say("Sorry, this number is not available right now. Goodbye.");
+      response.hangup();
+      res.type("text/xml").send(response.toString());
+      return;
+    }
+
     // Fan-out: enumerate every linked identity (rep + managed creators)
     // for the bridge owner. The Voice SDK on iOS can only register ONE
     // identity at a time per device, so without fan-out a PSTN call to

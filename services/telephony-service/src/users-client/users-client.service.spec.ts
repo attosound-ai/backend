@@ -113,4 +113,55 @@ describe("UsersClientService", () => {
     expect(await svc.getUsernameById("39")).toBeNull();
     expect(receivedSignal).toBeDefined();
   });
+
+  describe("isOwnerDeactivated (30 day deletion grace)", () => {
+    it("is true when user-service says the owner is pending deletion", async () => {
+      fetchMock.mockResolvedValue(
+        jsonResponse({ data: { userIds: [281], ownerDeactivated: true } }),
+      );
+      expect(await svc.isOwnerDeactivated("281")).toBe(true);
+      // Cached: a second call does not hit user-service.
+      expect(await svc.isOwnerDeactivated("281")).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("is false for an active owner and for an older user-service without the field", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { userIds: [280], ownerDeactivated: false } }),
+      );
+      expect(await svc.isOwnerDeactivated("280")).toBe(false);
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { userIds: [282] } }),
+      );
+      expect(await svc.isOwnerDeactivated("282")).toBe(false);
+    });
+
+    it("presents the internal service token, like the linked ids lookup", async () => {
+      const withSecret = {
+        get: (key: string) => {
+          if (key === "userService.url") return "http://user-service.test";
+          if (key === "userService.timeoutMs") return 500;
+          if (key === "jwt.secret") return "telephony-test-secret";
+          return undefined;
+        },
+      } as unknown as ConfigService;
+      const signedSvc = new UsersClientService(withSecret, cache);
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: { userIds: [281], ownerDeactivated: true } }),
+      );
+      expect(await signedSvc.isOwnerDeactivated("281")).toBe(true);
+      const init = fetchMock.mock.calls[0][1] as {
+        headers: Record<string, string>;
+      };
+      expect(init.headers.Authorization).toMatch(/^Bearer /);
+    });
+
+    it("fails soft: errors and 5xx keep the call ringing", async () => {
+      fetchMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+      expect(await svc.isOwnerDeactivated("281")).toBe(false);
+      fetchMock.mockResolvedValueOnce(jsonResponse({}, 503));
+      expect(await svc.isOwnerDeactivated("281")).toBe(false);
+      expect(await svc.isOwnerDeactivated("")).toBe(false);
+    });
+  });
 });
