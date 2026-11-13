@@ -72,3 +72,53 @@ export class KafkaConsumer {
     }
   }
 }
+
+/**
+ * user.deactivated / user.reactivated (user-service, borrado con 30 días de
+ * gracia, 12 nov 2026). Solo la cuenta que lo pidió trae `email`, y nunca
+ * una dirección interna de creator gestionado.
+ */
+interface UserGracePayload {
+  userIds?: string[];
+  email?: string;
+  username?: string;
+  locale?: string;
+  scheduledDeletionAt?: string;
+}
+
+@Controller()
+export class AccountDeletionConsumer {
+  private readonly logger = new Logger(AccountDeletionConsumer.name);
+
+  constructor(private readonly emailService: EmailService) {}
+
+  @EventPattern('user.deactivated')
+  async handleUserDeactivated(
+    @Payload() raw: { data?: UserGracePayload } & UserGracePayload,
+  ): Promise<void> {
+    const data: UserGracePayload = raw?.data ?? raw;
+    if (!data?.email) {
+      this.logger.log(
+        `user.deactivated for ${data?.userIds?.join(',') ?? '?'} has no email to notify`,
+      );
+      return;
+    }
+    await this.emailService.queueEmail('account-deletion-scheduled', data.email, {
+      username: data.username ?? '',
+      locale: (data.locale ?? 'en').toLowerCase(),
+      scheduledDeletionAt: data.scheduledDeletionAt,
+    });
+  }
+
+  @EventPattern('user.reactivated')
+  async handleUserReactivated(
+    @Payload() raw: { data?: UserGracePayload } & UserGracePayload,
+  ): Promise<void> {
+    const data: UserGracePayload = raw?.data ?? raw;
+    if (!data?.email) return;
+    await this.emailService.queueEmail('account-deletion-recovered', data.email, {
+      username: data.username ?? '',
+      locale: (data.locale ?? 'en').toLowerCase(),
+    });
+  }
+}

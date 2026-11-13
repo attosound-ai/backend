@@ -10,8 +10,19 @@ import { OtpEmail } from "../templates/otp.email";
 import { WelcomeEmail } from "../templates/welcome.email";
 import { PasswordResetEmail } from "../templates/password-reset.email";
 import { InstructionsEmail } from "../templates/instructions.email";
+import { AccountDeletionEmail } from "../templates/account-deletion.email";
+import {
+  deletionEmailCopy,
+  formatDeletionDate,
+} from "../templates/account-deletion.copy";
 
-type EmailTemplate = "otp" | "welcome" | "password-reset" | "instructions";
+type EmailTemplate =
+  | "otp"
+  | "welcome"
+  | "password-reset"
+  | "instructions"
+  | "account-deletion-scheduled"
+  | "account-deletion-recovered";
 
 interface EmailPayload {
   type: EmailTemplate;
@@ -51,6 +62,8 @@ export class EmailService {
     this.fromMap = new Map<EmailTemplate, string>([
       ["otp", fromAuth],
       ["password-reset", fromAuth],
+      ["account-deletion-scheduled", fromAuth],
+      ["account-deletion-recovered", fromAuth],
       ["welcome", fromWelcome],
       ["instructions", fromWelcome],
     ]);
@@ -217,6 +230,29 @@ export class EmailService {
           prSubjects[prLocale] ??
           (prLocale.startsWith("pt") ? prSubjects["pt-BR"] : prSubjects.en);
         return { subject: prSubject, html };
+      }
+      case "account-deletion-scheduled":
+      case "account-deletion-recovered": {
+        const kind =
+          type === "account-deletion-scheduled" ? "scheduled" : "recovered";
+        const locale = (data.locale as string) || "en";
+        const username = (data.username as string) || "";
+        const iso = data.scheduledDeletionAt as string | undefined;
+        const html = await render(
+          createElement(AccountDeletionEmail, {
+            kind,
+            username,
+            scheduledDeletionAt: iso,
+            locale,
+          }),
+        );
+        const { subject } = deletionEmailCopy(
+          kind,
+          username,
+          formatDeletionDate(iso, locale),
+          locale,
+        );
+        return { subject, html };
       }
       case "instructions": {
         const instLocale = (data.locale as string) || "en";

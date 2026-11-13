@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
-import { KafkaConsumer } from './kafka.consumer';
+import { AccountDeletionConsumer, KafkaConsumer } from './kafka.consumer';
 import { EmailModule } from '../email/email.module';
 
 @Module({
   imports: [EmailModule],
-  controllers: [KafkaConsumer],
+  controllers: [KafkaConsumer, AccountDeletionConsumer],
 })
 export class KafkaConsumerModule {}
