@@ -10,6 +10,7 @@ import (
 
 	"github.com/atto-sound/user-service/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var nonDigitRe = regexp.MustCompile(`[^0-9]`)
@@ -141,26 +142,58 @@ func (r *UserRepository) FindByIDs(ids []uint64) ([]models.User, error) {
 	return users, err
 }
 
+// SearchLimit is the most rows one search answers (Nov 12 2026).
+const SearchLimit = 20
+
+// escapeLike makes % _ and \ literal inside an ILIKE pattern. Before Nov 12
+// 2026 the query went in raw, so q=_ (any one character) or q=% matched every
+// account and the directory could be copied page by page.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
 // SearchUsers searches for users by username or display name with ILIKE.
 //
 // Never by email or phone: the route is open without a session and answers
 // with usernames, so matching those columns told anyone which account owns an
 // email or a phone, a few letters at a time ("@empresa.com", "860555"). It did
 // until Nov 12 2026.
+//
+// The query is matched literally (wildcards escaped) and at most SearchLimit
+// rows come back. The exact username comes first, then names starting with
+// the query, so a lookup by exact name (mentions, the official account) finds
+// it even when many names contain the query.
 func (r *UserRepository) SearchUsers(query string, limit int) ([]models.User, error) {
 	var users []models.User
-	if limit <= 0 {
-		limit = 20
+	if limit <= 0 || limit > SearchLimit {
+		limit = SearchLimit
 	}
-	if limit > 100 {
-		limit = 100
-	}
-	pattern := "%" + query + "%"
-	err := r.db.Where("username ILIKE ? OR display_name ILIKE ?", pattern, pattern).
+	lit := escapeLike(query)
+	pattern := "%" + lit + "%"
+	err := r.db.Where(`username ILIKE ? ESCAPE '\' OR display_name ILIKE ? ESCAPE '\'`, pattern, pattern).
+		Order(clause.OrderBy{Expression: clause.Expr{
+			SQL:                `LOWER(username) = LOWER(?) DESC, username ILIKE ? ESCAPE '\' DESC, username ASC`,
+			Vars:               []interface{}{query, lit + "%"},
+			WithoutParentheses: true,
+		}}).
 		Limit(limit).
-		Order("username ASC").
 		Find(&users).Error
 	return users, err
+}
+
+// FindByUsernameInsensitive returns the one account whose username equals the
+// given one ignoring case, or nil. What /users/search answers without a
+// session: an exact name, never a list.
+func (r *UserRepository) FindByUsernameInsensitive(username string) (*models.User, error) {
+	var user models.User
+	err := r.db.Where("LOWER(username) = LOWER(?)", username).Limit(1).Find(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	if user.ID == 0 {
+		return nil, nil
+	}
+	return &user, nil
 }
 
 // DiscoverUsers returns up to limit registered users excluding the given ID.

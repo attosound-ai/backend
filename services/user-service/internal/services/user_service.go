@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -82,9 +84,17 @@ func (s *UserService) GetUsersByIDs(ctx context.Context, ids []string) ([]*model
 	return profiles, nil
 }
 
-// SearchUsers searches for users matching a query string.
+// SearchMinChars is the shortest query /users/search answers (Nov 12 2026).
+const SearchMinChars = 2
+
+// SearchUsers searches for users matching a query string, for a signed in
+// caller: literal match (wildcards escaped), at least SearchMinChars
+// characters, at most repositories.SearchLimit rows. A shorter query answers
+// an empty list, not an error, so a search box sending its first letter
+// shows nothing instead of failing.
 func (s *UserService) SearchUsers(ctx context.Context, query string, limit int) ([]*models.UserProfile, error) {
-	if query == "" {
+	query = strings.TrimSpace(query)
+	if utf8.RuneCountInString(query) < SearchMinChars {
 		return []*models.UserProfile{}, nil
 	}
 
@@ -100,6 +110,26 @@ func (s *UserService) SearchUsers(ctx context.Context, query string, limit int) 
 	}
 
 	return profiles, nil
+}
+
+// SearchUsersExact is /users/search without a session: the one account whose
+// username equals the query ignoring case, or none. The callers that run
+// before a session (the official account notice at signup) look up an exact
+// name; nothing anonymous may list accounts.
+func (s *UserService) SearchUsersExact(ctx context.Context, query string) ([]*models.UserProfile, error) {
+	query = strings.TrimSpace(query)
+	if utf8.RuneCountInString(query) < SearchMinChars {
+		return []*models.UserProfile{}, nil
+	}
+	user, err := s.repo.FindByUsernameInsensitive(query)
+	if err != nil {
+		log.Printf("[USER] Error searching exact username: %v", err)
+		return nil, errors.New("internal error")
+	}
+	if user == nil {
+		return []*models.UserProfile{}, nil
+	}
+	return []*models.UserProfile{user.ToProfile()}, nil
 }
 
 // DiscoverUsers returns a list of registered users excluding the requester.

@@ -12,6 +12,7 @@ import (
 
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
+	"github.com/atto-sound/user-service/internal/repositories"
 	"github.com/atto-sound/user-service/internal/services"
 	"github.com/gofiber/fiber/v2"
 )
@@ -30,6 +31,7 @@ type UserHandler struct {
 type profileSource interface {
 	GetUserByID(ctx context.Context, id string) (*models.UserProfile, error)
 	SearchUsers(ctx context.Context, query string, limit int) ([]*models.UserProfile, error)
+	SearchUsersExact(ctx context.Context, query string) ([]*models.UserProfile, error)
 	DiscoverUsers(ctx context.Context, excludeID uint64, limit int) ([]*models.UserProfile, error)
 	GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error)
 	GetActivePushTokensForUser(userID uint64) ([]models.PushToken, error)
@@ -239,8 +241,17 @@ func publicList(c *fiber.Ctx, profiles []*models.UserProfile) []interface{} {
 }
 
 // SearchUsers handles GET /users/search?q=term&limit=20
+//
+// Nov 12 2026, the directory could be copied through here (q=_ matched every
+// account, with or without a session). Now:
+//   - signed in: literal match on username or display name, at least 2
+//     characters, at most 20 rows (limit above 20 is cut to 20);
+//   - no session: only the account whose username is exactly q (ignoring
+//     case), at most 1 row. TestNumberNotice looks up the official account
+//     this way during signup, before there is a session.
 func (h *UserHandler) SearchUsers(c *fiber.Ctx) error {
-	query := c.Query("q")
+	// Copied: fiber's value points into a buffer reused by the next request.
+	query := strings.Clone(c.Query("q"))
 	if query == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
@@ -248,14 +259,27 @@ func (h *UserHandler) SearchUsers(c *fiber.Ctx) error {
 		})
 	}
 
-	limit := 20
-	if l := c.Query("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
+	var (
+		profiles []*models.UserProfile
+		err      error
+	)
+	if viewerID(c) == "" {
+		profiles, err = h.profiles.SearchUsersExact(c.Context(), query)
+		if len(profiles) > 1 {
+			profiles = profiles[:1]
+		}
+	} else {
+		limit := repositories.SearchLimit
+		if l := c.Query("limit"); l != "" {
+			if parsed, perr := strconv.Atoi(l); perr == nil && parsed > 0 && parsed < limit {
+				limit = parsed
+			}
+		}
+		profiles, err = h.profiles.SearchUsers(c.Context(), query, limit)
+		if len(profiles) > limit {
+			profiles = profiles[:limit]
 		}
 	}
-
-	profiles, err := h.profiles.SearchUsers(c.Context(), query, limit)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,16 @@ func (f *fakeProfiles) GetUserByID(_ context.Context, id string) (*models.UserPr
 
 func (f *fakeProfiles) SearchUsers(context.Context, string, int) ([]*models.UserProfile, error) {
 	return []*models.UserProfile{f.get(ownerID), f.get(repID), f.get(strangerID)}, nil
+}
+
+// Without a session search answers one exact username.
+func (f *fakeProfiles) SearchUsersExact(_ context.Context, q string) ([]*models.UserProfile, error) {
+	for id, p := range f.byID {
+		if strings.EqualFold(p.Username, q) {
+			return []*models.UserProfile{f.get(id)}, nil
+		}
+	}
+	return []*models.UserProfile{}, nil
 }
 
 // The real query leaves the caller out; the fake does not, so the test also
@@ -220,12 +231,15 @@ func TestGetUserByIDShowsStrangersOnlyThePublicProfile(t *testing.T) {
 func TestSearchShowsStrangersOnlyThePublicProfile(t *testing.T) {
 	app, mgr := projectionApp(t)
 
-	anon := rowsByID(t, call(t, app, "/users/search?q=s", ""))
+	anon := rowsByID(t, call(t, app, "/users/search?q=stranger", ""))
+	if len(anon) != 1 {
+		t.Fatalf("search without a session: %d rows, want the 1 exact match", len(anon))
+	}
 	for id, row := range anon {
 		assertPublic(t, "search without a session, row "+strconv.FormatUint(id, 10), row)
 	}
 
-	mine := rowsByID(t, call(t, app, "/users/search?q=s", tokenFor(t, mgr, ownerID)))
+	mine := rowsByID(t, call(t, app, "/users/search?q=st", tokenFor(t, mgr, ownerID)))
 	assertFull(t, "search, the caller's own row", mine[ownerID])
 	// Linked or not, another account in a list is public.
 	assertPublic(t, "search, the linked representative's row", mine[repID])
