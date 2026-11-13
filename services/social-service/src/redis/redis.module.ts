@@ -12,6 +12,10 @@ import {
   FeedRepository,
   RedisFeedRepository,
 } from "./repositories/feed.repository";
+import {
+  DeactivatedUsersRepository,
+  RedisDeactivatedUsersRepository,
+} from "./repositories/deactivated-users.repository";
 
 /**
  * Wires the cache stack:
@@ -33,12 +37,17 @@ import {
     { provide: CountsRepository, useClass: RedisCountsRepository },
     { provide: FollowGraphRepository, useClass: RedisFollowGraphRepository },
     { provide: FeedRepository, useClass: RedisFeedRepository },
+    {
+      provide: DeactivatedUsersRepository,
+      useClass: RedisDeactivatedUsersRepository,
+    },
   ],
   exports: [
     RedisClientProvider,
     CountsRepository,
     FollowGraphRepository,
     FeedRepository,
+    DeactivatedUsersRepository,
   ],
 })
 export class RedisModule {}

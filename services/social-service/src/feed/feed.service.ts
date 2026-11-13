@@ -2,6 +2,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
@@ -16,6 +17,8 @@ import {
 import { InteractionsService } from '../interactions/interactions.service';
 import { FollowsService } from '../follows/follows.service';
 import { FeedPostDto } from './dto/feed.dto';
+import { DeactivatedUsersRepository } from '../redis/repositories/deactivated-users.repository';
+import { hideDeactivatedAuthors } from '../common/deactivated-authors';
 
 @Injectable()
 export class FeedService {
@@ -30,6 +33,8 @@ export class FeedService {
     private readonly grpcClients: GrpcClientsService,
     private readonly interactionsService: InteractionsService,
     private readonly followsService: FollowsService,
+    // Accounts in deletion grace: their posts are hidden everywhere.
+    @Optional() private readonly deactivated?: DeactivatedUsersRepository,
   ) {}
 
   /**
@@ -86,7 +91,9 @@ export class FeedService {
     }
 
     // Step 2+3: Fetch content + authors in parallel
-    const { contents } = await this.grpcClients.getContentBatch(contentIds);
+    const { contents: fetched } = await this.grpcClients.getContentBatch(contentIds);
+    // Posts of accounts in their 30 day deletion grace are not shown.
+    const contents = await hideDeactivatedAuthors(fetched, (c) => c.author_id, this.deactivated);
     const t2 = Date.now();
     this.logger.log(`[PERF] Step 2 getContentBatch gRPC: ${t2 - t1}ms (${contents.length} contents)`);
 
@@ -521,6 +528,11 @@ export class FeedService {
     posts: FeedPostDto[];
     meta: { nextCursor: string | null; hasMore: boolean; total?: number };
   }> {
+    // A profile in its deletion grace shows no posts to anybody.
+    if ((await this.deactivated?.among([String(authorId)]))?.has(String(authorId))) {
+      return { posts: [], meta: { nextCursor: null, hasMore: false, total: 0 } };
+    }
+
     // Fetch content authored by the target user
     const { contents, meta } = await this.grpcClients.getContentByAuthor(
       authorId,
@@ -569,6 +581,10 @@ export class FeedService {
     }
 
     const [post] = await this.resolvePostsBatch([content], currentUserId);
+    // Hidden author (deletion grace): same answer as a deleted post.
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
     return post;
   }
 
@@ -654,9 +670,12 @@ export class FeedService {
    * Eliminates the N+1 pattern across all feed endpoints.
    */
   private async resolvePostsBatch(
-    contents: any[],
+    allContents: any[],
     viewerId: string,
   ): Promise<FeedPostDto[]> {
+    // Every feed (reels, explore, profile, single post) passes through here:
+    // drop what accounts in their deletion grace authored.
+    const contents = await hideDeactivatedAuthors(allContents, (c) => c.author_id, this.deactivated);
     if (contents.length === 0) return [];
 
     const postIds = contents.map((c) => c.id);

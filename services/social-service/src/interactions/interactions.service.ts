@@ -4,7 +4,10 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
+import { DeactivatedUsersRepository } from "../redis/repositories/deactivated-users.repository";
+import { withoutAuthors } from "../common/deactivated-authors";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountsRepository } from "../redis/repositories/counts.repository";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
@@ -23,6 +26,8 @@ export class InteractionsService {
     private readonly grpcClients: GrpcClientsService,
     private readonly kafkaProducer: KafkaProducer,
     private readonly pushService: PushService,
+    // Accounts in deletion grace: their comments are hidden.
+    @Optional() private readonly deactivated?: DeactivatedUsersRepository,
   ) {}
 
   /** Fire-and-forget push notification after creating a notification in DB. */
@@ -251,7 +256,7 @@ export class InteractionsService {
   }> {
     const skip = (page - 1) * limit;
 
-    const [comments, total] = await Promise.all([
+    const [allComments, total] = await Promise.all([
       this.prisma.comment.findMany({
         where: { contentId, parentId: null, isDeleted: false },
         orderBy: { createdAt: "desc" },
@@ -270,6 +275,19 @@ export class InteractionsService {
         where: { contentId, parentId: null, isDeleted: false },
       }),
     ]);
+
+    // Comments and replies of accounts in their deletion grace are hidden
+    // (the page total still counts them; they come back if recovered).
+    const authorIds: string[] = [];
+    for (const c of allComments) {
+      authorIds.push(c.userId, ...c.replies.map((r) => r.userId));
+    }
+    const hidden = this.deactivated
+      ? await this.deactivated.among(authorIds)
+      : new Set<string>();
+    const comments = withoutAuthors(allComments, (c) => c.userId, hidden).map(
+      (c) => ({ ...c, replies: withoutAuthors(c.replies, (r) => r.userId, hidden) }),
+    );
 
     const userIds = new Set<string>();
     for (const c of comments) {

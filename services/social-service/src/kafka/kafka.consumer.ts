@@ -3,6 +3,7 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from "@nestjs/common";
 import { Kafka, Consumer, EachMessagePayload } from "kafkajs";
 import { CountsRepository } from "../redis/repositories/counts.repository";
@@ -13,6 +14,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { PushService } from "../push/push.service";
 import { chatPushPreview } from "../push/chat-push-preview";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
+import { DeactivatedUsersRepository } from "../redis/repositories/deactivated-users.repository";
 import { visibleComments } from "../interactions/visible-comments";
 import {
   officialFollowLog,
@@ -33,6 +35,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly pushService: PushService,
     private readonly grpcClients: GrpcClientsService,
+    @Optional() private readonly deactivated?: DeactivatedUsersRepository,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -76,6 +79,8 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           "content.updated",
           "message.sent",
           "user.deleted",
+          "user.deactivated",
+          "user.reactivated",
         ],
         fromBeginning: false,
       });
@@ -87,7 +92,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       });
 
       this.logger.log(
-        "Kafka consumer subscribed to: user.created, content.published, message.sent",
+        "Kafka consumer subscribed to: user.created, content.published, message.sent, user.deleted, user.deactivated, user.reactivated",
       );
     } catch (error) {
       this.logger.error(`Failed to connect Kafka consumer: ${error.message}`);
@@ -133,6 +138,12 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           break;
         case "user.deleted":
           await this.handleUserDeleted(data);
+          break;
+        case "user.deactivated":
+          await this.handleUserDeactivated(data);
+          break;
+        case "user.reactivated":
+          await this.handleUserReactivated(data);
           break;
         default:
           this.logger.warn(`Unhandled topic: ${topic}`);
@@ -573,6 +584,32 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * user.deactivated (30 day deletion grace, Nov 12 2026): hide the
+   * accounts' posts, comments and list rows, and drop their cached profile
+   * so author lookups stop serving it.
+   */
+  async handleUserDeactivated(data: { userIds?: string[] }): Promise<void> {
+    const userIds = (data?.userIds ?? []).map(String).filter(Boolean);
+    if (userIds.length === 0 || !this.deactivated) return;
+    await this.deactivated.add(userIds);
+    for (const id of userIds) {
+      await this.grpcClients.invalidateUserCache(id);
+    }
+    this.logger.log(`Hid accounts pending deletion: ${userIds.join(", ")}`);
+  }
+
+  /** user.reactivated: the account recovered, show everything again. */
+  async handleUserReactivated(data: { userIds?: string[] }): Promise<void> {
+    const userIds = (data?.userIds ?? []).map(String).filter(Boolean);
+    if (userIds.length === 0 || !this.deactivated) return;
+    await this.deactivated.remove(userIds);
+    for (const id of userIds) {
+      await this.grpcClients.invalidateUserCache(id);
+    }
+    this.logger.log(`Showing recovered accounts again: ${userIds.join(", ")}`);
+  }
+
+  /**
    * user.deleted -> recalculate Redis counts for all posts the user interacted
    * with, clean up follow graph, and delete feed caches.
    *
@@ -587,6 +624,8 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     if (userIds.length === 0) return;
 
     this.logger.log(`Processing user.deleted for users: ${userIds.join(", ")}`);
+    // Out of the deletion grace set: the account is gone for good.
+    await this.deactivated?.remove(userIds.map(String));
 
     for (const userId of userIds) {
       // Invalidate user profile cache

@@ -4,7 +4,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
+import { DeactivatedUsersRepository } from "../redis/repositories/deactivated-users.repository";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountsRepository } from "../redis/repositories/counts.repository";
 import { FollowGraphRepository } from "../redis/repositories/follow-graph.repository";
@@ -24,6 +26,8 @@ export class FollowsService {
     private readonly grpcClients: GrpcClientsService,
     private readonly kafkaProducer: KafkaProducer,
     private readonly pushService: PushService,
+    // Accounts in deletion grace: left out of follower and following lists.
+    @Optional() private readonly deactivated?: DeactivatedUsersRepository,
   ) {}
 
   /**
@@ -288,9 +292,13 @@ export class FollowsService {
   }
 
   private async enrichUserSummaries(
-    userIds: string[],
+    allUserIds: string[],
     currentUserId?: string,
   ): Promise<UserSummaryDto[]> {
+    const hidden = this.deactivated
+      ? await this.deactivated.among(allUserIds)
+      : new Set<string>();
+    const userIds = allUserIds.filter((id) => !hidden.has(String(id)));
     if (userIds.length === 0) return [];
 
     // Fetch user details via gRPC
