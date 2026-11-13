@@ -398,7 +398,12 @@ export class GrpcClientsService implements OnModuleInit {
         {
           content_id: request.contentId,
           author_id: request.authorId,
-          text_content: request.textContent ?? '',
+          // text_content is `optional` in the proto: an empty string is a
+          // real value and would blank the caption of an edit that only
+          // changes the cover. Absent means "leave it".
+          ...(request.textContent !== undefined
+            ? { text_content: request.textContent }
+            : {}),
           tags: request.tags ?? [],
           metadata: request.metadata ?? {},
         },

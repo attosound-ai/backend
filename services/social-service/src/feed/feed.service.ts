@@ -487,13 +487,18 @@ export class FeedService {
   async updatePost(
     userId: string,
     postId: string,
-    data: { textContent?: string; tags?: string[] },
+    data: {
+      textContent?: string;
+      tags?: string[];
+      metadata?: Record<string, string>;
+    },
   ): Promise<FeedPostDto> {
     const updated = await this.grpcClients.updateContent({
       contentId: postId,
       authorId: userId,
       textContent: data.textContent,
       tags: data.tags,
+      metadata: data.metadata,
     });
 
     if (!updated) {

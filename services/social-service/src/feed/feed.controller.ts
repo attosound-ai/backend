@@ -15,6 +15,7 @@ import { CurrentUserId } from '../common/decorators/current-user.decorator';
 import { FeedService } from './feed.service';
 import { InteractionsService } from '../interactions/interactions.service';
 import { CreatePostDto, ExploreQueryDto, FeedQueryDto, ReelViewDto, ReelsQueryDto, UpdatePostDto, UserPostsQueryDto } from './dto/feed.dto';
+import { editMetadataFrom } from './edit-metadata';
 
 @Controller('api/v1/posts')
 @UseGuards(AuthGuard)
@@ -74,6 +75,7 @@ export class FeedController {
     const post = await this.feedService.updatePost(userId, postId, {
       textContent: dto.textContent,
       tags: dto.tags,
+      metadata: editMetadataFrom(dto.metadata),
     });
     return {
       success: true,
