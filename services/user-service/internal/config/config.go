@@ -32,6 +32,13 @@ type Config struct {
 	// operator list asks it for the real followers and posts of each row.
 	// Optional: empty means the list keeps serving the stored columns.
 	SocialServiceURL string
+	// DeletionGrace es cuánto espera una cuenta desactivada antes del borrado
+	// definitivo (30 días, pedido del cliente el 28 oct 2026).
+	DeletionGrace time.Duration
+	// DeletionSweepInterval es cada cuánto corre el barrido que borra las
+	// cuentas vencidas. DeletionSweepEnabled=false lo apaga (DELETION_SWEEP=off).
+	DeletionSweepInterval time.Duration
+	DeletionSweepEnabled  bool
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -55,6 +62,17 @@ func Load() *Config {
 		OTPServiceURL:    getEnv("OTP_SERVICE_URL", "http://otp-service:8000"),
 		AdminAPISecret:   getEnv("ADMIN_API_SECRET", ""),
 		SocialServiceURL: getEnv("SOCIAL_SERVICE_URL", ""),
+
+		DeletionGrace:         parseDuration(getEnv("DELETION_GRACE", "720h"), 720*time.Hour),
+		DeletionSweepInterval: parseDuration(getEnv("DELETION_SWEEP_INTERVAL", "1h"), time.Hour),
+		DeletionSweepEnabled:  !strings.EqualFold(getEnv("DELETION_SWEEP", "on"), "off"),
+	}
+	// Nunca menos de un día de gracia, aunque alguien se equivoque de unidad.
+	if cfg.DeletionGrace < 24*time.Hour {
+		cfg.DeletionGrace = 24 * time.Hour
+	}
+	if cfg.DeletionSweepInterval < time.Minute {
+		cfg.DeletionSweepInterval = time.Minute
 	}
 
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {

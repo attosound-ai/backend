@@ -24,6 +24,8 @@ type UserService struct {
 	// socialStats da los números reales a la lista de operador. Nil o apagado:
 	// la lista sirve las columnas guardadas.
 	socialStats *SocialStatsClient
+	// grace son los tiempos del borrado con gracia (30 días por defecto).
+	grace DeletionGraceConfig
 }
 
 // NewUserService creates a new UserService instance.
@@ -52,10 +54,36 @@ func (s *UserService) GetUserByID(ctx context.Context, id string) (*models.UserP
 		log.Printf("[USER] Error fetching user %s: %v", id, err)
 		return nil, errors.New("internal error")
 	}
-	if user == nil {
+	// Una cuenta en gracia de borrado no existe para los demás (perfil
+	// público, gRPC de los otros servicios): mismo 404 que una borrada.
+	if user == nil || user.IsDeactivated() {
 		return nil, errors.New("user not found")
 	}
 
+	return user.ToProfile(), nil
+}
+
+// IsDeactivated dice si la cuenta está en gracia de borrado. Ante un error
+// de lectura responde false: telefonía no deja de sonar por un fallo nuestro.
+func (s *UserService) IsDeactivated(userID uint64) bool {
+	user, err := s.repo.FindByID(userID)
+	return err == nil && user.IsDeactivated()
+}
+
+// GetUserForOperator es GetUserByID también para cuentas en gracia: el
+// borrado inmediato de soporte tiene que poder encontrarlas.
+func (s *UserService) GetUserForOperator(ctx context.Context, id string) (*models.UserProfile, error) {
+	uid, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return nil, errors.New("invalid user ID format")
+	}
+	user, err := s.repo.FindByID(uid)
+	if err != nil {
+		return nil, errors.New("internal error")
+	}
+	if user == nil {
+		return nil, errors.New("user not found")
+	}
 	return user.ToProfile(), nil
 }
 
@@ -498,6 +526,27 @@ func (s *UserService) GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error
 	if err != nil {
 		return nil, err
 	}
+	// Las cuentas en gracia de borrado no suenan ni ven lo privado de sus
+	// vinculadas. Si la propia cuenta pedida está en gracia se queda en la
+	// lista: quien llama decide con LinkedAccountsState.
+	if len(ids) > 1 {
+		users, uerr := s.repo.FindByIDsIncludingDeactivated(ids)
+		if uerr == nil {
+			deactivated := make(map[uint64]bool, len(users))
+			for i := range users {
+				if users[i].IsDeactivated() && users[i].ID != userID {
+					deactivated[users[i].ID] = true
+				}
+			}
+			live := ids[:0:0]
+			for _, id := range ids {
+				if !deactivated[id] {
+					live = append(live, id)
+				}
+			}
+			ids = live
+		}
+	}
 	if len(ids) == 0 {
 		// Defensive: anchor row must exist, but if Postgres returns empty
 		// for any reason we still want to honour the contract that the
@@ -531,6 +580,9 @@ type AdminUserRow struct {
 	StatsLive        bool       `json:"statsLive"`
 	CreatedAt        time.Time  `json:"createdAt"`
 	LastSeenAt       *time.Time `json:"lastSeenAt,omitempty"`
+	// Borrado con gracia: desde cuándo está desactivada y cuándo se borra.
+	DeactivatedAt       *time.Time `json:"deactivatedAt,omitempty"`
+	ScheduledDeletionAt *time.Time `json:"scheduledDeletionAt,omitempty"`
 }
 
 // AdminUserList es la respuesta completa de la lista.
@@ -600,6 +652,9 @@ func (s *UserService) ListUsersForAdmin(
 			FollowersCount:   u.FollowersCount,
 			PostsCount:       u.PostsCount,
 			CreatedAt:        u.CreatedAt,
+
+			DeactivatedAt:       u.DeactivatedAt,
+			ScheduledDeletionAt: u.ScheduledDeletionAt,
 		})
 	}
 

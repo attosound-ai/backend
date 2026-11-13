@@ -62,6 +62,12 @@ type AccountDeletion struct {
 	ClientIP  string    `gorm:"size:64" json:"clientIp,omitempty"`
 	UserAgent string    `gorm:"size:300" json:"userAgent,omitempty"`
 	DeletedAt time.Time `gorm:"index;not null" json:"deletedAt"`
+
+	// Borrado con gracia (12 nov 2026): cuándo lo pidió la persona y qué
+	// petición se cumplió. Nulos en los borrados inmediatos (operador, y los
+	// de la app antes de la gracia). Columnas nuevas y nulas.
+	RequestedAt    *time.Time `json:"requestedAt,omitempty"`
+	GraceRequestID *uint64    `json:"graceRequestId,omitempty"`
 }
 
 // TableName pins the table name.

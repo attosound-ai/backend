@@ -117,6 +117,9 @@ func (f *fakeProfiles) GetActivePushTokensForUser(id uint64) ([]models.PushToken
 	return []models.PushToken{{UserID: id, Token: "ExponentPushToken[fake]", Platform: "ios", DeviceID: "dev-1"}}, nil
 }
 
+// No account of the fake is in its deletion grace.
+func (f *fakeProfiles) IsDeactivated(uint64) bool { return false }
+
 func projectionApp(t *testing.T) (*fiber.App, *middleware.JWTManager) {
 	t.Helper()
 	mgr := middleware.NewJWTManager(&config.Config{

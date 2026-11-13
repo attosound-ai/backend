@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"time"
 
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
@@ -107,6 +108,9 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 
 	result, err := h.authService.Login(c.Context(), &req)
 	if err != nil {
+		if done, werr := writePendingDeletion(c, err); done {
+			return werr
+		}
 		status := fiber.StatusUnauthorized
 		if err.Error() == "internal error" {
 			status = fiber.StatusInternalServerError
@@ -142,6 +146,9 @@ func (h *AuthHandler) LoginOTP(c *fiber.Ctx) error {
 
 	result, err := h.authService.LoginWithOTP(c.Context(), &req)
 	if err != nil {
+		if done, werr := writePendingDeletion(c, err); done {
+			return werr
+		}
 		status := fiber.StatusUnauthorized
 		if err.Error() == "internal error" || err.Error() == "failed to verify code" {
 			status = fiber.StatusInternalServerError
@@ -334,11 +341,22 @@ func (h *AuthHandler) SwitchAccount(c *fiber.Ctx) error {
 		})
 	}
 
+	// A session closed since it was issued (password reset, deletion
+	// request) must not mint new tokens with its remaining minutes.
+	if !h.authService.SessionStillOpen(claims) {
+		return c.Status(fiber.StatusUnauthorized).JSON(models.APIResponse{
+			Success: false,
+			Error:   "session revoked",
+		})
+	}
+
 	result, err := h.authService.SwitchAccount(c.Context(), claims.UserID, req.TargetUserID)
 	if err != nil {
 		status := fiber.StatusInternalServerError
 		msg := err.Error()
-		if msg == "forbidden: accounts are not linked" {
+		if msg == services.AccountPendingDeletionCode {
+			status = fiber.StatusForbidden
+		} else if msg == "forbidden: accounts are not linked" {
 			status = fiber.StatusForbidden
 		} else if msg == "target user not found" || msg == "user not found" {
 			status = fiber.StatusNotFound
@@ -428,17 +446,23 @@ func (h *AuthHandler) ResetPassword(c *fiber.Ctx) error {
 		})
 	}
 
-	if err := h.authService.ResetPassword(c.Context(), &req); err != nil {
+	session, err := h.authService.ResetPassword(c.Context(), &req)
+	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
 			Success: false,
 			Error:   err.Error(),
 		})
 	}
 
-	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
-		Success: true,
-		Data:    map[string]string{"message": "password updated successfully"},
-	})
+	// Every session of the account was closed. When the account has no 2FA,
+	// the phone that reset gets a fresh one (user + tokens); older apps read
+	// only "message" and go to the sign in screen as before.
+	data := fiber.Map{"message": "password updated successfully"}
+	if session != nil {
+		data["user"] = session.User
+		data["tokens"] = session.Tokens
+	}
+	return c.Status(fiber.StatusOK).JSON(models.APIResponse{Success: true, Data: data})
 }
 
 // Login2FA handles POST /auth/login/2fa — completes 2FA verification.
@@ -459,6 +483,9 @@ func (h *AuthHandler) Login2FA(c *fiber.Ctx) error {
 
 	result, err := h.authService.Login2FA(c.Context(), &req)
 	if err != nil {
+		if done, werr := writePendingDeletion(c, err); done {
+			return werr
+		}
 		status := fiber.StatusUnauthorized
 		if err.Error() == "internal error" || err.Error() == "failed to verify code" {
 			status = fiber.StatusInternalServerError
@@ -609,6 +636,10 @@ func (h *AuthHandler) Me(c *fiber.Ctx) error {
 		status := fiber.StatusInternalServerError
 		if err.Error() == "user not found" {
 			status = fiber.StatusNotFound
+		} else if err.Error() == services.AccountPendingDeletionCode {
+			// 401: el token de este dispositivo es de antes del borrado; la
+			// app intenta renovar, el refresh lo rechaza y cierra la sesión.
+			status = fiber.StatusUnauthorized
 		}
 		return c.Status(status).JSON(models.APIResponse{
 			Success: false,
@@ -620,4 +651,21 @@ func (h *AuthHandler) Me(c *fiber.Ctx) error {
 		Success: true,
 		Data:    profile,
 	})
+}
+
+// SessionCheck handles POST /auth/session-check {token}: whether that session
+// token (expired or not) still belongs to an open session. Telephony asks it
+// before honouring an expired token on the VoIP path. It only answers about
+// the token it is given, so it is public like the login.
+func (h *AuthHandler) SessionCheck(c *fiber.Ctx) error {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.Token == "" || len(req.Token) > 4096 {
+		return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+			Success: false,
+			Error:   "token is required",
+		})
+	}
+	return c.JSON(models.APIResponse{Success: true, Data: h.authService.CheckSession(req.Token, time.Now())})
 }

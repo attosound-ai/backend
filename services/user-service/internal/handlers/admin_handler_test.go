@@ -31,7 +31,7 @@ type fakeAccounts struct {
 	listStats *services.SocialStatsClient
 }
 
-func (f *fakeAccounts) GetUserByID(_ context.Context, id string) (*models.UserProfile, error) {
+func (f *fakeAccounts) GetUserForOperator(_ context.Context, id string) (*models.UserProfile, error) {
 	p, ok := f.profiles[id]
 	if !ok {
 		return nil, errors.New("user not found")
@@ -53,6 +53,10 @@ func (f *fakeAccounts) RelinkOrphanedCreator(context.Context, services.RelinkReq
 
 func (f *fakeAccounts) ListDeletions(string, int, int) (*services.DeletionList, error) {
 	return &services.DeletionList{}, nil
+}
+
+func (f *fakeAccounts) ListPendingDeletions(int, int) (*services.PendingDeletionList, error) {
+	return &services.PendingDeletionList{Total: 1}, nil
 }
 
 func (f *fakeAccounts) ListUsersForAdmin(

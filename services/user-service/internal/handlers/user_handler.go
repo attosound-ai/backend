@@ -36,6 +36,8 @@ type profileSource interface {
 	DiscoverUsers(ctx context.Context, excludeID uint64, limit int) ([]*models.UserProfile, error)
 	GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error)
 	GetActivePushTokensForUser(userID uint64) ([]models.PushToken, error)
+	// IsDeactivated: the account is in its 30 day deletion grace.
+	IsDeactivated(userID uint64) bool
 }
 
 // MountInternalRoutes registers the server to server routes under /users
@@ -155,9 +157,11 @@ func (h *UserHandler) GetLinkedAccountIDs(c *fiber.Ctx) error {
 		})
 	}
 
+	// ownerDeactivated: la cuenta pedida está en gracia de borrado. Telefonía
+	// no hace sonar su bridge (el número sigue asignado hasta el borrado).
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
-		Data:    fiber.Map{"userIds": ids},
+		Data:    fiber.Map{"userIds": ids, "ownerDeactivated": h.profiles.IsDeactivated(id)},
 	})
 }
 
@@ -429,10 +433,13 @@ type deleteAccountRequest struct {
 	DeleteLinkedAccounts bool   `json:"deleteLinkedAccounts"`
 	// Reason is optional: the app may send what the person picked.
 	Reason string `json:"reason"`
+	// Locale del correo de confirmación (en, es, pt-BR).
+	Locale string `json:"locale"`
 }
 
 // DeleteAccount handles DELETE /users/me/account.
-// Verifies the user's identity via OTP, then permanently deletes all data.
+// Verifies the user's identity via OTP, then deactivates the account and
+// schedules the permanent deletion (30 day grace).
 func (h *UserHandler) DeleteAccount(c *fiber.Ctx) error {
 	claims, ok := c.Locals("claims").(*middleware.JWTClaims)
 	if !ok || claims == nil {
@@ -487,7 +494,11 @@ func (h *UserHandler) DeleteAccount(c *fiber.Ctx) error {
 		ClientIP:    clientIP(c),
 		UserAgent:   string(c.Request().Header.UserAgent()),
 	}
-	if err := h.userService.DeleteAccount(c.Context(), uid, req.DeleteLinkedAccounts, meta); err != nil {
+	// Desde el 12 nov 2026 la app no borra al momento: desactiva la cuenta y
+	// programa el borrado definitivo a los 30 días (pedido del cliente). El
+	// barrido hace el mismo borrado de antes y lo deja en account_deletions.
+	res, err := h.userService.RequestDeletion(c.Context(), uid, req.DeleteLinkedAccounts, meta, req.Locale)
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
 			Success: false,
 			Error:   err.Error(),
@@ -496,7 +507,12 @@ func (h *UserHandler) DeleteAccount(c *fiber.Ctx) error {
 
 	return c.Status(fiber.StatusOK).JSON(models.APIResponse{
 		Success: true,
-		Data:    map[string]string{"message": "account deleted successfully"},
+		Data: fiber.Map{
+			"message":             "account scheduled for deletion",
+			"scheduledDeletionAt": res.ScheduledDeletionAt,
+			"userIds":             idList(res.UserIDs),
+			"alreadyPending":      res.AlreadyPending,
+		},
 	})
 }
 

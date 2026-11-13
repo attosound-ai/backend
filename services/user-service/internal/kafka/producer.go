@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
@@ -15,6 +16,9 @@ import (
 
 // Producer wraps the kafka-go writer to publish events.
 type Producer struct {
+	// mu guarda writers: Publish se llama desde goroutines y un tema nuevo
+	// escribía el mapa mientras otra lo leía.
+	mu        sync.Mutex
 	writers   map[string]*kafkago.Writer
 	brokers   []string
 	transport kafkago.RoundTripper
@@ -55,7 +59,8 @@ func NewProducer(brokers string) *Producer {
 		transport: transport,
 	}
 
-	topics := []string{"user.created", "user.updated", "user.verified"}
+	topics := []string{"user.created", "user.updated", "user.verified",
+		"user.deleted", "user.deactivated", "user.reactivated"}
 	for _, topic := range topics {
 		p.writers[topic] = p.newWriter(topic)
 	}
@@ -79,11 +84,13 @@ func (p *Producer) newWriter(topic string) *kafkago.Writer {
 
 // Publish sends an event to the specified Kafka topic.
 func (p *Producer) Publish(ctx context.Context, topic string, key string, data interface{}) error {
+	p.mu.Lock()
 	writer, ok := p.writers[topic]
 	if !ok {
 		writer = p.newWriter(topic)
 		p.writers[topic] = writer
 	}
+	p.mu.Unlock()
 
 	event := Event{
 		Type:      topic,
@@ -112,6 +119,8 @@ func (p *Producer) Publish(ctx context.Context, topic string, key string, data i
 
 // Close shuts down all Kafka writers gracefully.
 func (p *Producer) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for topic, writer := range p.writers {
 		if err := writer.Close(); err != nil {
 			log.Printf("[KAFKA] Error closing writer for topic %s: %v", topic, err)

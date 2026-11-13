@@ -30,10 +30,11 @@ func integrationDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(&models.User{}, &models.UserCredentials{}, &models.PushToken{},
-		&models.SignupSession{}, &models.UserAppIconPreference{}, &models.AccountDeletion{}); err != nil {
+		&models.SignupSession{}, &models.UserAppIconPreference{}, &models.AccountDeletion{},
+		&models.AccountDeletionRequest{}, &models.DeviceKey{}); err != nil {
 		t.Fatal(err)
 	}
-	db.Exec("TRUNCATE users, account_deletions RESTART IDENTITY CASCADE")
+	db.Exec("TRUNCATE users, account_deletions, account_deletion_requests RESTART IDENTITY CASCADE")
 	return db
 }
 

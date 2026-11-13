@@ -160,6 +160,17 @@ func (r *UserRepository) FindByIDs(ids []uint64) ([]models.User, error) {
 	if len(ids) == 0 {
 		return users, nil
 	}
+	err := r.db.Where("id IN ? AND deactivated_at IS NULL", ids).Find(&users).Error
+	return users, err
+}
+
+// FindByIDsIncludingDeactivated es FindByIDs sin ocultar las cuentas en
+// gracia: solo para el barrido y el operador.
+func (r *UserRepository) FindByIDsIncludingDeactivated(ids []uint64) ([]models.User, error) {
+	var users []models.User
+	if len(ids) == 0 {
+		return users, nil
+	}
 	err := r.db.Where("id IN ?", ids).Find(&users).Error
 	return users, err
 }
@@ -192,7 +203,8 @@ func (r *UserRepository) SearchUsers(query string, limit int) ([]models.User, er
 	}
 	lit := escapeLike(query)
 	pattern := "%" + lit + "%"
-	err := r.db.Where(`username ILIKE ? ESCAPE '\' OR display_name ILIKE ? ESCAPE '\'`, pattern, pattern).
+	err := r.db.Where("deactivated_at IS NULL").
+		Where(`username ILIKE ? ESCAPE '\' OR display_name ILIKE ? ESCAPE '\'`, pattern, pattern).
 		Order(clause.OrderBy{Expression: clause.Expr{
 			SQL:                `LOWER(username) = LOWER(?) DESC, username ILIKE ? ESCAPE '\' DESC, username ASC`,
 			Vars:               []interface{}{query, lit + "%"},
@@ -227,7 +239,7 @@ func (r *UserRepository) DiscoverUsers(excludeID uint64, limit int) ([]models.Us
 	if limit > 100 {
 		limit = 100
 	}
-	err := r.db.Where("id != ?", excludeID).
+	err := r.db.Where("id != ? AND deactivated_at IS NULL", excludeID).
 		Limit(limit).
 		Order("RANDOM()").
 		Find(&users).Error
@@ -249,6 +261,39 @@ func (r *UserRepository) UpdateCredentialsPassword(userID uint64, passwordHash s
 	return r.db.Model(&models.UserCredentials{}).
 		Where("user_id = ?", userID).
 		Update("password_hash", passwordHash).Error
+}
+
+// ResetPasswordAndCloseSessions stores the new password and, in the same
+// transaction, closes every session of the account issued up to cutoff
+// (users.sessions_valid_after only moves forward) and revokes its remembered
+// devices. Nov 12 2026, approved by David: a reset signs the account out of
+// every phone.
+func (r *UserRepository) ResetPasswordAndCloseSessions(userID uint64, passwordHash string, cutoff time.Time) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.UserCredentials{}).Where("user_id = ?", userID).
+			Update("password_hash", passwordHash)
+		if res.Error != nil {
+			return fmt.Errorf("update password: %w", res.Error)
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("update password: no credentials for user %d", userID)
+		}
+		if err := tx.Model(&models.User{}).
+			Where("id = ? AND (sessions_valid_after IS NULL OR sessions_valid_after < ?)", userID, cutoff).
+			Update("sessions_valid_after", cutoff).Error; err != nil {
+			return fmt.Errorf("close sessions: %w", err)
+		}
+		if err := tx.Model(&models.DeviceKey{}).Where("user_id = ? AND revoked_at IS NULL", userID).
+			Updates(map[string]interface{}{
+				"revoked_at":           time.Now().UTC(),
+				"revoked_reason":       models.DeviceKeyRevokedPassword,
+				"challenge_hash":       "",
+				"challenge_expires_at": nil,
+			}).Error; err != nil {
+			return fmt.Errorf("revoke device_keys: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpdateCredentials2FA updates the 2FA fields on UserCredentials.
@@ -577,6 +622,10 @@ func (r *UserRepository) DeleteUserRecord(tx *gorm.DB, userID uint64) error {
 	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.UserAppIconPreference{}).Error; err != nil {
 		return fmt.Errorf("delete user_app_icon_preferences: %w", err)
 	}
+	// Remembered devices (Nov 12 2026): their keys go with the account.
+	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.DeviceKey{}).Error; err != nil {
+		return fmt.Errorf("delete device_keys: %w", err)
+	}
 	if err := tx.Unscoped().Where("user_id = ?", userID).Delete(&models.UserCredentials{}).Error; err != nil {
 		return fmt.Errorf("delete user_credentials: %w", err)
 	}
@@ -690,6 +739,12 @@ func (r *UserRepository) PurgeAllUserData(userIDs []uint64, records []models.Acc
 		if err := tx.Create(&records).Error; err != nil {
 			return fmt.Errorf("write account_deletions: %w", err)
 		}
+		// Una cuenta en gracia que se borra ya (operador, o la persona otra
+		// vez desde otra sesión) cierra su petición para que el barrido no
+		// la busque después.
+		if err := supersedePendingRequests(tx, userIDs, records[0].PerformedBy, records[0].DeletedAt); err != nil {
+			return err
+		}
 		for _, uid := range userIDs {
 			if err := r.DeleteUserRecord(tx, uid); err != nil {
 				return fmt.Errorf("user record (user %d): %w", uid, err)
@@ -758,8 +813,11 @@ type AdminUserFilter struct {
 	Role string
 	// Solo cuentas gestionadas, solo no gestionadas, o todas (nil).
 	Managed *bool
-	Limit   int
-	Offset  int
+	// PendingDeletion: true solo las cuentas en gracia de borrado, false
+	// solo las activas, nil todas.
+	PendingDeletion *bool
+	Limit           int
+	Offset          int
 }
 
 // ListForAdmin devuelve una página de usuarios registrados y el total que
@@ -795,6 +853,13 @@ func (r *UserRepository) ListForAdmin(f AdminUserFilter) ([]models.User, int64, 
 	}
 	if f.Managed != nil {
 		q = q.Where("is_managed_account = ?", *f.Managed)
+	}
+	if f.PendingDeletion != nil {
+		if *f.PendingDeletion {
+			q = q.Where("deactivated_at IS NOT NULL")
+		} else {
+			q = q.Where("deactivated_at IS NULL")
+		}
 	}
 
 	var total int64

@@ -47,6 +47,11 @@ func main() {
 		&models.SignupSession{},
 		&models.UserAppIconPreference{},
 		&models.AccountDeletion{},
+		// Borrado con gracia (12 nov 2026): tabla nueva y columnas nuevas y
+		// nulas en users y account_deletions. Solo añade, nada se borra.
+		&models.AccountDeletionRequest{},
+		// Nov 12 2026: remembered accounts. New table only (additive).
+		&models.DeviceKey{},
 	); err != nil {
 		log.Fatalf("[STARTUP] Failed to auto-migrate models: %v", err)
 	}
@@ -81,6 +86,8 @@ func main() {
 
 	authService := services.NewAuthService(repo, jwtMgr, producer, cfg.OTPServiceURL)
 	userService := services.NewUserService(repo, producer)
+	userService.SetDeletionGrace(services.DeletionGraceConfig{Grace: cfg.DeletionGrace})
+	authService.SetAccounts(userService)
 
 	// Real followers and posts for the operator list come from the social
 	// service. Optional: without SOCIAL_SERVICE_URL the list keeps serving the
@@ -99,6 +106,12 @@ func main() {
 	signupService := services.NewSignupService(signupRepo, repo, jwtMgr, producer, cfg.OTPServiceURL)
 
 	inmateService := services.NewInmateService()
+
+	// Remembered accounts: device keys that sign a challenge (Nov 12 2026).
+	deviceKeyService := services.NewDeviceKeyService(
+		repositories.NewDeviceKeyRepository(db), repo, authService.IssueSession)
+	authService.SetDeviceKeys(deviceKeyService)
+	deviceKeyHandler := handlers.NewDeviceKeyHandler(deviceKeyService)
 
 	authHandler := handlers.NewAuthHandler(authService)
 	userHandler := handlers.NewUserHandler(userService, cfg.OTPServiceURL)
@@ -141,13 +154,21 @@ func main() {
 	auth.Post("/pre-register", authHandler.PreRegister)
 	auth.Post("/login", authHandler.Login)
 	auth.Post("/login/otp", authHandler.LoginOTP)
+	// Recuperar una cuenta en gracia de borrado con el token que dio el login.
+	auth.Post("/login/recover", authHandler.RecoverAccount)
 	auth.Post("/logout", authHandler.Logout)
 	auth.Post("/refresh", authHandler.Refresh)
+	// Telephony asks it before honouring an expired session token (VoIP).
+	auth.Post("/session-check", authHandler.SessionCheck)
 	auth.Post("/forgot-password", authHandler.ForgotPassword)
 	auth.Post("/reset-password", authHandler.ResetPassword)
 
 	// 2FA login (public — uses temp token, not JWT)
 	auth.Post("/login/2fa", authHandler.Login2FA)
+
+	// Remembered account login (public: the signature is the credential).
+	auth.Post("/login/device/challenge", deviceKeyHandler.Challenge)
+	auth.Post("/login/device", deviceKeyHandler.Login)
 
 	// Auth routes (protected)
 	auth.Get("/me", middleware.RequireAuth(jwtMgr), authHandler.Me)
@@ -170,6 +191,11 @@ func main() {
 	auth.Post("/2fa/confirm", middleware.RequireAuth(jwtMgr), authHandler.Enable2FAConfirm)
 	auth.Post("/2fa/disable", middleware.RequireAuth(jwtMgr), authHandler.Disable2FA)
 
+	// Remembered devices of the signed in account.
+	auth.Post("/devices", middleware.RequireAuth(jwtMgr), deviceKeyHandler.Enroll)
+	auth.Get("/devices", middleware.RequireAuth(jwtMgr), deviceKeyHandler.List)
+	auth.Delete("/devices/:id", middleware.RequireAuth(jwtMgr), deviceKeyHandler.Revoke)
+
 	// User routes (protected — must be registered before parameterized routes)
 	users := app.Group("/users")
 	users.Patch("/me/profile", middleware.RequireAuth(jwtMgr), userHandler.UpdateProfile)
@@ -186,6 +212,7 @@ func main() {
 	// user route carries it; registered before the parameterized routes.
 	users.Get("/admin", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListUsers)
 	users.Get("/admin/deletions", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListDeletions)
+	users.Get("/admin/pending-deletions", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListPendingDeletions)
 	users.Post("/admin/relink", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.RelinkCreator)
 	users.Delete("/admin/:id", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.DeleteUser)
 
@@ -221,6 +248,34 @@ func main() {
 			<-ticker.C
 		}
 	}()
+
+	// ── Borrado definitivo de las cuentas que vencen su gracia ──
+	// Corre aquí, en el mismo proceso, porque el borrado es una transacción
+	// en esta misma base (filas del usuario + account_deletions) y no hace
+	// falta nada más en Railway. Con varias réplicas cada lote se borra una
+	// sola vez (peticiones bloqueadas con FOR UPDATE), y si una pasada falla
+	// o el servicio está caído, la siguiente lo recoge: nadie se borra antes
+	// de su fecha, como mucho un intervalo después.
+	if cfg.DeletionSweepEnabled {
+		go func() {
+			// Primer barrido al minuto de arrancar, no en el arranque mismo.
+			time.Sleep(time.Minute)
+			ticker := time.NewTicker(cfg.DeletionSweepInterval)
+			defer ticker.Stop()
+			for {
+				started := time.Now()
+				res := userService.RunDeletionSweep(context.Background(), 50)
+				if len(res.Executed) > 0 || res.Failed > 0 || res.Skipped > 0 {
+					log.Printf("[DELETION-SWEEP] executed=%d skipped=%d failed=%d in %s",
+						len(res.Executed), res.Skipped, res.Failed, time.Since(started))
+				}
+				<-ticker.C
+			}
+		}()
+		log.Printf("[STARTUP] Deletion sweep every %s, grace %s", cfg.DeletionSweepInterval, cfg.DeletionGrace)
+	} else {
+		log.Println("[STARTUP] DELETION_SWEEP=off: accounts past their grace are NOT deleted")
+	}
 
 	// ── Start gRPC server in a goroutine ──
 	grpcServer := usergrpc.NewUserGRPCServer(userService, jwtMgr)

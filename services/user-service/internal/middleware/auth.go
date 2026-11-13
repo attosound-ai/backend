@@ -27,6 +27,9 @@ const (
 	// Scope2FAPending: the password was right, the second factor is still
 	// missing. Only POST /auth/login/2fa accepts it.
 	Scope2FAPending = "2fa_pending"
+	// ScopeAccountRecovery: la persona acaba de identificarse en una cuenta
+	// en gracia de borrado; solo sirve para recuperarla.
+	ScopeAccountRecovery = "account_recovery"
 )
 
 // TwoFactorIssuer is the issuer of the 2FA temporary token. Tokens issued
@@ -37,6 +40,12 @@ const TwoFactorIssuer = "atto-sound-2fa"
 // twoFactorSubjectPrefix namespaces the 2FA token's subject ("2fa:123") so a
 // sibling service that only reads sub can never take it for user 123.
 const twoFactorSubjectPrefix = "2fa:"
+
+// RecoveryTokenIssuer distingue el token de recuperación.
+const RecoveryTokenIssuer = "atto-sound-recovery"
+
+// RecoveryTokenTTL es lo que dura la pantalla de recuperar.
+const RecoveryTokenTTL = 15 * time.Minute
 
 // ServiceTokenSubject is the subject of a service token. It is not a number,
 // so it can never be mistaken for a user ID.
@@ -206,6 +215,45 @@ func (m *JWTManager) GenerateServiceToken(ttl time.Duration) (string, error) {
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(m.secret)
+}
+
+// GenerateRecoveryToken emite el token de la pantalla "¿Quieres recuperar
+// tu cuenta?". El sujeto va con prefijo ("recovery:123") para que ningún otro
+// servicio lo tome por un usuario: comparten el secreto y algunos no miran
+// el scope.
+func (m *JWTManager) GenerateRecoveryToken(userID uint64) (string, error) {
+	now := time.Now()
+	sub := "recovery:" + strconv.FormatUint(userID, 10)
+	claims := JWTClaims{
+		UserID: sub,
+		Scope:  ScopeAccountRecovery,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   sub,
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(RecoveryTokenTTL)),
+			Issuer:    RecoveryTokenIssuer,
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(m.secret)
+}
+
+// ValidateRecoveryToken devuelve el usuario de un token de recuperación.
+func (m *JWTManager) ValidateRecoveryToken(tokenStr string) (uint64, error) {
+	claims, err := m.ValidateToken(tokenStr)
+	if err != nil {
+		return 0, err
+	}
+	const prefix = "recovery:"
+	if claims.Issuer != RecoveryTokenIssuer || claims.Scope != ScopeAccountRecovery ||
+		!strings.HasPrefix(claims.UserID, prefix) {
+		return 0, jwt.ErrSignatureInvalid
+	}
+	id, err := strconv.ParseUint(claims.UserID[len(prefix):], 10, 64)
+	if err != nil || id == 0 {
+		return 0, jwt.ErrSignatureInvalid
+	}
+	return id, nil
 }
 
 // SignupSessionID extracts the bare UUID from a signup_pending claim.

@@ -17,11 +17,12 @@ import (
 // accountAdmin is the slice of UserService the operator routes need. An
 // interface so the guard rails below can be tested without a database.
 type accountAdmin interface {
-	GetUserByID(ctx context.Context, id string) (*models.UserProfile, error)
+	GetUserForOperator(ctx context.Context, id string) (*models.UserProfile, error)
 	DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool, meta services.DeletionMeta) error
 	ListUsersForAdmin(ctx context.Context, f repositories.AdminUserFilter) (*services.AdminUserList, error)
 	ListDeletions(search string, limit, offset int) (*services.DeletionList, error)
 	RelinkOrphanedCreator(ctx context.Context, req services.RelinkRequest) (*services.RelinkResult, error)
+	ListPendingDeletions(limit, offset int) (*services.PendingDeletionList, error)
 }
 
 // AdminHandler serves operator only routes. Every route is mounted behind
@@ -80,7 +81,9 @@ func (h *AdminHandler) DeleteUser(c *fiber.Ctx) error {
 		deleteLinked = parsed
 	}
 
-	profile, err := h.accounts.GetUserByID(c.Context(), id)
+	// También encuentra las cuentas en gracia: el borrado inmediato de
+	// soporte sigue existiendo y cierra su petición pendiente.
+	profile, err := h.accounts.GetUserForOperator(c.Context(), id)
 	if err != nil || profile == nil {
 		return c.Status(fiber.StatusNotFound).JSON(models.APIResponse{
 			Success: false,
@@ -187,6 +190,17 @@ func (h *AdminHandler) ListUsers(c *fiber.Ctx) error {
 		filtro.Offset = n
 	}
 
+	if raw := strings.TrimSpace(c.Query("pendingDeletion")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(models.APIResponse{
+				Success: false,
+				Error:   "pendingDeletion must be true or false",
+			})
+		}
+		filtro.PendingDeletion = &parsed
+	}
+
 	list, err := h.accounts.ListUsersForAdmin(c.Context(), filtro)
 	if err != nil {
 		log.Printf("[ADMIN] list users failed: %v", err)
@@ -241,4 +255,21 @@ func (h *AdminHandler) RelinkCreator(c *fiber.Ctx) error {
 		return c.Status(status).JSON(models.APIResponse{Success: false, Error: err.Error()})
 	}
 	return c.JSON(models.APIResponse{Success: true, Data: res})
+}
+
+// ListPendingDeletions handles GET /users/admin/pending-deletions?limit=&offset=.
+// Las cuentas en gracia de borrado, la que se borra antes primero, con quién
+// lo pidió, cuándo y la fecha del borrado definitivo.
+func (h *AdminHandler) ListPendingDeletions(c *fiber.Ctx) error {
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	list, err := h.accounts.ListPendingDeletions(limit, offset)
+	if err != nil {
+		log.Printf("[ADMIN] list pending deletions failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(models.APIResponse{
+			Success: false,
+			Error:   err.Error(),
+		})
+	}
+	return c.JSON(models.APIResponse{Success: true, Data: list})
 }
