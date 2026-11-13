@@ -79,6 +79,39 @@ services:
           - DELETE
           - OPTIONS
 
+      # Server to server routes, never public (Nov 12 2026: both answered
+      # anyone and ids are sequential, so every user's push tokens and every
+      # representative to inmate link could be listed). telephony-service
+      # calls them on the private network, never through Kong, so this route
+      # answers 404 at the edge and the request never reaches user-service.
+      # user-service also requires a service token on them (defense in depth:
+      # it is reachable on its own domain too).
+      # (?i): Fiber matches routes case insensitively, so PUSH-TOKENS reached
+      # the service through a case sensitive regex. It goes after the first
+      # slash because Kong only accepts regex paths that start with "~/".
+      # /+ covers doubled slashes.
+      # methods: Kong ranks routes by how many fields they match before
+      # regex_priority, so this route lists methods too, or user-routes
+      # (paths + methods) would outrank it.
+      - name: user-internal-blocked
+        paths:
+          - "~/(?i)api/v1/users/+[^/]+/+(push-tokens|linked-account-ids)"
+        regex_priority: 100
+        strip_path: false
+        methods:
+          - GET
+          - HEAD
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+        plugins:
+          - name: request-termination
+            config:
+              status_code: 404
+              message: "no Route matched with those values"
+
   # POSTS & FEED routes → Social Service (NestJS)
   - name: posts-service
     url: http://social-service:3000/api/v1/posts

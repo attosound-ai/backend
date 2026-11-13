@@ -48,6 +48,18 @@ services:
           - PATCH
           - DELETE
           - OPTIONS
+      # Server to server only; same block as kong.yml.template.
+      - name: user-internal-blocked
+        paths:
+          - "~/(?i)api/v1/users/+[^/]+/+(push-tokens|linked-account-ids)"
+        regex_priority: 100
+        strip_path: false
+        methods: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]
+        plugins:
+          - name: request-termination
+            config:
+              status_code: 404
+              message: "no Route matched with those values"
 
   # POSTS & FEED routes → Social Service (NestJS)
   - name: posts-service
