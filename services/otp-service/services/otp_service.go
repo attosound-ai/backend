@@ -3,9 +3,11 @@ package services
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/atto-sound/otp-service/config"
@@ -21,6 +23,27 @@ type OTPService struct {
 	smsDelivery   providers.DeliveryProvider // SMS (Twilio or console)
 	emailDelivery providers.DeliveryProvider // Email (email-service HTTP or console)
 	dispatcher    *MultiChannelDispatcher
+
+	// smsVerifier, when set, sends and checks the codes of SMS only requests
+	// (Twilio Verify). smsFallback lets smsDelivery send them instead when
+	// Verify is unavailable.
+	smsVerifier providers.SMSVerifier
+	smsFallback bool
+}
+
+// verifyMarker prefixes what is stored in place of a hash when Twilio Verify
+// holds the code: "verify:" + the verification SID. A bcrypt hash starts
+// with "$2", so the two never mix up, and codes sent the old way before a
+// switch keep working until they expire.
+const verifyMarker = "verify:"
+
+// WithSMSVerifier makes Twilio Verify send and check the codes asked for by
+// phone only. A request with an email too keeps one code of ours for both
+// channels, sent the old way.
+func (s *OTPService) WithSMSVerifier(v providers.SMSVerifier, fallbackToLegacy bool) *OTPService {
+	s.smsVerifier = v
+	s.smsFallback = fallbackToLegacy
+	return s
 }
 
 // NewOTPService creates a new OTPService.
@@ -39,7 +62,7 @@ func NewOTPService(cfg *config.Config, repo *repository.RedisRepository, deliver
 // phone must be E.164 or empty; email must be trimmed or empty.
 // When both are present, email is the primary identifier (Redis key owner).
 func (s *OTPService) resolveTarget(phone, email string) OTPTarget {
-	hasSMS   := phone != ""
+	hasSMS := phone != ""
 	hasEmail := email != ""
 
 	switch {
@@ -153,19 +176,59 @@ func (s *OTPService) checkSendLimits(ctx context.Context, phone, clientIP string
 func (s *OTPService) SendOTP(ctx context.Context, phone, email, locale, emailTemplate, clientIP string) error {
 	target := s.resolveTarget(phone, email)
 
-	if !s.cfg.BypassOTP {
+	if !s.cfg.SkipSendLimits {
 		if err := s.checkSendLimits(ctx, target.PrimaryIdentifier, clientIP); err != nil {
 			return err
 		}
 	}
 
-	// Generate OTP
+	if s.smsVerifier != nil && len(target.Targets) == 1 && target.Targets[0].ChannelName == "sms" {
+		s.countSend(ctx, target.PrimaryIdentifier, clientIP)
+		sid, err := s.smsVerifier.Start(ctx, phone, locale)
+		if err == nil {
+			marker := verifyMarker + sid
+			if err := s.repo.StoreOTP(ctx, target.PrimaryIdentifier, marker, s.cfg.OTPExpiry); err != nil {
+				return fmt.Errorf("failed to store OTP: %w", err)
+			}
+			log.Printf("[OTP] Code sent to %s via Twilio Verify", providers.MaskPhone(phone))
+			return nil
+		}
+		var ve *providers.VerifyError
+		if errors.As(err, &ve) && ve.TooManySends() {
+			return fmt.Errorf("rate limited: please wait before requesting a new code")
+		}
+		if !(s.smsFallback && providers.IsUnavailable(err)) {
+			_ = s.repo.DeleteOTP(ctx, target.PrimaryIdentifier)
+			return fmt.Errorf("failed to send OTP: %w", err)
+		}
+		log.Printf("[OTP] Twilio Verify unavailable (%v), sending to %s the old way", err, providers.MaskPhone(phone))
+		return s.sendOwnCode(ctx, target, locale, emailTemplate)
+	}
+
+	s.countSend(ctx, target.PrimaryIdentifier, clientIP)
+	return s.sendOwnCode(ctx, target, locale, emailTemplate)
+}
+
+// countSend starts the wait before the next code and counts this one, once,
+// on the primary identifier.
+func (s *OTPService) countSend(ctx context.Context, identifier, clientIP string) {
+	if err := s.repo.SetRateLimit(ctx, identifier, s.cfg.RateLimitSeconds); err != nil {
+		log.Printf("[OTP] Warning: failed to set rate limit for %s: %v", identifier, err)
+	}
+	_ = s.repo.IncrementHourly(ctx, identifier)
+	_ = s.repo.IncrementDaily(ctx, identifier)
+	if clientIP != "" {
+		_ = s.repo.IncrementIPHourly(ctx, clientIP)
+	}
+}
+
+// sendOwnCode makes a code here, keeps its hash and sends it to every target.
+func (s *OTPService) sendOwnCode(ctx context.Context, target OTPTarget, locale, emailTemplate string) error {
 	code, err := GenerateOTP(s.cfg.OTPLength)
 	if err != nil {
 		return err
 	}
 
-	// Hash OTP
 	hashedCode, err := HashOTP(code)
 	if err != nil {
 		return err
@@ -174,16 +237,6 @@ func (s *OTPService) SendOTP(ctx context.Context, phone, email, locale, emailTem
 	// Store hashed OTP in Redis under the primary identifier
 	if err := s.repo.StoreOTP(ctx, target.PrimaryIdentifier, hashedCode, s.cfg.OTPExpiry); err != nil {
 		return fmt.Errorf("failed to store OTP: %w", err)
-	}
-
-	// Set rate limit cooldown and increment counters (once, on primary identifier)
-	if err := s.repo.SetRateLimit(ctx, target.PrimaryIdentifier, s.cfg.RateLimitSeconds); err != nil {
-		log.Printf("[OTP] Warning: failed to set rate limit for %s: %v", target.PrimaryIdentifier, err)
-	}
-	_ = s.repo.IncrementHourly(ctx, target.PrimaryIdentifier)
-	_ = s.repo.IncrementDaily(ctx, target.PrimaryIdentifier)
-	if clientIP != "" {
-		_ = s.repo.IncrementIPHourly(ctx, clientIP)
 	}
 
 	message := fmt.Sprintf(
@@ -203,7 +256,8 @@ func (s *OTPService) SendOTP(ctx context.Context, phone, email, locale, emailTem
 
 // VerifyCode verifies the OTP code for the given phone number.
 func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
-	// Dev bypass: accept "000000" when BYPASS_OTP=true (check BEFORE block/rate limits)
+	// Laptop only: "000000" stands in for the code (before block and limits).
+	// cfg.BypassOTP is never true where codes are really sent.
 	if s.cfg.BypassOTP && code == "000000" {
 		log.Printf("[OTP] Bypass code accepted for %s (dev mode)", phone)
 		_ = s.repo.DeleteOTP(ctx, phone)
@@ -221,15 +275,38 @@ func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
 	}
 
 	// Retrieve hashed OTP and attempt count from Redis
-	hashedCode, attempts, err := s.repo.GetOTP(ctx, phone)
+	stored, attempts, err := s.repo.GetOTP(ctx, phone)
 	if err != nil {
 		return fmt.Errorf("invalid or expired code")
 	}
 
 	// Check max attempts per code
 	if attempts >= s.cfg.MaxAttempts {
-		_ = s.repo.DeleteOTP(ctx, phone)
+		s.forget(ctx, phone, stored)
 		return fmt.Errorf("maximum verification attempts exceeded")
+	}
+
+	var matched bool
+	if strings.HasPrefix(stored, verifyMarker) {
+		if s.smsVerifier == nil {
+			// Sent by Verify, which has been switched off since.
+			_ = s.repo.DeleteOTP(ctx, phone)
+			return fmt.Errorf("invalid or expired code")
+		}
+		result, err := s.smsVerifier.Check(ctx, phone, code)
+		if err != nil {
+			// Nothing is known about the code: not counted as a wrong one.
+			return fmt.Errorf("sms verification unavailable: %w", err)
+		}
+		switch result {
+		case providers.CheckGone:
+			_ = s.repo.DeleteOTP(ctx, phone)
+			return fmt.Errorf("invalid or expired code")
+		case providers.CheckTooManyAttempts:
+			_ = s.repo.DeleteOTP(ctx, phone)
+			return fmt.Errorf("maximum verification attempts exceeded")
+		}
+		matched = result == providers.CheckApproved
 	}
 
 	// Increment attempt counter
@@ -238,10 +315,13 @@ func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
 	}
 
 	// Compare OTP
-	if !VerifyOTP(code, hashedCode) {
+	if !strings.HasPrefix(stored, verifyMarker) {
+		matched = VerifyOTP(code, stored)
+	}
+	if !matched {
 		remaining := s.cfg.MaxAttempts - attempts - 1
 		if remaining <= 0 {
-			_ = s.repo.DeleteOTP(ctx, phone)
+			s.forget(ctx, phone, stored)
 		}
 
 		// Increment consecutive failure counter
@@ -255,7 +335,7 @@ func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
 			if err := s.repo.BlockPhone(ctx, phone, s.cfg.BlockDuration); err != nil {
 				log.Printf("[OTP] Warning: failed to block %s: %v", phone, err)
 			}
-			_ = s.repo.DeleteOTP(ctx, phone)
+			s.forget(ctx, phone, stored)
 			return fmt.Errorf(errBlocked)
 		}
 
@@ -273,4 +353,18 @@ func (s *OTPService) VerifyCode(ctx context.Context, phone, code string) error {
 
 	log.Printf("[OTP] Code verified for %s", phone)
 	return nil
+}
+
+// forget drops a code that may no longer be used (too many attempts, a
+// block). When Verify holds it, the verification is canceled too, or Verify
+// would send that same code again on the next request within its 10 minutes.
+func (s *OTPService) forget(ctx context.Context, identifier, stored string) {
+	_ = s.repo.DeleteOTP(ctx, identifier)
+	if s.smsVerifier == nil || !strings.HasPrefix(stored, verifyMarker) {
+		return
+	}
+	sid := strings.TrimPrefix(stored, verifyMarker)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = s.smsVerifier.Cancel(cctx, sid)
 }

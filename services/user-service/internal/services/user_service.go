@@ -6,6 +6,11 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
 
 	"github.com/atto-sound/user-service/internal/kafka"
 	"github.com/atto-sound/user-service/internal/models"
@@ -16,6 +21,9 @@ import (
 type UserService struct {
 	repo     *repositories.UserRepository
 	producer *kafka.Producer
+	// socialStats da los números reales a la lista de operador. Nil o apagado:
+	// la lista sirve las columnas guardadas.
+	socialStats *SocialStatsClient
 }
 
 // NewUserService creates a new UserService instance.
@@ -24,6 +32,12 @@ func NewUserService(repo *repositories.UserRepository, producer *kafka.Producer)
 		repo:     repo,
 		producer: producer,
 	}
+}
+
+// SetSocialStats conecta el cliente del servicio social. Es opcional y solo
+// lo usa la lista de operador; las rutas públicas no lo tocan.
+func (s *UserService) SetSocialStats(c *SocialStatsClient) {
+	s.socialStats = c
 }
 
 // GetUserByID retrieves a single user by their ID string.
@@ -70,9 +84,17 @@ func (s *UserService) GetUsersByIDs(ctx context.Context, ids []string) ([]*model
 	return profiles, nil
 }
 
-// SearchUsers searches for users matching a query string.
+// SearchMinChars is the shortest query /users/search answers (Nov 12 2026).
+const SearchMinChars = 2
+
+// SearchUsers searches for users matching a query string, for a signed in
+// caller: literal match (wildcards escaped), at least SearchMinChars
+// characters, at most repositories.SearchLimit rows. A shorter query answers
+// an empty list, not an error, so a search box sending its first letter
+// shows nothing instead of failing.
 func (s *UserService) SearchUsers(ctx context.Context, query string, limit int) ([]*models.UserProfile, error) {
-	if query == "" {
+	query = strings.TrimSpace(query)
+	if utf8.RuneCountInString(query) < SearchMinChars {
 		return []*models.UserProfile{}, nil
 	}
 
@@ -88,6 +110,26 @@ func (s *UserService) SearchUsers(ctx context.Context, query string, limit int) 
 	}
 
 	return profiles, nil
+}
+
+// SearchUsersExact is /users/search without a session: the one account whose
+// username equals the query ignoring case, or none. The callers that run
+// before a session (the official account notice at signup) look up an exact
+// name; nothing anonymous may list accounts.
+func (s *UserService) SearchUsersExact(ctx context.Context, query string) ([]*models.UserProfile, error) {
+	query = strings.TrimSpace(query)
+	if utf8.RuneCountInString(query) < SearchMinChars {
+		return []*models.UserProfile{}, nil
+	}
+	user, err := s.repo.FindByUsernameInsensitive(query)
+	if err != nil {
+		log.Printf("[USER] Error searching exact username: %v", err)
+		return nil, errors.New("internal error")
+	}
+	if user == nil {
+		return []*models.UserProfile{}, nil
+	}
+	return []*models.UserProfile{user.ToProfile()}, nil
 }
 
 // DiscoverUsers returns a list of registered users excluding the requester.
@@ -152,6 +194,33 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID string, req *mod
 		updates["username"] = *req.Username
 	}
 
+	// One creator per inmate number and state, also when a creator edits its
+	// number afterwards (otherwise signing up with a free number and editing it
+	// to a taken one would get around the signup check). A representative's
+	// own row does not count, so its edit is not checked.
+	if req.InmateNumber != nil || req.InmateState != nil {
+		current, err := s.repo.FindByID(uid)
+		if err != nil || current == nil {
+			return nil, errors.New("user not found")
+		}
+		if current.Role == models.RoleCreator && inmateIdentityChanged(current, req.InmateNumber, req.InmateState) {
+			number, state := strVal(current.InmateNumber), strVal(current.InmateState)
+			if req.InmateNumber != nil {
+				number = *req.InmateNumber
+			}
+			if req.InmateState != nil {
+				state = *req.InmateState
+			}
+			if err := ensureInmateNumberFreeFor(s.repo.FindCreatorsByInmateNumber, number, state, uid); err != nil {
+				if errors.Is(err, ErrInmateNumberTaken) {
+					return nil, err
+				}
+				log.Printf("[USER] Error checking inmate number for %s: %v", userID, err)
+				return nil, errors.New("internal error")
+			}
+		}
+	}
+
 	// Representative identity fields — changing these revokes verification
 	repChanged := collectOptionalStringUpdates(updates, map[string]*string{
 		"creator_name":  req.CreatorName,
@@ -197,7 +266,27 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID string, req *mod
 		return nil, errors.New("user not found")
 	}
 
+	s.publishUserUpdated(user.ID)
+
 	return user.ToProfile(), nil
+}
+
+// publishUserUpdated tells the other services that a profile changed.
+// social-service keeps each user in Redis for 10 minutes and only drops the
+// copy on user.updated, which nobody ever published: after a new profile
+// photo the feed, the comments, the followers and the notifications kept
+// showing the old one for up to 10 minutes (Nov 12 2026).
+func (s *UserService) publishUserUpdated(userID uint64) {
+	if s.producer == nil {
+		return
+	}
+	idStr := strconv.FormatUint(userID, 10)
+	go func() {
+		eventData := map[string]interface{}{"id": idStr}
+		if err := s.producer.Publish(context.Background(), "user.updated", idStr, eventData); err != nil {
+			log.Printf("[USER] Failed to publish user.updated event: %v", err)
+		}
+	}()
 }
 
 // VerifyUser marks a user as profile-verified and publishes a user.verified event.
@@ -224,10 +313,10 @@ func (s *UserService) VerifyUser(ctx context.Context, userID string, inmateNumbe
 	verifyIDStr := strconv.FormatUint(user.ID, 10)
 	go func() {
 		eventData := map[string]interface{}{
-			"id":            verifyIDStr,
-			"username":      user.Username,
-			"inmateNumber":  inmateNumber,
-			"verified":      true,
+			"id":           verifyIDStr,
+			"username":     user.Username,
+			"inmateNumber": inmateNumber,
+			"verified":     true,
 		}
 		if err := s.producer.Publish(context.Background(), "user.verified", verifyIDStr, eventData); err != nil {
 			log.Printf("[USER] Failed to publish user.verified event: %v", err)
@@ -274,7 +363,13 @@ func (s *UserService) GetActivePushTokens(userID uint64) ([]models.PushToken, er
 // DeleteAccount permanently removes a user and all associated data from
 // every Postgres table, then emits a Kafka event so non-Postgres stores
 // (MongoDB, Cassandra, Redis) can clean up asynchronously.
-func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool) error {
+//
+// meta is mandatory: one account_deletions row per removed account is
+// written in the same transaction as the delete (see models.AccountDeletion).
+func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLinked bool, meta DeletionMeta) error {
+	if err := meta.Validate(); err != nil {
+		return err
+	}
 	user, err := s.repo.FindByID(userID)
 	if err != nil || user == nil {
 		return errors.New("user not found")
@@ -282,33 +377,42 @@ func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLi
 
 	userIDs := []uint64{userID}
 
+	// Always look the linked accounts up: they are deleted with deleteLinked,
+	// and otherwise they tell the record which creators are left orphaned.
+	linked, err := s.repo.GetLinkedAccounts(
+		userID,
+		user.IsManagedAccount,
+		user.RepresentativeID,
+	)
+	if err != nil {
+		log.Printf("[USER] Warning: failed to fetch linked accounts for %d: %v", userID, err)
+	}
+	var extra []*models.User
 	if deleteLinked {
-		linked, err := s.repo.GetLinkedAccounts(
-			userID,
-			user.IsManagedAccount,
-			user.RepresentativeID,
-		)
-		if err != nil {
-			log.Printf("[USER] Warning: failed to fetch linked accounts for %d: %v", userID, err)
-		}
 		for _, u := range linked {
 			userIDs = append(userIDs, u.ID)
+			extra = append(extra, u)
 		}
 		if len(userIDs) > 1 {
 			log.Printf("[USER] Including linked accounts in deletion: %v", userIDs)
 		}
 	}
 
-	// Single transaction: wipe user-service Postgres rows.
+	batchID := uuid.NewString()
+	records := BuildDeletionRecords(batchID, user, extra, linked, meta, time.Now().UTC())
+
+	// Single transaction: the deletion records plus the user-service rows.
 	// Other services purge their own rows via the user.deleted Kafka event.
-	if err := s.repo.PurgeAllUserData(userIDs); err != nil {
+	if err := s.repo.PurgeAllUserData(userIDs, records); err != nil {
 		log.Printf("[USER] Failed to purge user-service data for users %v: %v", userIDs, err)
 		// Surface the underlying message so the client can diagnose.
 		// Safe to return: this code path never sees user-supplied SQL.
 		return fmt.Errorf("delete account failed: %w", err)
 	}
 
-	log.Printf("[USER] Purged user-service rows for %v; cross-service cleanup via Kafka", userIDs)
+	log.Printf("[USER] Purged user-service rows for %v via=%s requestedBy=%q performedBy=%q batch=%s; cross-service cleanup via Kafka",
+		userIDs, meta.Via, meta.RequestedBy, meta.PerformedBy, batchID)
+	go captureDeletions(records)
 
 	// Emit Kafka event for async cleanup (MongoDB, Cassandra, Redis)
 	idStrs := make([]string, len(userIDs))
@@ -318,6 +422,8 @@ func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLi
 	go func() {
 		eventData := map[string]interface{}{
 			"userIds": idStrs,
+			"batchId": batchID,
+			"via":     meta.Via,
 		}
 		if err := s.producer.Publish(context.Background(), "user.deleted", idStrs[0], eventData); err != nil {
 			log.Printf("[USER] Failed to publish user.deleted event: %v", err)
@@ -327,6 +433,24 @@ func (s *UserService) DeleteAccount(ctx context.Context, userID uint64, deleteLi
 	return nil
 }
 
+// ListDeletions serves the operator's deletion history.
+func (s *UserService) ListDeletions(search string, limit, offset int) (*DeletionList, error) {
+	rows, total, err := s.repo.ListDeletions(search, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	if rows == nil {
+		rows = []models.AccountDeletion{}
+	}
+	return &DeletionList{Deletions: rows, Total: total}, nil
+}
+
+// DeletionList is one page of the deletion history.
+type DeletionList struct {
+	Deletions []models.AccountDeletion `json:"deletions"`
+	Total     int64                    `json:"total"`
+}
+
 // GetLinkedAccounts returns accounts linked to the given user.
 func (s *UserService) GetLinkedAccounts(userID uint64) ([]*models.User, error) {
 	user, err := s.repo.FindByID(userID)
@@ -334,4 +458,186 @@ func (s *UserService) GetLinkedAccounts(userID uint64) ([]*models.User, error) {
 		return nil, nil
 	}
 	return s.repo.GetLinkedAccounts(userID, user.IsManagedAccount, user.RepresentativeID)
+}
+
+// GetActivePushTokensForUser returns the list of currently-active Expo push
+// tokens registered to a given user. Used by telephony-service to deliver
+// "missed call" fallback notifications when the Twilio Voice SDK push fails
+// to reach a device (e.g., SDK unregistered, watchdog kill, push-cred
+// mismatch), so the user at least sees a regular notification rather than
+// the call disappearing silently.
+func (s *UserService) GetActivePushTokensForUser(userID uint64) ([]models.PushToken, error) {
+	return s.repo.GetActivePushTokens(userID)
+}
+
+// GetLinkedAccountIDsForUser returns the full set of linked account IDs for
+// the given user (representative + every managed creator under that
+// representative). For standalone users (no representative_id, not managed),
+// returns just [userID].
+//
+// Returns (nil, nil) when the user does not exist — caller distinguishes
+// "missing" from "empty" by the nil slice. Used by telephony-service to
+// fan out TwiML across all reachable Voice SDK identities for a device.
+func (s *UserService) GetLinkedAccountIDsForUser(userID uint64) ([]uint64, error) {
+	user, err := s.repo.FindByID(userID)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, nil
+	}
+
+	var anchorID uint64
+	if user.IsManagedAccount && user.RepresentativeID != nil {
+		anchorID = *user.RepresentativeID
+	} else {
+		anchorID = user.ID
+	}
+
+	ids, err := s.repo.GetLinkedAccountIDs(anchorID)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		// Defensive: anchor row must exist, but if Postgres returns empty
+		// for any reason we still want to honour the contract that the
+		// requested userID is always in the result.
+		return []uint64{userID}, nil
+	}
+	return ids, nil
+}
+
+// AdminUserRow es una fila de la lista de operador: lo justo para identificar
+// una cuenta y saber cómo entró, sin arrastrar la ficha entera.
+//
+// StatsLive dice de dónde salen FollowersCount y PostsCount: true si los acaba
+// de dar el servicio social (los mismos que enseña el perfil de la app), false
+// si son las columnas guardadas, que nadie actualiza.
+type AdminUserRow struct {
+	ID               uint64     `json:"id"`
+	Username         string     `json:"username"`
+	DisplayName      string     `json:"displayName"`
+	Email            *string    `json:"email,omitempty"`
+	Phone            *string    `json:"phone,omitempty"`
+	Role             string     `json:"role"`
+	CreatorName      *string    `json:"creatorName,omitempty"`
+	Avatar           *string    `json:"avatar,omitempty"`
+	Location         *string    `json:"location,omitempty"`
+	ProfileVerified  bool       `json:"profileVerified"`
+	IsManagedAccount bool       `json:"isManagedAccount"`
+	RepresentativeID *uint64    `json:"representativeId,omitempty"`
+	FollowersCount   int64      `json:"followersCount"`
+	PostsCount       int64      `json:"postsCount"`
+	StatsLive        bool       `json:"statsLive"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	LastSeenAt       *time.Time `json:"lastSeenAt,omitempty"`
+}
+
+// AdminUserList es la respuesta completa de la lista.
+type AdminUserList struct {
+	Users     []AdminUserRow   `json:"users"`
+	Total     int64            `json:"total"`
+	Limit     int              `json:"limit"`
+	Offset    int              `json:"offset"`
+	ByRole    map[string]int64 `json:"byRole"`
+	Truncated bool             `json:"truncated"`
+}
+
+// telefonoCompleto junta prefijo y número para que la lista muestre uno solo.
+func telefonoCompleto(cc, number *string) *string {
+	if number == nil || *number == "" {
+		return nil
+	}
+	if cc == nil || *cc == "" {
+		return number
+	}
+	full := *cc + *number
+	return &full
+}
+
+// applyLiveStats pisa seguidores y publicaciones con los números reales de las
+// filas que los tienen y marca cada fila con su origen. Las que no están en el
+// mapa conservan lo guardado y quedan con StatsLive en false.
+func applyLiveStats(rows []AdminUserRow, stats map[uint64]SocialStats) {
+	for i := range rows {
+		st, ok := stats[rows[i].ID]
+		rows[i].StatsLive = ok
+		if !ok {
+			continue
+		}
+		rows[i].FollowersCount = st.Followers
+		rows[i].PostsCount = st.Posts
+	}
+}
+
+// ListUsersForAdmin devuelve la página pedida de usuarios registrados.
+func (s *UserService) ListUsersForAdmin(
+	ctx context.Context,
+	f repositories.AdminUserFilter,
+) (*AdminUserList, error) {
+	users, total, err := s.repo.ListForAdmin(f)
+	if err != nil {
+		log.Printf("[ADMIN] list users failed: %v", err)
+		return nil, errors.New("could not list users")
+	}
+
+	rows := make([]AdminUserRow, 0, len(users))
+	for i := range users {
+		u := &users[i]
+		rows = append(rows, AdminUserRow{
+			ID:               u.ID,
+			Username:         u.Username,
+			DisplayName:      u.DisplayName,
+			Email:            u.Email,
+			Phone:            telefonoCompleto(u.PhoneCountryCode, u.PhoneNumber),
+			Role:             string(u.Role),
+			CreatorName:      u.CreatorName,
+			Avatar:           u.Avatar,
+			Location:         u.Location,
+			ProfileVerified:  u.ProfileVerified,
+			IsManagedAccount: u.IsManagedAccount,
+			RepresentativeID: u.RepresentativeID,
+			FollowersCount:   u.FollowersCount,
+			PostsCount:       u.PostsCount,
+			CreatedAt:        u.CreatedAt,
+		})
+	}
+
+	// Seguidores y publicaciones de verdad los calcula el servicio social; las
+	// columnas de users se quedaron en cero porque nada las actualiza. Se
+	// piden solo los de esta página, y la fila que no responde a tiempo se
+	// queda con lo guardado: nunca tumba ni frena la lista.
+	if s.socialStats.Enabled() && len(rows) > 0 {
+		ids := make([]uint64, len(rows))
+		for i := range rows {
+			ids[i] = rows[i].ID
+		}
+		applyLiveStats(rows, s.socialStats.FetchStats(ctx, ids))
+	}
+
+	// El recuento por rol es del total, no de la página: es la cabecera de la
+	// pantalla y tiene que decir cuántos hay, no cuántos se ven.
+	byRole, err := s.repo.CountUsersByRole()
+	if err != nil {
+		// Que falle el resumen no puede tumbar la lista.
+		log.Printf("[ADMIN] count by role failed: %v", err)
+		byRole = map[string]int64{}
+	}
+
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	return &AdminUserList{
+		Users:     rows,
+		Total:     total,
+		Limit:     limit,
+		Offset:    f.Offset,
+		ByRole:    byRole,
+		Truncated: int64(f.Offset+len(rows)) < total,
+	}, nil
 }

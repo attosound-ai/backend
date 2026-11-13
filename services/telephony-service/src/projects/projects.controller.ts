@@ -1,3 +1,4 @@
+import type { ExportOptions } from "./project-settings";
 import {
   Controller,
   Get,
@@ -19,6 +20,7 @@ import { ProjectsService } from "./projects.service";
 import { CreateProjectDto } from "./dto/create-project.dto";
 import { UpdateProjectDto } from "./dto/update-project.dto";
 import { SaveTimelineDto } from "./dto/save-timeline.dto";
+import { resolveVerifiedUserId } from "../common/verified-user-id";
 
 @Controller("telephony/projects")
 export class ProjectsController {
@@ -90,6 +92,12 @@ export class ProjectsController {
     @Param("id") id: string,
     @Body("segmentId") segmentId: string,
     @Body("laneIndex") laneIndex: number | undefined,
+    // Optional: where on the timeline the client wants this clip. Used by
+    // in-call recording so the take lands at the PLAYHEAD (what the user was
+    // listening to) instead of being appended after the last clip on the lane,
+    // which made the recording appear detached from the track it was recorded
+    // over. Omitted -> unchanged append behaviour, so older clients are safe.
+    @Body("positionInTimeline") positionInTimeline: number | undefined,
     @Headers("x-user-id") userId: string,
     @Headers("authorization") authHeader: string,
   ) {
@@ -99,6 +107,9 @@ export class ProjectsController {
       id,
       uid,
       typeof laneIndex === "number" ? laneIndex : 0,
+      typeof positionInTimeline === "number" && positionInTimeline >= 0
+        ? positionInTimeline
+        : undefined,
     );
     return { success: true, data: segment };
   }
@@ -147,9 +158,36 @@ export class ProjectsController {
     @Param("id") id: string,
     @Headers("x-user-id") userId: string,
     @Headers("authorization") authHeader: string,
+    @Body() body?: ExportOptions,
   ) {
     const uid = this.resolveUserId(userId, authHeader);
-    const result = await this.projectsService.exportProject(id, uid);
+    const options = body && Object.keys(body).length > 0 ? body : undefined;
+    const result = await this.projectsService.exportProject(id, uid, options);
+    return { success: true, data: result };
+  }
+
+  /**
+   * Cover art for the exporter: a jpg or png stored next to the project's
+   * exports. Returns the storage key the export body references as coverKey.
+   */
+  @Post(":id/cover")
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: { fileSize: 8 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        cb(null, ["image/jpeg", "image/png"].includes(file.mimetype));
+      },
+    }),
+  )
+  async uploadCover(
+    @Param("id") id: string,
+    @Headers("x-user-id") userId: string,
+    @Headers("authorization") authHeader: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    const uid = this.resolveUserId(userId, authHeader);
+    if (!file) throw new BadRequestException("Image file is required");
+    const result = await this.projectsService.uploadCover(id, uid, file);
     return { success: true, data: result };
   }
 
@@ -168,6 +206,13 @@ export class ProjectsController {
           "audio/m4a",
           "audio/x-m4a",
           "audio/aac",
+          // The studio recorder and text to speech write CAF; the server
+          // decodes anything ffmpeg can read, the plan decides how it is kept.
+          "audio/x-caf",
+          "audio/flac",
+          "audio/x-flac",
+          "audio/aiff",
+          "audio/x-aiff",
         ];
         if (allowed.includes(file.mimetype)) {
           cb(null, true);
@@ -186,6 +231,14 @@ export class ProjectsController {
     @Param("id") id: string,
     @UploadedFile() file: Express.Multer.File,
     @Body("laneIndex") laneIndex: string,
+    // Optional: where on the timeline the client wants this clip. An in-call take
+    // recorded over a backing track belongs at the playhead it was performed
+    // against, not appended after the last clip on the lane. Multipart bodies are
+    // strings, hence the parse. Omitted -> unchanged append behaviour, so older
+    // clients are unaffected.
+    @Body("positionInTimeline") positionInTimeline: string,
+    // "false" = segment only, no clip (effects renders). Anything else = clip.
+    @Body("createClip") createClip: string,
     @Headers("x-user-id") userId: string,
     @Headers("authorization") authHeader: string,
   ) {
@@ -194,30 +247,23 @@ export class ProjectsController {
       throw new BadRequestException("No file uploaded");
     }
     const lane = laneIndex ? parseInt(laneIndex, 10) : 0;
+    const parsedPosition = positionInTimeline
+      ? parseInt(positionInTimeline, 10)
+      : NaN;
     const result = await this.projectsService.importAudioFile(
       id,
       uid,
       file,
       lane,
+      Number.isFinite(parsedPosition) && parsedPosition >= 0
+        ? parsedPosition
+        : undefined,
+      createClip !== "false",
     );
     return { success: true, data: result };
   }
 
   private resolveUserId(headerUserId: string, authHeader: string): string {
-    if (headerUserId) return headerUserId;
-
-    if (authHeader?.startsWith("Bearer ")) {
-      try {
-        const payload = JSON.parse(
-          Buffer.from(authHeader.slice(7).split(".")[1], "base64").toString(),
-        );
-        const uid = payload.sub || payload.user_id;
-        if (uid) return String(uid);
-      } catch {
-        // fall through
-      }
-    }
-
-    throw new UnauthorizedException("User ID not found");
+    return resolveVerifiedUserId(headerUserId, authHeader);
   }
 }

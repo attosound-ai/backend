@@ -6,6 +6,18 @@ import Twilio from "twilio";
 import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entity";
 import { Call } from "../entities/call.entity";
 import { AudioSegment } from "../entities/audio-segment.entity";
+import { AnalyticsService } from "../analytics/analytics.service";
+import { ChildLeg, siblingsToCancel } from "./decline-siblings";
+import { endingStatus, isEnded, LegInfo, legsToEnd, ownsLeg } from "./forced-hangup";
+
+/** Statuses after which a call row can no longer carry a stream. */
+const ENDED_CALL_STATUSES = new Set([
+  "completed",
+  "no-answer",
+  "busy",
+  "failed",
+  "canceled",
+]);
 
 @Injectable()
 export class CallsService {
@@ -20,10 +32,115 @@ export class CallsService {
     @InjectRepository(AudioSegment)
     private readonly segmentRepo: Repository<AudioSegment>,
     private readonly config: ConfigService,
+    private readonly analytics: AnalyticsService,
   ) {
     const accountSid = this.config.get<string>("twilio.accountSid");
     const authToken = this.config.get<string>("twilio.authToken");
     this.twilioClient = Twilio(accountSid, authToken);
+  }
+
+  /**
+   * A leg of a fan out dial was declined: cancel its siblings still ringing.
+   * Returns the canceled SIDs. Never throws (a leg may end on its own meanwhile).
+   */
+  async cancelRingingSiblings(
+    parentCallSid: string,
+    declinedSid: string,
+  ): Promise<string[]> {
+    let children: ChildLeg[] = [];
+    try {
+      const list = await this.twilioClient.calls.list({ parentCallSid, limit: 20 });
+      children = list.map((c) => ({ sid: c.sid, status: String(c.status) }));
+    } catch (err) {
+      this.logger.warn(
+        "Sibling lookup failed parent=%s: %s",
+        parentCallSid,
+        err instanceof Error ? err.message : String(err),
+      );
+      return [];
+    }
+    const canceled: string[] = [];
+    for (const sid of siblingsToCancel(children, declinedSid)) {
+      try {
+        await this.twilioClient.calls(sid).update({ status: "canceled" });
+        canceled.push(sid);
+      } catch (err) {
+        this.logger.warn(
+          "Sibling cancel failed sid=%s: %s",
+          sid,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+    return canceled;
+  }
+
+  /**
+   * End a call through Twilio when the app could not (see forced-hangup.ts).
+   * Returns each leg's status read back from Twilio after the request, and
+   * `verified` only when every leg reads as ended. Throws NotFound for a leg
+   * that does not exist or is not the user's.
+   */
+  async forceHangup(
+    callSid: string,
+    userId: string,
+    reason: string | null,
+  ): Promise<{ verified: boolean; legs: { sid: string; status: string }[] }> {
+    const fetchLeg = async (sid: string): Promise<LegInfo | null> => {
+      try {
+        const c = await this.twilioClient.calls(sid).fetch();
+        return {
+          sid: c.sid,
+          status: String(c.status),
+          to: c.to ?? null,
+          from: c.from ?? null,
+          parentCallSid: c.parentCallSid ?? null,
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    const leg = await fetchLeg(callSid);
+    if (!leg || !ownsLeg(leg, userId)) throw new NotFoundException("Call not found");
+    const parent = leg.parentCallSid ? await fetchLeg(leg.parentCallSid) : null;
+
+    const before = [leg, parent].filter((l): l is LegInfo => l != null);
+    const errors: string[] = [];
+    for (const sid of legsToEnd(leg, parent)) {
+      const current = before.find((l) => l.sid === sid);
+      try {
+        await this.twilioClient
+          .calls(sid)
+          .update({ status: endingStatus(current?.status ?? "in-progress") });
+      } catch (err) {
+        errors.push(`${sid}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    const after = await Promise.all(before.map((l) => fetchLeg(l.sid)));
+    const legs = before.map((l, i) => ({ sid: l.sid, status: after[i]?.status ?? "unknown" }));
+    const verified = legs.every((l) => isEnded(l.status));
+
+    this.analytics.capture(userId, "backend_call_forced_hangup", {
+      call_sid: callSid,
+      parent_call_sid: leg.parentCallSid,
+      reason,
+      status_before: leg.status,
+      parent_status_before: parent?.status ?? null,
+      already_ended: before.every((l) => isEnded(l.status)),
+      verified,
+      legs,
+      errors: errors.length ? errors : null,
+    });
+    this.logger.log(
+      "Forced hangup call=%s by user %s verified=%s legs=%j",
+      callSid,
+      userId,
+      verified,
+      legs,
+    );
+    return { verified, legs };
   }
 
   /** Find the user assigned to a Twilio phone number. */
@@ -74,8 +191,26 @@ export class CallsService {
 
     call.status = status;
 
-    if (status === "in-progress" && !call.answeredAt) {
-      call.answeredAt = new Date();
+    // `answeredAt` was previously only set on `in-progress`, but Twilio's
+    // dial-action callback often delivers `completed` (or `answered`)
+    // directly without ever firing `in-progress` — particularly for the
+    // PSTN-in → `<Dial><Client>` flow used by bridge numbers. That left
+    // every successfully-answered call with `answeredAt = NULL`,
+    // breaking analytics, billing, and any "did the user pick up" check.
+    //
+    // Treat `in-progress`, `answered`, and `completed`-with-duration as
+    // answered. For the latter, back-compute the timestamp from the
+    // duration so the value reflects actual answer time rather than the
+    // callback arrival time.
+    const isAnsweredStatus =
+      status === "in-progress" ||
+      status === "answered" ||
+      (status === "completed" && duration != null && duration > 0);
+    if (isAnsweredStatus && !call.answeredAt) {
+      call.answeredAt =
+        status === "in-progress"
+          ? new Date()
+          : new Date(Date.now() - (duration ?? 0) * 1000);
     }
 
     if (
@@ -105,7 +240,12 @@ export class CallsService {
     let call = await this.callRepo.findOne({
       where: { twilioCallSid: callSid, userId },
     });
+    // Telemetry: did the exact-SID match miss and force the "most recent active
+    // call" fallback? A fallback attach can bind the stream to a DB row whose
+    // leg never carried the remote party — a wrong-leg cause of empty outbound.
+    let usedFallbackLookup = false;
     if (!call) {
+      usedFallbackLookup = true;
       call = await this.callRepo.findOne({
         where: [
           { userId, status: "in-progress" },
@@ -115,6 +255,11 @@ export class CallsService {
       });
     }
     if (!call) throw new NotFoundException("Call not found");
+
+    // Snapshot the DB call status BEFORE the ringing→in-progress auto-upgrade.
+    // If it wasn't already "in-progress" the leg may not have been fully
+    // bridged when capture armed — an early/wrong-leg attach signal.
+    const callStatusAtAttach = call.status;
 
     // Auto-upgrade: if the call is still "ringing" in DB (status callback delayed
     // or missing), upgrade to "in-progress" since the user clearly accepted.
@@ -132,9 +277,9 @@ export class CallsService {
     // is actively on. The DB-stored SID is the parent PSTN/dial leg, which the
     // recipient does not own on Twilio's side, so streams.create returns 404.
     const streamCallSid = callSid;
-    const stream = await this.twilioClient
-      .calls(streamCallSid)
-      .streams.create({
+    let stream: { sid: string };
+    try {
+      stream = await this.twilioClient.calls(streamCallSid).streams.create({
         url: streamUrl,
         name: `capture-${streamCallSid}-${Date.now()}`,
         track: "both_tracks",
@@ -143,13 +288,99 @@ export class CallsService {
         "parameter2.name": "userId",
         "parameter2.value": userId,
       });
+    } catch (err) {
+      // A failed streams.create = ZERO recording, surfaced to the user only as
+      // a generic "Recording failed" alert. Capture the Twilio error so we can
+      // tell apart a 404 (wrong leg / call already ended) from auth/region
+      // problems. This is fired BEFORE re-throwing so the existing behaviour is
+      // unchanged.
+      const e = err as { code?: number; status?: number; message?: string };
+      this.analytics.capture(userId, "backend_recording_stream_failed", {
+        call_sid: streamCallSid,
+        db_call_sid: call.twilioCallSid,
+        call_id: call.id,
+        track: "both_tracks",
+        used_fallback_lookup: usedFallbackLookup,
+        call_status_at_attach: callStatusAtAttach,
+        twilio_code: e?.code ?? null,
+        http_status: e?.status ?? null,
+        error: e?.message ?? String(err),
+      });
+      throw err;
+    }
 
     this.logger.log(
       "Stream started: sid=%s call=%s",
       stream.sid,
       streamCallSid,
     );
+
+    // The stream was accepted by Twilio. Whether BOTH tracks actually flow is
+    // confirmed later by backend_recording_started/segment from the media WS.
+    this.analytics.capture(userId, "backend_recording_stream_requested", {
+      call_sid: streamCallSid,
+      // db_call_sid differs from call_sid when the exact-SID match missed and
+      // we fell back: that divergence + used_fallback_lookup is the wrong-leg
+      // attach signature (hypothesis 2 for "remote not recorded").
+      db_call_sid: call.twilioCallSid,
+      call_id: call.id,
+      stream_sid: stream.sid,
+      track: "both_tracks",
+      used_fallback_lookup: usedFallbackLookup,
+      call_status_at_attach: callStatusAtAttach,
+    });
     return { streamSid: stream.sid };
+  }
+
+  /**
+   * Is a Media Stream `start` frame for a live call of ours? Checked after the
+   * handshake signature (media-stream-auth.ts), as a second lock: the callId
+   * custom parameter (set by startStream) must name a call row of the userId
+   * parameter that has not ended, and Twilio must report the streamed leg
+   * (start.callSid, the SDK leg, not the parent stored in the row) as
+   * in-progress. When Twilio cannot be reached the database check decides,
+   * so a Twilio API hiccup does not cost a recording.
+   */
+  async verifyStreamCall(
+    callSid: string,
+    callId: string,
+    userId: string,
+  ): Promise<{ ok: boolean; reason: string; twilioStatus: string | null }> {
+    const no = (reason: string, twilioStatus: string | null = null) => ({
+      ok: false,
+      reason,
+      twilioStatus,
+    });
+    if (typeof callSid !== "string" || !/^CA[0-9a-f]{32}$/i.test(callSid)) {
+      return no("bad_call_sid");
+    }
+    if (
+      typeof callId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callId)
+    ) {
+      return no("bad_call_id");
+    }
+    const row = await this.callRepo.findOne({ where: { id: callId } });
+    if (!row) return no("call_not_found");
+    if (!userId || String(row.userId) !== String(userId)) return no("user_mismatch");
+    if (row.endedAt || ENDED_CALL_STATUSES.has(row.status)) {
+      return no(`call_ended_${row.status}`);
+    }
+    try {
+      const leg = await this.twilioClient.calls(callSid).fetch();
+      const status = String(leg.status);
+      if (status !== "in-progress") return no("leg_not_live", status);
+      return { ok: true, reason: "live", twilioStatus: status };
+    } catch (err) {
+      const e = err as { status?: number };
+      if (e?.status === 404) return no("leg_not_found");
+      this.logger.warn(
+        "Stream leg lookup failed sid=%s: %s",
+        callSid,
+        err instanceof Error ? err.message : String(err),
+      );
+      return { ok: true, reason: "twilio_unreachable", twilioStatus: null };
+    }
   }
 
   /** Stop a Twilio Media Stream on an active call by stream SID. */
@@ -180,11 +411,7 @@ export class CallsService {
       .calls(streamCallSid)
       .streams(streamSid)
       .update({ status: "stopped" });
-    this.logger.log(
-      "Stream stopped: sid=%s call=%s",
-      streamSid,
-      streamCallSid,
-    );
+    this.logger.log("Stream stopped: sid=%s call=%s", streamSid, streamCallSid);
   }
 
   /** Get calls for a user. */

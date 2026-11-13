@@ -48,6 +48,12 @@ type SignupDraft struct {
 	ConsentToRecording *bool   `json:"consentToRecording,omitempty"`
 	SelectedPlan       *string `json:"selectedPlan,omitempty"`
 	BridgeNumber       *string `json:"bridgeNumber,omitempty"`
+	// User's app locale (BCP-47, e.g. "en", "es", "pt-BR"). Captured at
+	// signup_start time so welcome/onboarding emails can be rendered in
+	// the right language. Stored on the draft because the user row doesn't
+	// have a locale column yet — once signup completes, the value is
+	// consumed by publishUserCreated and not referenced again.
+	Locale *string `json:"locale,omitempty"`
 
 	// Managed creator fields (representative path only)
 	CreatorEmail            *string  `json:"creatorEmail,omitempty"`

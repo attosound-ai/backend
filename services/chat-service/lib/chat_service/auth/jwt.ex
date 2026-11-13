@@ -44,6 +44,9 @@ defmodule ChatService.Auth.JWT do
   def verify_user_token(token) when is_binary(token) and byte_size(token) > 0 do
     case verify_and_validate(token, signer()) do
       {:ok, %{"scope" => "signup_pending"}} -> {:error, :signup_pending}
+      # The 2FA temporary token (password only) is never a session. Its
+      # issuer is already refused above; this also covers the scope.
+      {:ok, %{"scope" => "2fa_pending"}} -> {:error, :invalid_token}
       {:ok, claims} -> extract_user_id(claims)
       {:error, _reason} -> {:error, :invalid_token}
     end

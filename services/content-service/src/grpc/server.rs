@@ -228,6 +228,9 @@ impl GrpcContentService for ContentGrpcServer {
             Err(crate::services::ContentError::InvalidId(id)) => {
                 Err(Status::invalid_argument(format!("Invalid ID: {}", id)))
             }
+            Err(crate::services::ContentError::InvalidMetadata(why)) => {
+                Err(Status::invalid_argument(format!("Invalid metadata: {why}")))
+            }
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }

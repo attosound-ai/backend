@@ -22,6 +22,8 @@ export default () => ({
     twimlAppSid: process.env.TWILIO_TWIML_APP_SID || "",
     pushCredentialSidFcm: process.env.TWILIO_PUSH_CREDENTIAL_SID_FCM || "",
     pushCredentialSidApns: process.env.TWILIO_PUSH_CREDENTIAL_SID_APNS || "",
+    // FCM credential for the Android app (Firebase project atto-sound-eb8f9).
+    pushCredentialSidAndroid: process.env.TWILIO_PUSH_CREDENTIAL_SID_ANDROID || "",
     devMode: process.env.TWILIO_DEV_MODE === "true",
     bridgeNumber: process.env.TWILIO_BRIDGE_NUMBER || "",
   },

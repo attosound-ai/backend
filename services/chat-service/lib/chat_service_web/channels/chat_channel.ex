@@ -76,6 +76,16 @@ defmodule ChatServiceWeb.ChatChannel do
     {:noreply, socket}
   end
 
+  def handle_info({:message_pinned, payload}, socket) do
+    push(socket, "message_pinned", payload)
+    {:noreply, socket}
+  end
+
+  def handle_info({:message_unpinned, payload}, socket) do
+    push(socket, "message_unpinned", payload)
+    {:noreply, socket}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @doc """
@@ -102,31 +112,27 @@ defmodule ChatServiceWeb.ChatChannel do
         []
       end
 
+    extra_opts =
+      [
+        metadata: payload["metadata"],
+        thread_id: payload["thread_id"],
+        # Optional: the same send twice is stored once (ClientKey).
+        client_key: payload["client_key"] || payload["clientKey"]
+      ]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) or v == "" end)
+
     with {:ok, conversation} <- ConversationService.find_conversation(user_id, conversation_id),
-         opts <- [recipient_id: conversation.participant_id] ++ reply_opts,
+         opts <- [recipient_id: conversation.participant_id] ++ reply_opts ++ extra_opts,
          {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
       message_map = Message.to_map(message)
-      broadcast!(socket, "new_message", message_map)
+      # No broadcast here: MessageService.send_message already publishes
+      # {:new_message, _} on "chat:<id>" and handle_info pushes it to every
+      # subscriber. Broadcasting here too delivered each message twice to
+      # everyone with the chat open (client, Oct 3 2026: every
+      # messages_received_realtime arrived twice, 8 ms apart).
 
-      # Notify both participants' user channels so conversation lists update in real-time
-      notify_payload = %{
-        conversation_id: conversation_id,
-        last_message: content,
-        sender_id: user_id
-      }
-
-      ChatServiceWeb.Endpoint.broadcast("user:#{user_id}", "conversation_updated", notify_payload)
-      ChatServiceWeb.Endpoint.broadcast("user:#{conversation.participant_id}", "conversation_updated", notify_payload)
-
-      # Notify recipient about new notification (for badge + list refresh)
-      if user_id != conversation.participant_id do
-        ChatServiceWeb.Endpoint.broadcast(
-          "user:#{conversation.participant_id}",
-          "new_notification",
-          %{type: "message", actor_id: user_id}
-        )
-      end
-
+      # The user channels are notified inside MessageService.send_message,
+      # the same way for this path and for REST.
       {:reply, {:ok, message_map}, socket}
     else
       {:error, reason} ->
@@ -140,17 +146,22 @@ defmodule ChatServiceWeb.ChatChannel do
 
   Broadcasts typing status to all other participants in the channel.
   """
-  def handle_in("typing", %{"is_typing" => is_typing}, socket) do
+  def handle_in("typing", %{"is_typing" => is_typing} = payload, socket) do
     user_id = socket.assigns.user_id
     conversation_id = socket.assigns.conversation_id
+    # Slack shows "typing" inside the thread, not in the channel, so the
+    # indicator carries the thread it belongs to. Absent for the main chat,
+    # which is what every older client sends.
+    thread_id = payload["thread_id"]
 
     Logger.info(
-      "[TYPING] user=#{user_id} conv=#{conversation_id} is_typing=#{is_typing}"
+      "[TYPING] user=#{user_id} conv=#{conversation_id} is_typing=#{is_typing} thread=#{thread_id || "-"}"
     )
 
     broadcast_from!(socket, "typing", %{
       user_id: user_id,
-      is_typing: is_typing
+      is_typing: is_typing,
+      thread_id: thread_id
     })
 
     {:noreply, socket}
@@ -221,11 +232,19 @@ defmodule ChatServiceWeb.ChatChannel do
   Payload: %{"message_id" => string, "content" => string}
   Only the original sender can edit.
   """
-  def handle_in("edit_message", %{"message_id" => message_id, "content" => content}, socket) do
+  def handle_in(
+        "edit_message",
+        %{"message_id" => message_id, "content" => content} = payload,
+        socket
+      ) do
     user_id = socket.assigns.user_id
     conversation_id = socket.assigns.conversation_id
+    # Only clients that know the iMessage limits ask the server to enforce them.
+    enforce = payload["enforce_rules"] == true
 
-    case MessageService.edit_message(message_id, conversation_id, user_id, content) do
+    case MessageService.edit_message(message_id, conversation_id, user_id, content,
+           enforce: enforce
+         ) do
       {:ok, _payload} ->
         {:reply, {:ok, %{status: "edited"}}, socket}
 
@@ -234,6 +253,9 @@ defmodule ChatServiceWeb.ChatChannel do
 
       {:error, :not_found} ->
         {:reply, {:error, %{reason: "message_not_found"}}, socket}
+
+      {:error, reason} when reason in [:edit_window_closed, :edit_limit_reached, :not_editable] ->
+        {:reply, {:error, %{reason: Atom.to_string(reason)}}, socket}
 
       {:error, reason} ->
         Logger.error("Failed to edit message: #{inspect(reason)}")

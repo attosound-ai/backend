@@ -31,7 +31,11 @@ export class ProvisionedNumber {
   subscriptionId: string | null;
 
   @Column({ type: "varchar", length: 20, default: "available" })
-  status: "available" | "assigned" | "releasing";
+  // `released`: gone from Twilio for good (account deletion, manual cleanup).
+  // Kept as a row so the history of who held which number survives.
+  // reserved: a platform number (OTP sender, bridge), never handed to a user
+  // by the pool (it only takes available) and never deleted from Twilio.
+  status: "available" | "assigned" | "releasing" | "released" | "reserved";
 
   @Column({ type: "timestamptz", nullable: true })
   assignedAt: Date | null;

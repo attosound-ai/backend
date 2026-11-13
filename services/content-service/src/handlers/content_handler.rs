@@ -72,7 +72,9 @@ fn error_response(err: ContentError) -> HttpResponse {
             "data": null,
             "error": err.to_string()
         })),
-        ContentError::InvalidContentType(_) | ContentError::InvalidId(_) => {
+        ContentError::InvalidContentType(_)
+        | ContentError::InvalidId(_)
+        | ContentError::InvalidMetadata(_) => {
             HttpResponse::BadRequest().json(json!({
                 "success": false,
                 "data": null,

@@ -9,7 +9,10 @@ use uuid::Uuid;
 use crate::cloudinary::{CloudinaryClient, SignedUploadParams};
 use crate::cloudinary::types::SignUploadRequest;
 use crate::config::Config;
+use crate::middleware::admin_auth::verify_admin_token;
 use crate::middleware::{extract_signup_session_id, extract_user_id};
+
+use super::media_owner::{can_delete_media, owned_public_id};
 
 /// POST /api/v1/media/sign — Generate signed Cloudinary upload parameters.
 /// The frontend uses these to upload directly to Cloudinary (no file bytes through our server).
@@ -25,11 +28,13 @@ pub async fn sign_upload(
     // step needs to upload a profile picture before the `users` row is created
     // by /signup/sessions/me/complete. Using the session ID as the owner is
     // only used in the log line; the public_id is a random short UUID.
-    let user_id = match extract_user_id(&req, &config.jwt_secret) {
-        Some(id) => id,
+    // `owner` is only set for a signed in account: it goes into the public_id
+    // so that account (and only it) can delete the asset later.
+    let (user_id, owner) = match extract_user_id(&req, &config.jwt_secret) {
+        Some(id) => (id.clone(), Some(id)),
         None if body.context == "avatar" => {
             match extract_signup_session_id(&req, &config.jwt_secret) {
-                Some(id) => id,
+                Some(id) => (id, None),
                 None => {
                     return HttpResponse::Unauthorized().json(json!({
                         "success": false,
@@ -64,25 +69,33 @@ pub async fn sign_upload(
             return HttpResponse::BadRequest().json(json!({
                 "success": false,
                 "data": null,
-                "error": "Invalid context. Must be: avatar, content, audio, chat, video, or reel"
+                "error": "Invalid context. Must be: avatar, content, audio, chat, video, reel, or square"
             }));
         }
     };
 
     // Generate unique public_id
     let short_uuid = &Uuid::new_v4().to_string().replace('-', "")[..12];
-    let public_id = format!("{}_{}", body.context, short_uuid);
+    let public_id = owned_public_id(&body.context, short_uuid, owner.as_deref());
 
     info!(
         "[MEDIA] Signing upload for user={} context={} public_id={}/{}",
         user_id, body.context, folder, public_id
     );
 
+    // Video/reel eager transforms (HLS) are transcoded asynchronously so the
+    // upload isn't blocked while Cloudinary builds the stream renditions.
+    let eager_async = CloudinaryClient::context_is_async(&body.context);
+
+    let incoming = CloudinaryClient::incoming_transformation(&body.context);
+
     let params = cloudinary.sign_upload(
         folder,
         &public_id,
         &body.resource_type,
         eager.as_deref(),
+        eager_async,
+        incoming.as_deref(),
     );
 
     HttpResponse::Ok().json(json!({
@@ -227,16 +240,18 @@ pub async fn delete_media(
     cloudinary: web::Data<CloudinaryClient>,
     config: web::Data<Config>,
 ) -> HttpResponse {
-    let _user_id = match extract_user_id(&req, &config.jwt_secret) {
-        Some(id) => id,
-        None => {
-            return HttpResponse::Unauthorized().json(json!({
-                "success": false,
-                "data": null,
-                "error": "Missing X-User-ID header"
-            }));
-        }
-    };
+    // The operator of the panel (X-Admin-Token) may delete anything; a signed
+    // in account only what it uploaded (Nov 12 2026: before, any account
+    // could destroy any image).
+    let is_operator = verify_admin_token(&req);
+    let caller = extract_user_id(&req, &config.jwt_secret);
+    if caller.is_none() && !is_operator {
+        return HttpResponse::Unauthorized().json(json!({
+            "success": false,
+            "data": null,
+            "error": "Missing X-User-ID header"
+        }));
+    }
 
     let identifier = path.into_inner();
 
@@ -263,6 +278,18 @@ pub async fn delete_media(
             .unwrap_or(identifier.clone().into())
             .to_string();
 
+        if !can_delete_media(&public_id, caller.as_deref(), is_operator) {
+            info!(
+                "[MEDIA] Refused delete of {} by {:?}: not the owner",
+                public_id, caller
+            );
+            return HttpResponse::Forbidden().json(json!({
+                "success": false,
+                "data": null,
+                "error": "You can only delete media you uploaded"
+            }));
+        }
+
         info!("[MEDIA] Deleting from Cloudinary: {} (type: {})", public_id, resource_type);
 
         match cloudinary.destroy(&public_id, &resource_type).await {
@@ -281,7 +308,15 @@ pub async fn delete_media(
             }
         }
     } else {
-        // Legacy: local file deletion
+        // Legacy: local file deletion. These files carry no owner, so only
+        // the operator may delete them.
+        if !is_operator {
+            return HttpResponse::Forbidden().json(json!({
+                "success": false,
+                "data": null,
+                "error": "You can only delete media you uploaded"
+            }));
+        }
         let safe_filename = sanitize_filename::sanitize(&identifier);
         let file_path = format!("{}/{}", config.upload_dir, safe_filename);
 

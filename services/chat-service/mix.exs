@@ -36,7 +36,11 @@ defmodule ChatService.MixProject do
       {:brod, "~> 3.16"},
       {:uuid, "~> 1.1"},
       {:corsica, "~> 2.1"},
-      {:joken, "~> 2.6"}
+      {:joken, "~> 2.6"},
+      # Telemetry + maintenance tooling
+      {:sentry, "~> 10.8"},
+      {:hackney, "~> 1.20"},
+      {:postgrex, "~> 0.19"}
     ]
   end
 

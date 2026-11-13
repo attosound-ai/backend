@@ -46,6 +46,7 @@ func main() {
 		&models.PushToken{},
 		&models.SignupSession{},
 		&models.UserAppIconPreference{},
+		&models.AccountDeletion{},
 	); err != nil {
 		log.Fatalf("[STARTUP] Failed to auto-migrate models: %v", err)
 	}
@@ -80,12 +81,28 @@ func main() {
 
 	authService := services.NewAuthService(repo, jwtMgr, producer, cfg.OTPServiceURL)
 	userService := services.NewUserService(repo, producer)
+
+	// Real followers and posts for the operator list come from the social
+	// service. Optional: without SOCIAL_SERVICE_URL the list keeps serving the
+	// stored columns. The stats route sits behind the social service guard,
+	// which only trusts a JWT signed with the shared secret, so each page
+	// presents a one minute service token (no user, no role).
+	socialStats := services.NewSocialStatsClient(cfg.SocialServiceURL, func() (string, error) {
+		return jwtMgr.GenerateServiceToken(time.Minute)
+	})
+	userService.SetSocialStats(socialStats)
+	if socialStats.Enabled() {
+		log.Printf("[STARTUP] Operator list reads live stats from %s", cfg.SocialServiceURL)
+	} else {
+		log.Println("[STARTUP] SOCIAL_SERVICE_URL not set: operator list serves stored counts")
+	}
 	signupService := services.NewSignupService(signupRepo, repo, jwtMgr, producer, cfg.OTPServiceURL)
 
 	inmateService := services.NewInmateService()
 
 	authHandler := handlers.NewAuthHandler(authService)
 	userHandler := handlers.NewUserHandler(userService, cfg.OTPServiceURL)
+	adminHandler := handlers.NewAdminHandler(userService)
 	verificationHandler := handlers.NewVerificationHandler(userService, cfg.OTPServiceURL)
 	inmateHandler := handlers.NewInmateHandler(inmateService)
 	pushTokenHandler := handlers.NewPushTokenHandler(repo)
@@ -165,15 +182,27 @@ func main() {
 	users.Put("/me/app-icon", middleware.RequireAuth(jwtMgr), appIconHandler.UpdateAppIcon)
 	users.Delete("/me/account", middleware.RequireAuth(jwtMgr), userHandler.DeleteAccount)
 
+	// Operator only (X-Admin-Token). Under /users so the gateway's existing
+	// user route carries it; registered before the parameterized routes.
+	users.Get("/admin", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListUsers)
+	users.Get("/admin/deletions", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListDeletions)
+	users.Post("/admin/relink", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.RelinkCreator)
+	users.Delete("/admin/:id", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.DeleteUser)
+
 	// Inmate lookup (public)
 	users.Get("/inmates/lookup", inmateHandler.LookupInmate)
 
 	// User routes (public)
-	users.Get("/search", userHandler.SearchUsers)
+	users.Get("/search", middleware.OptionalAuth(jwtMgr), userHandler.SearchUsers)
 	users.Get("/discover", middleware.RequireAuth(jwtMgr), userHandler.DiscoverUsers)
-	users.Get("/:id", userHandler.GetUser)
+	users.Get("/:id", middleware.OptionalAuth(jwtMgr), userHandler.GetUser)
 	users.Get("/:id/followers", userHandler.GetFollowers)
 	users.Get("/:id/following", userHandler.GetFollowing)
+	// Server to server only (telephony-service): linked account ids and push
+	// tokens. Until Nov 12 2026 they answered anyone, through Kong and through
+	// this service's own public domain. Now a sibling service token or the
+	// owner's own session is required; Kong also blocks the paths.
+	userHandler.MountInternalRoutes(users, middleware.RequireInternalCallerOrOwner(jwtMgr, "id"))
 
 	// ── Signup session cleanup worker ──
 	// Hourly: mark expired sessions abandoned. Grace period 24h before purge so
@@ -219,7 +248,7 @@ func main() {
 
 	// ── Start HTTP server ──
 	log.Printf("[STARTUP] HTTP server listening on [::]:%s", cfg.HTTPPort)
-	if err := app.Listen("[::]:"+cfg.HTTPPort); err != nil {
+	if err := app.Listen("[::]:" + cfg.HTTPPort); err != nil {
 		log.Fatalf("[STARTUP] HTTP server failed: %v", err)
 	}
 }
