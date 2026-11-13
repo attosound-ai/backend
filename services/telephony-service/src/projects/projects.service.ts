@@ -81,7 +81,7 @@ export class ProjectsService {
       description: description ?? null,
     });
     const saved = await this.projectRepo.save(project);
-    this.logger.log("Project created: id=%s user=%s", saved.id, userId);
+    this.logger.log(`Project created: id=${saved.id} user=${userId}`);
     return saved;
   }
 
@@ -202,7 +202,7 @@ export class ProjectsService {
     const project = await this.access.requireProject(projectId, userId);
 
     await this.projectRepo.remove(project);
-    this.logger.log("Project deleted: id=%s user=%s", projectId, userId);
+    this.logger.log(`Project deleted: id=${projectId} user=${userId}`);
   }
 
   async assignSegmentToProject(
@@ -240,10 +240,7 @@ export class ProjectsService {
     });
     if (existingForSegment > 0) {
       this.logger.log(
-        "Segment %s already has a clip in project %s (count=%d); skipping auto-create",
-        segmentId,
-        projectId,
-        existingForSegment,
+        `Segment ${segmentId} already has a clip in project ${projectId} (count=${existingForSegment}); skipping auto-create`,
       );
       return saved;
     }
@@ -284,10 +281,7 @@ export class ProjectsService {
     await this.clipRepo.save(clip);
 
     this.logger.log(
-      "Auto-created timeline clip for segment %s in project %s on lane %d",
-      segmentId,
-      projectId,
-      laneIndex,
+      `Auto-created timeline clip for segment ${segmentId} in project ${projectId} on lane ${laneIndex}`,
     );
 
     return saved;
@@ -402,16 +396,12 @@ export class ProjectsService {
         .whereInIds(orphanedIds)
         .execute();
       this.logger.log(
-        "Orphaned segments detached: project=%s count=%d",
-        projectId,
-        orphanedIds.length,
+        `Orphaned segments detached: project=${projectId} count=${orphanedIds.length}`,
       );
     }
 
     this.logger.log(
-      "Timeline saved: project=%s clips=%d",
-      projectId,
-      saved.length,
+      `Timeline saved: project=${projectId} clips=${saved.length}`,
     );
     return saved;
   }
@@ -587,16 +577,12 @@ export class ProjectsService {
       const storedPath = prepared.path;
       const plan = prepared.plan;
 
+      const probed = probe
+        ? `${probe.sampleRate}Hz/${probe.channels}ch/${probe.codecName}`
+        : "probe_failed";
+      const stored = prepared.stored;
       this.logger.log(
-        "Import store: project=%s mime=%s probed=%s action=%s stored=%s encode_ms=%d",
-        projectId,
-        file.mimetype,
-        probe
-          ? `${probe.sampleRate}Hz/${probe.channels}ch/${probe.codecName}`
-          : "probe_failed",
-        plan.action,
-        `${prepared.stored.sampleRate}Hz/${prepared.stored.channels}ch/${prepared.stored.codecName}`,
-        prepared.encodeMs,
+        `Import store: project=${projectId} mime=${file.mimetype} probed=${probed} action=${plan.action} stored=${stored.sampleRate}Hz/${stored.channels}ch/${stored.codecName} encode_ms=${prepared.encodeMs}`,
       );
 
       // Duration from the STORED file (what the clip will index into). The
@@ -658,10 +644,7 @@ export class ProjectsService {
 
       if (!createClip) {
         this.logger.log(
-          "Segment stored (no clip): project=%s segment=%s duration=%dms",
-          projectId,
-          savedSegment.id,
-          durationMs,
+          `Segment stored (no clip): project=${projectId} segment=${savedSegment.id} duration=${durationMs}ms`,
         );
         return savedSegment;
       }
@@ -700,11 +683,7 @@ export class ProjectsService {
       const savedClip = await this.clipRepo.save(clip);
 
       this.logger.log(
-        "Audio imported: project=%s segment=%s lane=%d duration=%dms",
-        projectId,
-        savedSegment.id,
-        laneIndex,
-        durationMs,
+        `Audio imported: project=${projectId} segment=${savedSegment.id} lane=${laneIndex} duration=${durationMs}ms`,
       );
 
       return savedClip;

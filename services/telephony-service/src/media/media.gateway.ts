@@ -80,10 +80,7 @@ export class MediaGateway
     if (!signature.valid) {
       const refused = mode === "enforce";
       this.logger.warn(
-        "Media Stream handshake signature %s (mode=%s)%s",
-        signature.reason,
-        mode,
-        refused ? ", refused" : "",
+        `Media Stream handshake signature ${signature.reason} (mode=${mode})${refused ? ", refused" : ""}`,
       );
       this.analytics.capture(null, "backend_media_stream_auth", {
         stage: "handshake",
@@ -150,12 +147,7 @@ export class MediaGateway
         });
         if (!pass) {
           this.logger.warn(
-            "Media Stream %s failed checks (signature=%s call=%s, mode=%s)%s",
-            streamSid,
-            conn.signature.valid ? "ok" : conn.signature.reason,
-            call.reason,
-            mode,
-            refused ? ", dropped" : "",
+            `Media Stream ${streamSid} failed checks (signature=${conn.signature.valid ? "ok" : conn.signature.reason} call=${call.reason}, mode=${mode})${refused ? ", dropped" : ""}`,
           );
         }
         if (refused) {
@@ -181,16 +173,14 @@ export class MediaGateway
 
       switch (msg.event) {
         case "connected":
-          this.logger.log("Stream protocol: %s", msg.protocol);
+          this.logger.log(`Stream protocol: ${msg.protocol}`);
           break;
 
         case "start": {
           const { streamSid, callSid, tracks, customParameters } = msg.start;
           if (conn.streamSid !== null) {
             this.logger.warn(
-              "Second start frame on one socket ignored: %s (bound to %s)",
-              streamSid,
-              conn.streamSid,
+              `Second start frame on one socket ignored: ${streamSid} (bound to ${conn.streamSid})`,
             );
             break;
           }
@@ -226,10 +216,7 @@ export class MediaGateway
           );
 
           this.logger.log(
-            "Stream started: sid=%s call=%s tracks=%s",
-            streamSid,
-            callSid,
-            track,
+            `Stream started: sid=${streamSid} call=${callSid} tracks=${track}`,
           );
 
           // Telemetry: what tracks did Twilio actually fork? `track` is the
@@ -267,12 +254,11 @@ export class MediaGateway
           const streamSid = msg.streamSid;
           if (streamSid !== conn.streamSid) {
             this.logger.warn(
-              "Stop for a stream this socket does not carry ignored: %s",
-              streamSid,
+              `Stop for a stream this socket does not carry ignored: ${streamSid}`,
             );
             break;
           }
-          this.logger.log("Stream stopped: sid=%s", streamSid);
+          this.logger.log(`Stream stopped: sid=${streamSid}`);
           // Wait for the call check: a stop can arrive before it finishes.
           if (conn.allowed && !(await conn.allowed)) break;
 
@@ -393,10 +379,10 @@ export class MediaGateway
         }
 
         default:
-          this.logger.debug("Unhandled stream event: %s", msg.event);
+          this.logger.debug(`Unhandled stream event: ${msg.event}`);
       }
     } catch (err) {
-      this.logger.error("Error processing media stream message: %s", err);
+      this.logger.error(`Error processing media stream message: ${err}`);
     }
   }
 

@@ -75,7 +75,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         "Kafka consumer started (topics=payment.completed, subscription.cancelled, user.deleted)",
       );
     } catch (err) {
-      this.logger.error("Kafka consumer failed to start: %s", err);
+      this.logger.error(`Kafka consumer failed to start: ${err}`);
     }
   }
 
@@ -94,7 +94,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
 
       const event = JSON.parse(value);
       const eventType = event.event_type || event.eventType || topic;
-      this.logger.log("Received event: %s (topic=%s)", eventType, topic);
+      this.logger.log(`Received event: ${eventType} (topic=${topic})`);
 
       switch (topic) {
         case "payment.completed":
@@ -107,10 +107,10 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           await this.handleUserDeleted(event);
           break;
         default:
-          this.logger.debug("Unhandled topic: %s", topic);
+          this.logger.debug(`Unhandled topic: ${topic}`);
       }
     } catch (err) {
-      this.logger.error("Error processing Kafka message: %s", err);
+      this.logger.error(`Error processing Kafka message: ${err}`);
     }
   }
 
@@ -136,8 +136,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     // and purged its rows, and a new number was assigned to a deleted user.
     if (!(await this.userExists(userId))) {
       this.logger.warn(
-        "payment.completed for user %s, who no longer exists: no number assigned",
-        userId,
+        `payment.completed for user ${userId}, who no longer exists: no number assigned`,
       );
       this.analytics.capture(userId, "backend_number_provision_skipped", {
         reason: "user_deleted",
@@ -153,9 +152,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         creatorName,
       );
       this.logger.log(
-        "Number %s provisioned for user %s after payment",
-        phoneNumber,
-        userId,
+        `Number ${phoneNumber} provisioned for user ${userId} after payment`,
       );
       this.analytics.capture(userId, "backend_number_provisioned", {
         phone_number: phoneNumber,
@@ -164,9 +161,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.logger.error(
-        "Failed to provision number for user %s: %s",
-        userId,
-        reason,
+        `Failed to provision number for user ${userId}: ${reason}`,
       );
       this.analytics.capture(userId, "backend_number_provision_failed", {
         reason,
@@ -176,9 +171,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         await this.numberProvisioning.publishProvisioningFailed(userId, reason);
       } catch (kafkaErr) {
         this.logger.warn(
-          "Failed to publish number.provisioning.failed for user %s: %s",
-          userId,
-          kafkaErr,
+          `Failed to publish number.provisioning.failed for user ${userId}: ${kafkaErr}`,
         );
       }
     }
@@ -321,16 +314,12 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.numberProvisioning.releaseNumber(userId);
-      this.logger.log("Number released for user %s after cancellation", userId);
+      this.logger.log(`Number released for user ${userId} after cancellation`);
       this.analytics.capture(userId, "backend_number_released", {
         reason: "subscription_cancelled",
       });
     } catch (err) {
-      this.logger.error(
-        "Failed to release number for user %s: %s",
-        userId,
-        err,
-      );
+      this.logger.error(`Failed to release number for user ${userId}: ${err}`);
     }
   }
 }

@@ -151,9 +151,7 @@ export class UsersClientService {
       return deactivated;
     } catch (err) {
       this.logger.warn(
-        "deactivated lookup failed for userId=%s: %s",
-        userId,
-        err instanceof Error ? err.message : String(err),
+        `deactivated lookup failed for userId=${userId}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     } finally {
@@ -177,9 +175,7 @@ export class UsersClientService {
       if (res.status === 404) return null;
       if (!res.ok) {
         this.logger.warn(
-          "linked-account-ids lookup non-OK for userId=%s: %d",
-          userId,
-          res.status,
+          `linked-account-ids lookup non-OK for userId=${userId}: ${res.status}`,
         );
         return null;
       }
@@ -187,9 +183,7 @@ export class UsersClientService {
       return this.extractLinkedIds(payload);
     } catch (err) {
       this.logger.warn(
-        "linked-account-ids lookup failed for userId=%s: %s",
-        userId,
-        err instanceof Error ? err.message : String(err),
+        `linked-account-ids lookup failed for userId=${userId}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     } finally {
@@ -245,9 +239,7 @@ export class UsersClientService {
       return this.extractPushTokens(payload);
     } catch (err) {
       this.logger.warn(
-        "push-tokens lookup failed for userId=%s: %s",
-        userId,
-        err instanceof Error ? err.message : String(err),
+        `push-tokens lookup failed for userId=${userId}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return [];
     } finally {
@@ -295,9 +287,7 @@ export class UsersClientService {
       if (res.status === 404) return null;
       if (!res.ok) {
         this.logger.warn(
-          "user lookup non-OK for userId=%s: %d",
-          userId,
-          res.status,
+          `user lookup non-OK for userId=${userId}: ${res.status}`,
         );
         return null;
       }
@@ -306,9 +296,7 @@ export class UsersClientService {
       return this.extractUsername(payload);
     } catch (err) {
       this.logger.warn(
-        "user lookup failed for userId=%s: %s",
-        userId,
-        err instanceof Error ? err.message : String(err),
+        `user lookup failed for userId=${userId}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     } finally {

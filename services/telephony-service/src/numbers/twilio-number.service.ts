@@ -77,7 +77,7 @@ export class TwilioNumberService {
     voiceUrl: string,
     statusCallbackUrl: string,
   ): Promise<ProvisionResult> {
-    this.logger.log("Provisioning number: %s", phoneNumber);
+    this.logger.log(`Provisioning number: ${phoneNumber}`);
 
     const incoming = await this.withRetry(
       () =>
@@ -92,9 +92,7 @@ export class TwilioNumberService {
     );
 
     this.logger.log(
-      "Number provisioned: sid=%s number=%s",
-      incoming.sid,
-      incoming.phoneNumber,
+      `Number provisioned: sid=${incoming.sid} number=${incoming.phoneNumber}`,
     );
 
     return {
@@ -106,9 +104,9 @@ export class TwilioNumberService {
 
   /** Release (delete) a provisioned phone number from the Twilio account. */
   async release(twilioNumberSid: string): Promise<void> {
-    this.logger.log("Releasing number: sid=%s", twilioNumberSid);
+    this.logger.log(`Releasing number: sid=${twilioNumberSid}`);
     await this.twilioClient.incomingPhoneNumbers(twilioNumberSid).remove();
-    this.logger.log("Number released: sid=%s", twilioNumberSid);
+    this.logger.log(`Number released: sid=${twilioNumberSid}`);
   }
 
   /** Update the voice webhook URL for an existing number. */
@@ -119,7 +117,7 @@ export class TwilioNumberService {
     await this.twilioClient
       .incomingPhoneNumbers(twilioNumberSid)
       .update({ voiceUrl, voiceMethod: "POST" });
-    this.logger.log("Webhook updated for sid=%s", twilioNumberSid);
+    this.logger.log(`Webhook updated for sid=${twilioNumberSid}`);
   }
 
   /**
@@ -140,12 +138,7 @@ export class TwilioNumberService {
         }
         const delayMs = Math.pow(2, attempt - 1) * 1000;
         this.logger.warn(
-          "%s failed (attempt %d/%d), retrying in %dms: %s",
-          label,
-          attempt,
-          maxAttempts,
-          delayMs,
-          err,
+          `${label} failed (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms: ${err}`,
         );
         await this.sleep(delayMs);
       }

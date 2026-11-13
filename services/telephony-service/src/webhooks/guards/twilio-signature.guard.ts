@@ -32,7 +32,7 @@ export class TwilioSignatureGuard implements CanActivate {
     const isValid = validateRequest(authToken, signature, url, request.body || {});
 
     if (!isValid) {
-      this.logger.warn('Invalid Twilio signature for URL: %s', url);
+      this.logger.warn(`Invalid Twilio signature for URL: ${url}`);
     }
 
     return isValid;

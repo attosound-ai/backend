@@ -47,7 +47,7 @@ export class WebhooksController {
     const to = body.To;
     const callerName = body.CallerName || "";
 
-    this.logger.log("Incoming call: sid=%s from=%s to=%s", callSid, from, to);
+    this.logger.log(`Incoming call: sid=${callSid} from=${from} to=${to}`);
 
     // Resolve which user owns this phone number
     const assignment = await this.callsService.resolveUserByPhoneNumber(to);
@@ -55,7 +55,7 @@ export class WebhooksController {
     const response = new TwiML.VoiceResponse();
 
     if (!assignment) {
-      this.logger.warn("No assignment found for number: %s", to);
+      this.logger.warn(`No assignment found for number: ${to}`);
       this.analytics.capture(null, "backend_call_rejected_unassigned", {
         call_sid: callSid,
         from,
@@ -72,9 +72,7 @@ export class WebhooksController {
     // keeps it, but nobody is signed in, so the call does not ring.
     if (await this.usersClient.isOwnerDeactivated(String(assignment.userId))) {
       this.logger.warn(
-        "Bridge owner %s is pending deletion; rejecting call %s",
-        assignment.userId,
-        callSid,
+        `Bridge owner ${assignment.userId} is pending deletion; rejecting call ${callSid}`,
       );
       this.analytics.capture(null, "backend_call_rejected_deactivated", {
         call_sid: callSid,
@@ -173,10 +171,7 @@ export class WebhooksController {
       }
     } catch (err) {
       this.logger.warn(
-        "Bridge owner @username lookup failed (sid=%s to=%s): %s",
-        callSid,
-        to,
-        err instanceof Error ? err.message : String(err),
+        `Bridge owner @username lookup failed (sid=${callSid} to=${to}): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 
@@ -209,11 +204,7 @@ export class WebhooksController {
     }
 
     this.logger.log(
-      "Routing call %s fan-out to %d clients (ids=%s) target=%s",
-      callSid,
-      targets.length,
-      targets.join(","),
-      assignment.userId,
+      `Routing call ${callSid} fan-out to ${targets.length} clients (ids=${targets.join(",")}) target=${assignment.userId}`,
     );
 
     this.analytics.capture(assignment.userId, "backend_call_incoming", {
@@ -259,11 +250,7 @@ export class WebhooksController {
       from?.replace("client:", "").replace("user-", "") || "";
 
     this.logger.log(
-      "Outgoing call: sid=%s from=%s to=%s type=%s",
-      callSid,
-      from,
-      to,
-      recipientType,
+      `Outgoing call: sid=${callSid} from=${from} to=${to} type=${recipientType}`,
     );
 
     const response = new TwiML.VoiceResponse();
@@ -319,7 +306,7 @@ export class WebhooksController {
         metadata: { recipientUserId, recipientType },
       })
       .catch((err) =>
-        this.logger.warn("Failed to create outgoing call record: %s", err),
+        this.logger.warn(`Failed to create outgoing call record: ${err}`),
       );
 
     if (recipientUserId && recipientType === "client") {
@@ -333,7 +320,7 @@ export class WebhooksController {
           metadata: { callerUserId, recipientType },
         })
         .catch((err) =>
-          this.logger.warn("Failed to create recipient call record: %s", err),
+          this.logger.warn(`Failed to create recipient call record: ${err}`),
         );
     }
 
@@ -363,7 +350,7 @@ export class WebhooksController {
       ? parseInt(body.CallDuration, 10)
       : undefined;
 
-    this.logger.log("Status callback: sid=%s status=%s", callSid, status);
+    this.logger.log(`Status callback: sid=${callSid} status=${status}`);
 
     await this.callsService.updateCallStatus(callSid, status, duration);
     return { ok: true };
@@ -385,10 +372,7 @@ export class WebhooksController {
     if (!parentSid || !isDecline(status)) return { ok: true };
     const canceled = await this.callsService.cancelRingingSiblings(parentSid, legSid);
     this.logger.log(
-      "Leg declined sid=%s parent=%s canceled siblings=%s",
-      legSid,
-      parentSid,
-      canceled.join(",") || "none",
+      `Leg declined sid=${legSid} parent=${parentSid} canceled siblings=${canceled.join(",") || "none"}`,
     );
     this.analytics.capture(body.To?.replace("client:user-", "") || "unknown", "backend_call_declined_siblings_canceled", {
       call_sid: parentSid,
@@ -415,10 +399,7 @@ export class WebhooksController {
       : undefined;
 
     this.logger.log(
-      "Dial status: sid=%s dialStatus=%s duration=%s",
-      callSid,
-      dialStatus,
-      duration,
+      `Dial status: sid=${callSid} dialStatus=${dialStatus} duration=${duration}`,
     );
 
     // Map Dial status to call status

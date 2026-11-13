@@ -53,9 +53,7 @@ export class CallsService {
       children = list.map((c) => ({ sid: c.sid, status: String(c.status) }));
     } catch (err) {
       this.logger.warn(
-        "Sibling lookup failed parent=%s: %s",
-        parentCallSid,
-        err instanceof Error ? err.message : String(err),
+        `Sibling lookup failed parent=${parentCallSid}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return [];
     }
@@ -66,9 +64,7 @@ export class CallsService {
         canceled.push(sid);
       } catch (err) {
         this.logger.warn(
-          "Sibling cancel failed sid=%s: %s",
-          sid,
-          err instanceof Error ? err.message : String(err),
+          `Sibling cancel failed sid=${sid}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
@@ -134,11 +130,7 @@ export class CallsService {
       errors: errors.length ? errors : null,
     });
     this.logger.log(
-      "Forced hangup call=%s by user %s verified=%s legs=%j",
-      callSid,
-      userId,
-      verified,
-      legs,
+      `Forced hangup call=${callSid} by user ${userId} verified=${verified} legs=${JSON.stringify(legs)}`,
     );
     return { verified, legs };
   }
@@ -169,11 +161,7 @@ export class CallsService {
     });
     const saved = await this.callRepo.save(call);
     this.logger.log(
-      "Call created: sid=%s from=%s to=%s user=%s",
-      data.twilioCallSid,
-      data.fromNumber,
-      data.toNumber,
-      data.userId,
+      `Call created: sid=${data.twilioCallSid} from=${data.fromNumber} to=${data.toNumber} user=${data.userId}`,
     );
     return saved;
   }
@@ -226,7 +214,7 @@ export class CallsService {
     }
 
     const saved = await this.callRepo.save(call);
-    this.logger.log("Call %s status → %s", callSid, status);
+    this.logger.log(`Call ${callSid} status → ${status}`);
     return saved;
   }
 
@@ -309,11 +297,7 @@ export class CallsService {
       throw err;
     }
 
-    this.logger.log(
-      "Stream started: sid=%s call=%s",
-      stream.sid,
-      streamCallSid,
-    );
+    this.logger.log(`Stream started: sid=${stream.sid} call=${streamCallSid}`);
 
     // The stream was accepted by Twilio. Whether BOTH tracks actually flow is
     // confirmed later by backend_recording_started/segment from the media WS.
@@ -375,9 +359,7 @@ export class CallsService {
       const e = err as { status?: number };
       if (e?.status === 404) return no("leg_not_found");
       this.logger.warn(
-        "Stream leg lookup failed sid=%s: %s",
-        callSid,
-        err instanceof Error ? err.message : String(err),
+        `Stream leg lookup failed sid=${callSid}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return { ok: true, reason: "twilio_unreachable", twilioStatus: null };
     }
@@ -411,7 +393,7 @@ export class CallsService {
       .calls(streamCallSid)
       .streams(streamSid)
       .update({ status: "stopped" });
-    this.logger.log("Stream stopped: sid=%s call=%s", streamSid, streamCallSid);
+    this.logger.log(`Stream stopped: sid=${streamSid} call=${streamCallSid}`);
   }
 
   /** Get calls for a user. */
@@ -502,9 +484,7 @@ export class CallsService {
 
     const saved = await this.assignmentRepo.save(assignment);
     this.logger.log(
-      "Phone assignment upserted: %s → user %s",
-      data.phoneNumber,
-      data.userId,
+      `Phone assignment upserted: ${data.phoneNumber} → user ${data.userId}`,
     );
     return saved;
   }

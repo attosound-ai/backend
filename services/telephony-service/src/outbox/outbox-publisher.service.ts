@@ -69,7 +69,7 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
       await this.producer.connect();
       this.logger.log("Outbox publisher Kafka producer connected");
     } catch (err) {
-      this.logger.error("Outbox producer failed to connect: %s", err);
+      this.logger.error(`Outbox producer failed to connect: ${err}`);
     }
     this.isRunning = true;
     void this.scheduleNextTick();
@@ -125,7 +125,7 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
         return rows;
       });
     } catch (err) {
-      this.logger.error("Outbox claim failed: %s", err);
+      this.logger.error(`Outbox claim failed: ${err}`);
       return;
     }
 
@@ -138,7 +138,7 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     if (now - this.lastCleanupAt > 60 * 60 * 1000) {
       this.lastCleanupAt = now;
       await this.cleanupOldPublished().catch((err) =>
-        this.logger.warn("Outbox cleanup failed: %s", err),
+        this.logger.warn(`Outbox cleanup failed: ${err}`),
       );
     }
   }
@@ -172,21 +172,14 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
         lastError: null,
       });
 
-      this.logger.debug(
-        "Outbox row %s published to %s",
-        row.id,
-        row.eventType,
-      );
+      this.logger.debug(`Outbox row ${row.id} published to ${row.eventType}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await this.outboxRepo
         .update(row.id, { lastError: msg })
         .catch(() => undefined);
       this.logger.warn(
-        "Outbox publish failed for %s (attempt %d): %s",
-        row.id,
-        row.attempts,
-        msg,
+        `Outbox publish failed for ${row.id} (attempt ${row.attempts}): ${msg}`,
       );
       // Row stays unpublished; next tick picks it up. Attempts grows so an
       // operator can spot poison events with `WHERE attempts > 10`.
@@ -204,7 +197,7 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
       .andWhere("publishedAt < :cutoff", { cutoff })
       .execute();
     if (result.affected && result.affected > 0) {
-      this.logger.log("Outbox cleanup deleted %d old rows", result.affected);
+      this.logger.log(`Outbox cleanup deleted ${result.affected} old rows`);
     }
 
     // Also surface poison events that have failed many times.
@@ -213,8 +206,7 @@ export class OutboxPublisherService implements OnModuleInit, OnModuleDestroy {
     });
     if (stuck > 0) {
       this.logger.warn(
-        "Outbox lag: %d events unpublished for >5min (investigate Kafka or poison events)",
-        stuck,
+        `Outbox lag: ${stuck} events unpublished for >5min (investigate Kafka or poison events)`,
       );
     }
   }

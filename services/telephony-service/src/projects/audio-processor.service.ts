@@ -136,9 +136,7 @@ export class AudioProcessorService {
       return info;
     } catch (error) {
       this.logger.debug(
-        "No se pudo leer la cabecera del segmento %s: %s",
-        segment.id,
-        error,
+        `No se pudo leer la cabecera del segmento ${segment.id}: ${error}`,
       );
       return null;
     }
@@ -179,10 +177,7 @@ export class AudioProcessorService {
       const pedidos = rango.end - rango.start + 1;
       if (buf.length > pedidos) {
         this.logger.warn(
-          "El almacenamiento no respetó el rango en el segmento %s (%d bytes pedidos, %d recibidos)",
-          segment.id,
-          pedidos,
-          buf.length,
+          `El almacenamiento no respetó el rango en el segmento ${segment.id} (${pedidos} bytes pedidos, ${buf.length} recibidos)`,
         );
         return null;
       }
@@ -192,9 +187,7 @@ export class AudioProcessorService {
       return picos.length > 0 ? picos : null;
     } catch (error) {
       this.logger.debug(
-        "Lectura por rango fallida en el segmento %s: %s",
-        segment.id,
-        error,
+        `Lectura por rango fallida en el segmento ${segment.id}: ${error}`,
       );
       return null;
     }
@@ -386,9 +379,7 @@ export class AudioProcessorService {
       return amplitudes;
     } catch (error) {
       this.logger.warn(
-        "Failed to generate waveform for segment %s: %s",
-        segmentId,
-        error,
+        `Failed to generate waveform for segment ${segmentId}: ${error}`,
       );
       // Return mock data as fallback
       return Array.from(
@@ -772,7 +763,7 @@ export class AudioProcessorService {
         coverPath = join(tmpdir(), `cover-${randomUUID()}.${ext}`);
         await fs.writeFile(coverPath, cover);
       } catch (err) {
-        this.logger.warn("Cover download failed, exporting without it: %s", err);
+        this.logger.warn(`Cover download failed, exporting without it: ${err}`);
         coverPath = null;
       }
     }
@@ -934,11 +925,7 @@ export class AudioProcessorService {
         throw new NotFoundException("No valid clips to export");
       }
       this.logger.log(
-        "Export format: project=%s rate=%d channels=%d clips=%d",
-        projectId,
-        target.sampleRate,
-        target.channels,
-        lanesPlaced.flat().length,
+        `Export format: project=${projectId} rate=${target.sampleRate} channels=${target.channels} clips=${lanesPlaced.flat().length}`,
       );
 
       // Mix lanes together (or just use single lane output)
@@ -965,8 +952,7 @@ export class AudioProcessorService {
         finalOutput = normalizedOutput;
       } catch (err) {
         this.logger.warn(
-          "Loudness normalization failed, using un-normalized mix: %s",
-          err,
+          `Loudness normalization failed, using un-normalized mix: ${err}`,
         );
       }
 
@@ -1008,10 +994,7 @@ export class AudioProcessorService {
       );
 
       this.logger.log(
-        "Project exported: project=%s lanes=%d size=%d",
-        projectId,
-        laneFiles.length,
-        outputBuffer.length,
+        `Project exported: project=${projectId} lanes=${laneFiles.length} size=${outputBuffer.length}`,
       );
 
       return {

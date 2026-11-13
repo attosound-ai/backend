@@ -120,8 +120,7 @@ export class PushService {
 
       if (messages.length === 0) {
         this.logger.debug(
-          "No active push tokens for missed-call recipients (sid=%s)",
-          callSid,
+          `No active push tokens for missed-call recipients (sid=${callSid})`,
         );
         this.analytics.capture(recipientUserId, "backend_missed_call_push", {
           call_sid: callSid,
@@ -147,26 +146,20 @@ export class PushService {
             ) {
               deviceNotRegistered += 1;
               this.logger.warn(
-                "Missed-call push DeviceNotRegistered (sid=%s) — token should be deactivated",
-                callSid,
+                `Missed-call push DeviceNotRegistered (sid=${callSid}) — token should be deactivated`,
               );
             }
           }
         } catch (err) {
           chunkErrors += 1;
           this.logger.warn(
-            "Missed-call push chunk failed (sid=%s): %s",
-            callSid,
-            err instanceof Error ? err.message : String(err),
+            `Missed-call push chunk failed (sid=${callSid}): ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
 
       this.logger.log(
-        "Sent missed-call push to %d device(s) across %d account(s) for call %s",
-        messages.length,
-        userIds.size,
-        callSid,
+        `Sent missed-call push to ${messages.length} device(s) across ${userIds.size} account(s) for call ${callSid}`,
       );
 
       this.analytics.capture(recipientUserId, "backend_missed_call_push", {
@@ -185,9 +178,7 @@ export class PushService {
     } catch (err) {
       // Outer catch is paranoia — every internal step already swallows.
       this.logger.error(
-        "sendMissedCallPush failed unexpectedly (sid=%s): %s",
-        callSid,
-        err instanceof Error ? err.message : String(err),
+        `sendMissedCallPush failed unexpectedly (sid=${callSid}): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

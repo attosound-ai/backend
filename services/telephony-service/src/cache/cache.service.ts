@@ -27,7 +27,7 @@ export class CacheService implements OnModuleInit, OnModuleDestroy {
 
     this.client.on("error", (err) => {
       this.connected = false;
-      this.logger.warn("Redis error: %s", err.message);
+      this.logger.warn(`Redis error: ${err.message}`);
     });
 
     try {

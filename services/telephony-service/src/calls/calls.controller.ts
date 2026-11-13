@@ -55,7 +55,7 @@ export class CallsController {
   ) {
     const uid = this.resolveUserId(userId, authHeader);
     const result = await this.callsService.startStream(callSid, uid);
-    this.logger.log("Stream started for call %s by user %s", callSid, uid);
+    this.logger.log(`Stream started for call ${callSid} by user ${uid}`);
     return { success: true, data: result };
   }
 
@@ -69,7 +69,7 @@ export class CallsController {
   ) {
     const uid = this.resolveUserId(userId, authHeader);
     await this.callsService.stopStream(callSid, uid, streamSid);
-    this.logger.log("Stream stopped for call %s by user %s", callSid, uid);
+    this.logger.log(`Stream stopped for call ${callSid} by user ${uid}`);
     return { success: true };
   }
 

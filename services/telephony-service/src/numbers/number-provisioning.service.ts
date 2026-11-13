@@ -50,9 +50,7 @@ export class NumberProvisioningService {
     });
     if (existing) {
       this.logger.log(
-        "User %s already has number %s",
-        userId,
-        existing.phoneNumber,
+        `User ${userId} already has number ${existing.phoneNumber}`,
       );
       await this.dataSource.transaction(async (manager) => {
         await this.outbox.enqueue(
@@ -85,9 +83,7 @@ export class NumberProvisioningService {
 
       if (provisioned) {
         this.logger.log(
-          "Reusing pooled number %s for user %s",
-          provisioned.phoneNumber,
-          userId,
+          `Reusing pooled number ${provisioned.phoneNumber} for user ${userId}`,
         );
       } else {
         // No numbers in pool — purchase a new one from Twilio
@@ -132,10 +128,7 @@ export class NumberProvisioningService {
       await queryRunner.commitTransaction();
 
       this.logger.log(
-        "Number %s assigned to user %s (sub=%s)",
-        provisioned.phoneNumber,
-        userId,
-        subscriptionId,
+        `Number ${provisioned.phoneNumber} assigned to user ${userId} (sub=${subscriptionId})`,
       );
 
       return provisioned.phoneNumber;
@@ -157,7 +150,7 @@ export class NumberProvisioningService {
     });
 
     if (!provisioned) {
-      this.logger.warn("No assigned number found for user %s", userId);
+      this.logger.warn(`No assigned number found for user ${userId}`);
       return;
     }
 
@@ -189,9 +182,7 @@ export class NumberProvisioningService {
     });
 
     this.logger.log(
-      "Number %s released from user %s (returned to pool)",
-      phoneNumber,
-      userId,
+      `Number ${phoneNumber} released from user ${userId} (returned to pool)`,
     );
   }
 
@@ -235,7 +226,7 @@ export class NumberProvisioningService {
       where: { userId, status: "assigned" },
     });
     if (held.length === 0) {
-      this.logger.log("Deleted user %s held no number", userId);
+      this.logger.log(`Deleted user ${userId} held no number`);
       return [];
     }
 
@@ -262,9 +253,7 @@ export class NumberProvisioningService {
           );
         });
         this.logger.warn(
-          "Protected number %s kept in Twilio (deleted user %s held it)",
-          phoneNumber,
-          userId,
+          `Protected number ${phoneNumber} kept in Twilio (deleted user ${userId} held it)`,
         );
         released.push(phoneNumber);
         continue;
@@ -291,9 +280,7 @@ export class NumberProvisioningService {
       });
 
       this.logger.log(
-        "Number %s deleted from Twilio for deleted user %s",
-        phoneNumber,
-        userId,
+        `Number ${phoneNumber} deleted from Twilio for deleted user ${userId}`,
       );
       released.push(phoneNumber);
     }
@@ -311,7 +298,7 @@ export class NumberProvisioningService {
       { status: "releasing", releasedAt: new Date() },
     );
     await this.numberRepo.delete({ twilioNumberSid });
-    this.logger.log("Number deleted from Twilio: sid=%s", twilioNumberSid);
+    this.logger.log(`Number deleted from Twilio: sid=${twilioNumberSid}`);
   }
 
   /** Publish a number.provisioning.failed event so downstream services can react. */

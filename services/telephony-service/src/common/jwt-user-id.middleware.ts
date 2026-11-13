@@ -101,8 +101,7 @@ export class JwtUserIdMiddleware implements NestMiddleware {
       // composable with public endpoints that simply tolerate an absent
       // user.
       this.logger.warn(
-        "JWT verification failed (%s) — dropping X-User-ID",
-        err instanceof Error ? err.message : String(err),
+        `JWT verification failed (${err instanceof Error ? err.message : String(err)}) — dropping X-User-ID`,
       );
       delete req.headers["x-user-id"];
       // An expired token the controllers would still honour (VoIP grace):
@@ -112,16 +111,14 @@ export class JwtUserIdMiddleware implements NestMiddleware {
         const verdict = await JwtUserIdMiddleware.sessions.check(token);
         if (verdict === "closed") {
           this.logger.warn(
-            "Expired token of a closed session refused (%s)",
-            path,
+            `Expired token of a closed session refused (${path})`,
           );
           res.status(401).json({ statusCode: 401, message: "Session closed" });
           return;
         }
         if (verdict === "unknown") {
           this.logger.warn(
-            "Session check unavailable; expired token kept under the grace (%s)",
-            path,
+            `Session check unavailable; expired token kept under the grace (${path})`,
           );
         }
       }

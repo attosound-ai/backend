@@ -64,9 +64,7 @@ export class MediaService {
     });
 
     this.logger.log(
-      'Capture session started: stream=%s call=%s',
-      streamSid,
-      callSid,
+      `Capture session started: stream=${streamSid} call=${callSid}`,
     );
   }
 
@@ -126,7 +124,7 @@ export class MediaService {
   } | null> {
     const session = this.sessions.get(streamSid);
     if (!session) {
-      this.logger.warn('No session found for stream=%s', streamSid);
+      this.logger.warn(`No session found for stream=${streamSid}`);
       return null;
     }
 
@@ -135,7 +133,7 @@ export class MediaService {
     const hasInbound = session.inboundChunks.length > 0;
     const hasOutbound = session.outboundChunks.length > 0;
     if (!hasInbound && !hasOutbound) {
-      this.logger.warn('Empty session for stream=%s — skipping', streamSid);
+      this.logger.warn(`Empty session for stream=${streamSid} — skipping`);
       return null;
     }
 
@@ -219,10 +217,7 @@ export class MediaService {
         },
       );
       this.logger.error(
-        'Segment upload failed for stream=%s key=%s: %s',
-        streamSid,
-        storageKey,
-        e?.message ?? String(err),
+        `Segment upload failed for stream=${streamSid} key=${storageKey}: ${e?.message ?? String(err)}`,
       );
       return null;
     }
@@ -237,11 +232,7 @@ export class MediaService {
     });
 
     this.logger.log(
-      'Segment saved: stream=%s key=%s duration=%dms size=%d',
-      streamSid,
-      storageKey,
-      durationMs,
-      size,
+      `Segment saved: stream=${streamSid} key=${storageKey} duration=${durationMs}ms size=${size}`,
     );
 
     return {
