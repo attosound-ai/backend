@@ -2,9 +2,9 @@ defmodule ChatService.KafkaConsumer do
   @moduledoc """
   GenServer-based Kafka consumer using brod.
 
-  Subscribes to `interaction.created`, `interaction.removed`, and
-  `notification.trigger` topics, then broadcasts events via Phoenix PubSub
-  to `post:<content_id>` and `user:<recipient_id>` channels.
+  Subscribes to `interaction.created`, `interaction.removed`,
+  `content.updated` and `notification.trigger` topics, then broadcasts events
+  via Phoenix PubSub to `post:<content_id>` and `user:<recipient_id>` channels.
   """
 
   use GenServer
@@ -13,7 +13,13 @@ defmodule ChatService.KafkaConsumer do
 
   @client_id :chat_service_kafka_consumer
   @group_id "chat-social-broadcast"
-  @topics ["interaction.created", "interaction.removed", "notification.trigger", "user.deleted"]
+  @topics [
+    "interaction.created",
+    "interaction.removed",
+    "content.updated",
+    "notification.trigger",
+    "user.deleted"
+  ]
 
   # Public API
 
@@ -142,6 +148,18 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
               })
             end
 
+          "content.updated" ->
+            # An edit (caption, tags or the cover of an audio post, Nov 2026)
+            # reaches every phone that shows the post, so nobody has to pull
+            # to refresh to see the new cover.
+            case post_updated_payload(payload) do
+              {:ok, content_id, out} ->
+                ChatServiceWeb.Endpoint.broadcast("post:#{content_id}", "post_updated", out)
+
+              :skip ->
+                nil
+            end
+
           "notification.trigger" ->
             recipient_id = payload["recipient_id"]
             type = payload["type"]
@@ -174,6 +192,27 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
 
     {:ok, :ack, state}
   end
+
+  # What `post_updated` carries: only the post's public fields, as
+  # content-service sent them. The tagged ids of the edit stay out (they are
+  # for notifications). Public so it can be tested without Kafka.
+  def post_updated_payload(payload) when is_map(payload) do
+    data = payload["data"] || payload
+    content_id = data["content_id"]
+
+    if is_binary(content_id) and content_id != "" do
+      out =
+        data
+        |> Map.take(["content_id", "content_type", "text_content", "metadata", "updated_at"])
+        |> Map.reject(fn {_k, v} -> is_nil(v) end)
+
+      {:ok, content_id, out}
+    else
+      :skip
+    end
+  end
+
+  def post_updated_payload(_), do: :skip
 
   # --- user.deleted cascade with retry + dead-letter ---
 
