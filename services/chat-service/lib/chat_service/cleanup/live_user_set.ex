@@ -35,6 +35,26 @@ defmodule ChatService.Cleanup.LiveUserSet do
     end
   end
 
+  @doc """
+  Ids of the accounts in their deletion grace (`users.deactivated_at` set).
+  Used once at boot by `ChatService.Accounts.Deactivated`.
+  """
+  @spec load_deactivated!(String.t()) :: [String.t()]
+  def load_deactivated!(url) do
+    {:ok, conn} = Postgrex.start_link(connection_opts(url))
+
+    try do
+      %Postgrex.Result{rows: rows} =
+        Postgrex.query!(conn, "SELECT id::text FROM users WHERE deactivated_at IS NOT NULL", [],
+          timeout: 15_000
+        )
+
+      Enum.map(rows, fn [id] -> id end)
+    after
+      GenServer.stop(conn)
+    end
+  end
+
   defp connection_opts(url) do
     uri = URI.parse(url)
 

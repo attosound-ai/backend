@@ -2,6 +2,7 @@ defmodule ChatServiceWeb.UserSocket do
   use Phoenix.Socket
 
   alias ChatService.Auth.JWT
+  alias ChatServiceWeb.TokenExpiry
 
   require Logger
 
@@ -19,9 +20,10 @@ defmodule ChatServiceWeb.UserSocket do
   """
   @impl true
   def connect(%{"token" => token}, socket, _connect_info) do
-    case JWT.verify_user_token(token) do
-      {:ok, user_id} ->
-        {:ok, assign(socket, :user_id, user_id)}
+    case JWT.verify_user_token_with_expiry(token) do
+      {:ok, user_id, exp} ->
+        # The socket ends with its token (ChatServiceWeb.TokenExpiry).
+        {:ok, socket |> assign(:user_id, user_id) |> TokenExpiry.assign_token(exp)}
 
       {:error, reason} ->
         Logger.warning("WebSocket auth failed: #{inspect(reason)}")
@@ -35,5 +37,5 @@ defmodule ChatServiceWeb.UserSocket do
   end
 
   @impl true
-  def id(socket), do: "user_socket:#{socket.assigns.user_id}"
+  def id(socket), do: TokenExpiry.socket_id(socket.assigns.user_id, socket.assigns.socket_ref)
 end

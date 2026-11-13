@@ -18,7 +18,9 @@ defmodule ChatService.KafkaConsumer do
     "interaction.removed",
     "content.updated",
     "notification.trigger",
-    "user.deleted"
+    "user.deleted",
+    "user.deactivated",
+    "user.reactivated"
   ]
 
   # Public API
@@ -173,10 +175,23 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
               )
             end
 
+          "user.deactivated" ->
+            data = payload["data"] || payload
+            user_ids = data["userIds"] || []
+            Logger.info("Hiding chats of accounts pending deletion: #{inspect(user_ids)}")
+            ChatService.Accounts.Deactivated.add(user_ids)
+
+          "user.reactivated" ->
+            data = payload["data"] || payload
+            user_ids = data["userIds"] || []
+            Logger.info("Showing chats of recovered accounts: #{inspect(user_ids)}")
+            ChatService.Accounts.Deactivated.remove(user_ids)
+
           "user.deleted" ->
             data = payload["data"] || payload
             user_ids = data["userIds"] || []
             Logger.info("Processing user.deleted for: #{inspect(user_ids)}")
+            ChatService.Accounts.Deactivated.remove(user_ids)
 
             # brod forces us to ACK, so a failed cascade must NOT vanish silently:
             # retry briefly, then dead-letter (topic + table + Sentry) before ACK.

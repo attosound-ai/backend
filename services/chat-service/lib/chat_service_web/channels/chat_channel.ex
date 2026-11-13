@@ -1,6 +1,8 @@
 defmodule ChatServiceWeb.ChatChannel do
   use Phoenix.Channel
 
+  alias ChatServiceWeb.TokenExpiry
+
   alias ChatService.Messages.MessageService
   alias ChatService.Conversations.ConversationService
   alias ChatService.Reactions.ReactionService
@@ -16,13 +18,21 @@ defmodule ChatServiceWeb.ChatChannel do
   """
   @impl true
   def join("chat:" <> conversation_id, _payload, socket) do
+    if TokenExpiry.expired?(socket) do
+      {:error, %{reason: "invalid_token"}}
+    else
+      join_conversation(conversation_id, socket)
+    end
+  end
+
+  defp join_conversation(conversation_id, socket) do
     user_id = socket.assigns.user_id
 
     case ConversationService.find_conversation(user_id, conversation_id) do
       {:ok, _conversation} ->
         socket = assign(socket, :conversation_id, conversation_id)
         send(self(), :after_join)
-        {:ok, %{conversation_id: conversation_id}, socket}
+        {:ok, %{conversation_id: conversation_id}, TokenExpiry.arm(socket)}
 
       {:error, :not_found} ->
         {:error, %{reason: "not_a_participant"}}
@@ -33,6 +43,11 @@ defmodule ChatServiceWeb.ChatChannel do
   end
 
   @impl true
+  def handle_info(:atto_token_expired, socket) do
+    TokenExpiry.disconnect(socket)
+    {:noreply, socket}
+  end
+
   def handle_info(:after_join, socket) do
     # Optionally load recent messages on join
     conversation_id = socket.assigns.conversation_id
@@ -122,8 +137,11 @@ defmodule ChatServiceWeb.ChatChannel do
       |> Enum.reject(fn {_k, v} -> is_nil(v) or v == "" end)
 
     with {:ok, conversation} <- ConversationService.find_conversation(user_id, conversation_id),
+         # The other side is in its 30 day deletion grace: nobody writes to it.
+         false <- ChatService.Accounts.Deactivated.deactivated?(conversation.participant_id),
          opts <- [recipient_id: conversation.participant_id] ++ reply_opts ++ extra_opts,
-         {:ok, message} <- MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
+         {:ok, message} <-
+           MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
       message_map = Message.to_map(message)
       # No broadcast here: MessageService.send_message already publishes
       # {:new_message, _} on "chat:<id>" and handle_info pushes it to every
@@ -135,6 +153,9 @@ defmodule ChatServiceWeb.ChatChannel do
       # the same way for this path and for REST.
       {:reply, {:ok, message_map}, socket}
     else
+      true ->
+        {:reply, {:error, %{reason: "recipient_unavailable"}}, socket}
+
       {:error, reason} ->
         Logger.error("Failed to send message via channel: #{inspect(reason)}")
         {:reply, {:error, %{reason: "send_failed"}}, socket}

@@ -42,7 +42,7 @@ defmodule ChatService.Application do
       end
 
     children =
-      [{Phoenix.PubSub, name: ChatService.PubSub}] ++
+      [{Phoenix.PubSub, name: ChatService.PubSub}, ChatService.Accounts.Deactivated] ++
         infra_children ++
         [ChatServiceWeb.Endpoint]
 

@@ -23,7 +23,16 @@ defmodule ChatServiceWeb.MessageController do
       |> maybe_add_limit(params)
       |> maybe_add_since(conn.assigns[:user_id], chat_id)
 
-    case MessageService.get_messages(chat_id, opts) do
+    # The other side is in its 30 day deletion grace: its messages are not
+    # served (an empty page, so an open chat screen does not error out).
+    result =
+      if other_side_hidden?(conn.assigns[:user_id], chat_id) do
+        {:ok, %{messages: [], reactions: %{}, next_cursor: nil, has_more: false}}
+      else
+        MessageService.get_messages(chat_id, opts)
+      end
+
+    case result do
       {:ok, %{messages: messages, reactions: reactions, next_cursor: next_cursor, has_more: has_more}} ->
         conn
         |> put_status(200)
@@ -164,32 +173,22 @@ defmodule ChatServiceWeb.MessageController do
         # conversation first, so this should never trip in normal flows).
         case ConversationService.find_conversation(user_id, conversation_id) do
           {:ok, conversation} ->
-            opts =
-              [
-                recipient_id: conversation.participant_id,
-                metadata: params["metadata"],
-                thread_id: blank_to_nil(params["threadId"]),
-                reply_to_id: blank_to_nil(params["replyToId"]),
-                reply_to_content: params["replyToContent"],
-                reply_to_sender: params["replyToSender"],
-                # Optional: the same send twice is stored once (ClientKey).
-                client_key: params["clientKey"] || params["client_key"]
-              ]
-              |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-
-            case MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
-              {:ok, message} ->
-                conn
-                |> put_status(201)
-                |> put_view(ChatServiceWeb.MessageView)
-                |> render("show.json", message: message)
-
-              {:error, reason} ->
-                Logger.error("Failed to send message for user #{user_id}: #{inspect(reason)}")
-
-                conn
-                |> put_status(500)
-                |> json(%{success: false, data: nil, error: "Failed to send message"})
+            if ChatService.Accounts.Deactivated.deactivated?(conversation.participant_id) do
+              # The other side is in its 30 day deletion grace: nobody can
+              # write to it, same answer as a conversation that does not exist.
+              conn
+              |> put_status(404)
+              |> json(%{success: false, data: nil, error: "Conversation not found"})
+            else
+              send_checked(
+                conn,
+                user_id,
+                conversation_id,
+                conversation,
+                content,
+                content_type,
+                params
+              )
             end
 
           {:error, :not_found} ->
@@ -206,6 +205,36 @@ defmodule ChatServiceWeb.MessageController do
             |> put_status(500)
             |> json(%{success: false, data: nil, error: "Failed to send message"})
         end
+    end
+  end
+
+  defp send_checked(conn, user_id, conversation_id, conversation, content, content_type, params) do
+    opts =
+      [
+        recipient_id: conversation.participant_id,
+        metadata: params["metadata"],
+        thread_id: blank_to_nil(params["threadId"]),
+        reply_to_id: blank_to_nil(params["replyToId"]),
+        reply_to_content: params["replyToContent"],
+        reply_to_sender: params["replyToSender"],
+        # Optional: the same send twice is stored once (ClientKey).
+        client_key: params["clientKey"] || params["client_key"]
+      ]
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+
+    case MessageService.send_message(user_id, conversation_id, content, content_type, opts) do
+      {:ok, message} ->
+        conn
+        |> put_status(201)
+        |> put_view(ChatServiceWeb.MessageView)
+        |> render("show.json", message: message)
+
+      {:error, reason} ->
+        Logger.error("Failed to send message for user #{user_id}: #{inspect(reason)}")
+
+        conn
+        |> put_status(500)
+        |> json(%{success: false, data: nil, error: "Failed to send message"})
     end
   end
 
@@ -366,6 +395,18 @@ defmodule ChatServiceWeb.MessageController do
       following: thread.following,
       last_reply_at: thread.last_reply_at && DateTime.to_iso8601(thread.last_reply_at)
     }
+  end
+
+  # True when the other participant of this chat is in its deletion grace.
+  # No Cassandra lookup at all while nobody is in grace.
+  defp other_side_hidden?(nil, _chat_id), do: false
+
+  defp other_side_hidden?(user_id, chat_id) do
+    ChatService.Accounts.Deactivated.any?() and
+      case ConversationService.find_conversation(user_id, chat_id) do
+        {:ok, %{participant_id: p}} -> ChatService.Accounts.Deactivated.deactivated?(p)
+        _ -> false
+      end
   end
 
   # A reader who deleted this chat only sees what arrived after they did.

@@ -54,6 +54,30 @@ defmodule ChatService.Auth.JWT do
 
   def verify_user_token(_), do: {:error, :missing_token}
 
+  @doc """
+  Like `verify_user_token/1`, and also returns the token's `exp` (Unix
+  seconds, or nil) so the WebSocket can close when the token ends.
+  """
+  @spec verify_user_token_with_expiry(any()) ::
+          {:ok, String.t(), integer() | nil} | {:error, atom()}
+  def verify_user_token_with_expiry(token) when is_binary(token) and byte_size(token) > 0 do
+    case verify_user_token(token) do
+      {:ok, user_id} ->
+        exp =
+          case Joken.peek_claims(token) do
+            {:ok, %{"exp" => e}} when is_integer(e) -> e
+            _ -> nil
+          end
+
+        {:ok, user_id, exp}
+
+      error ->
+        error
+    end
+  end
+
+  def verify_user_token_with_expiry(_), do: {:error, :missing_token}
+
   defp signer do
     Joken.Signer.create("HS256", secret())
   end
@@ -75,7 +99,9 @@ defmodule ChatService.Auth.JWT do
   defp extract_user_id(%{"sub" => sub}) when is_integer(sub), do: {:ok, Integer.to_string(sub)}
 
   defp extract_user_id(%{"user_id" => uid}) when is_binary(uid) and uid != "", do: {:ok, uid}
-  defp extract_user_id(%{"user_id" => uid}) when is_integer(uid), do: {:ok, Integer.to_string(uid)}
+
+  defp extract_user_id(%{"user_id" => uid}) when is_integer(uid),
+    do: {:ok, Integer.to_string(uid)}
 
   defp extract_user_id(_), do: {:error, :missing_subject}
 end

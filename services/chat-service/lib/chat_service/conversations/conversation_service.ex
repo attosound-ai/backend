@@ -33,6 +33,9 @@ defmodule ChatService.Conversations.ConversationService do
           result
           |> Enum.to_list()
           |> Enum.reject(fn row -> row["hidden"] == true end)
+          # The other side is in its 30 day deletion grace: the chat leaves
+          # the list until it recovers (nothing is deleted).
+          |> ChatService.Accounts.Deactivated.reject_hidden_participants()
           |> Enum.map(&Conversation.from_row/1)
 
         {:ok, conversations}
