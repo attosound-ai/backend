@@ -155,8 +155,13 @@ export class FeedService {
   /**
    * GET /api/v1/posts/reels - TikTok-style FYP reels feed.
    *
-   * Mixes personalised (from following) + globally trending reels,
-   * scored with a completion-weighted EdgeRank.
+   * Walks the content service's newest-first list (all types) and keeps only
+   * reels and vertical videos, so a reel is found however many images or
+   * audios were posted after it. Each page is the next `limit` reels older
+   * than `cursor`, ranked with the completion-weighted reel score.
+   *
+   * `cursor` is the created_at (ms) of the oldest reel already returned; 0 is
+   * the first page.
    */
   async getReelsFeed(
     userId: string,
@@ -169,69 +174,61 @@ export class FeedService {
     // Reels = actual reels + vertical (~9:16) videos. height/width ≥ this counts
     // as vertical; 9:16 ≈ 1.78. Landscape/square videos stay out of reels.
     const REEL_MIN_ASPECT = 1.6;
+    // Content service caps a list page at 100; bound the walk per request.
+    const SCAN_PAGE = 100;
+    const SCAN_MAX_PAGES = 10;
 
-    // Get personalised feed IDs (larger window so we have enough reels after filtering)
-    let personalIds: string[] = [];
-    try {
-      const { members } = await this.feedRepo.page(userId, cursor, limit * 5);
-      personalIds = members;
-    } catch (err) {
-      this.logger.warn(
-        `Redis reels feed read failed, using empty list: ${(err as Error).message}`,
-      );
-    }
-    if (personalIds.length === 0 && cursor === 0) {
-      const result = await this.buildFeedFromFollowing(userId, 0, limit * 5);
-      personalIds = result.contentIds;
-    }
-
-    // Trending content IDs by like count over last 7 days
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const trending = await this.prisma.interaction.groupBy({
-      by: ['contentId'],
-      where: { type: 'LIKE', createdAt: { gte: sevenDaysAgo } },
-      _count: { contentId: true },
-      orderBy: { _count: { contentId: 'desc' } },
-      take: 50,
-    });
-    const trendingIds = trending.map((t) => t.contentId);
-
-    // Deduplicate: trending first, then personal
-    const seenIds = new Set<string>();
-    const candidateIds: string[] = [];
-    for (const id of [...trendingIds, ...personalIds]) {
-      if (!seenIds.has(id)) {
-        seenIds.add(id);
-        candidateIds.push(id);
-      }
-    }
-
-    if (candidateIds.length === 0) {
-      return { posts: [], meta: { nextCursor: null, hasMore: false } };
-    }
-
-    // Fetch content and filter to reels + vertical videos.
-    const { contents } = await this.grpcClients.getContentBatch(
-      candidateIds.slice(0, limit * 5),
-    );
-    const reelContents = contents.filter((c) => {
+    type Content = Awaited<ReturnType<typeof this.grpcClients.listRecentContent>>['contents'][number];
+    const isReel = (c: Content): boolean => {
       if (c.content_type === 'reel') return true;
       if (c.content_type !== 'video') return false;
       const w = Number(c.metadata?.width);
       const h = Number(c.metadata?.height);
       // Exclude only confirmed landscape/square. Videos with unknown dimensions
-      // are kept (the client gates by aspect too) so the feed never empties if
-      // metadata is missing.
+      // are kept (the client gates by aspect too).
       if (w > 0 && h > 0 && h / w < REEL_MIN_ASPECT) return false;
       return true;
-    });
+    };
+    const tsOf = (c: Content): number => new Date(c.created_at).getTime();
 
-    if (reelContents.length === 0) {
-      return { posts: [], meta: { nextCursor: null, hasMore: false } };
+    // The list is ordered by _id; start just past the cursor's second (2 s of
+    // margin for _id vs created_at skew) and cut exactly by created_at below.
+    let scanCursor =
+      cursor > 0
+        ? Math.floor(cursor / 1000 + 2).toString(16).padStart(8, '0') + '0'.repeat(16)
+        : '';
+    const picked: Content[] = [];
+    let exhausted = false;
+    let lastScannedTs: number | null = null;
+    for (let i = 0; i < SCAN_MAX_PAGES && picked.length <= limit; i++) {
+      const { contents, meta } = await this.grpcClients.listRecentContent(scanCursor, SCAN_PAGE);
+      for (const c of contents) {
+        const ts = tsOf(c);
+        if (cursor > 0 && !(ts < cursor)) continue;
+        lastScannedTs = ts;
+        if (isReel(c) && picked.length <= limit) picked.push(c);
+      }
+      if (!meta.has_more || !meta.next_cursor) {
+        exhausted = true;
+        break;
+      }
+      scanCursor = meta.next_cursor;
+    }
+
+    const pageContents = picked.slice(0, limit);
+    const hasMore = picked.length > limit || (!exhausted && lastScannedTs !== null);
+    const nextCursor = !hasMore
+      ? null
+      : picked.length > limit
+        ? tsOf(pageContents[pageContents.length - 1])
+        : lastScannedTs;
+
+    if (pageContents.length === 0) {
+      return { posts: [], meta: { nextCursor, hasMore } };
     }
 
     // Batch resolve authors + interactions + follows in parallel
-    const posts = await this.resolvePostsBatch(reelContents, userId);
+    const posts = await this.resolvePostsBatch(pageContents, userId);
 
     // Score with reels formula
     const followingSet = new Set(posts.filter((p) => p.isFollowingAuthor).map((p) => p.authorId));
@@ -242,13 +239,9 @@ export class FeedService {
         this.computeReelScore(a, followingSet.has(a.authorId), String(a.authorId) === reelsViewerId),
     );
 
-    const page = posts.slice(0, limit);
-    const hasMore = posts.length > limit;
-    const lastTs = page.length > 0 ? new Date(page[page.length - 1].createdAt).getTime() : null;
-
     return {
-      posts: page,
-      meta: { nextCursor: hasMore ? lastTs : null, hasMore },
+      posts,
+      meta: { nextCursor, hasMore },
     };
   }
 
