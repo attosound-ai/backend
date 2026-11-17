@@ -7,6 +7,7 @@ import type { AudioSegment } from "../entities/audio-segment.entity";
 import type { AudioStorageService } from "../media/audio-storage.service";
 import type { AudioProcessorService } from "./audio-processor.service";
 import type { AnalyticsService } from "../analytics/analytics.service";
+import type { ProjectAccessService } from "./project-access";
 
 describe("timelineSummaryFromRow", () => {
   it("a project without clips has one lane and lasts 0 ms, like the editor shows it", () => {
@@ -65,6 +66,7 @@ function serviceWith(opts: {
     {} as AudioStorageService,
     {} as AudioProcessorService,
     {} as AnalyticsService,
+    {} as ProjectAccessService,
   );
   return { service, segmentRepo, clipRepo, clipQb };
 }

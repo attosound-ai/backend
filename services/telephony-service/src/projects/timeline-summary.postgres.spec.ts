@@ -8,6 +8,7 @@ import { Call } from "../entities/call.entity";
 import type { AudioStorageService } from "../media/audio-storage.service";
 import type { AudioProcessorService } from "./audio-processor.service";
 import type { AnalyticsService } from "../analytics/analytics.service";
+import type { ProjectAccessService } from "./project-access";
 
 /**
  * The project list against a real Postgres, so the grouped SQL itself is
@@ -55,6 +56,7 @@ describeDb("project list counts against Postgres", () => {
       {} as AudioStorageService,
       {} as AudioProcessorService,
       {} as AnalyticsService,
+      {} as ProjectAccessService,
     );
   }, 60_000);
 
