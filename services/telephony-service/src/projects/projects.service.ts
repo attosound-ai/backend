@@ -15,6 +15,17 @@ import { AudioProcessorService } from "./audio-processor.service";
 import { AnalyticsService } from "../analytics/analytics.service";
 import { ProjectAccessService } from "./project-access";
 import { containerMime } from "./audio-format";
+import {
+  HIGHEST_LANE_SQL,
+  LATEST_END_SQL,
+  timelineSummaryFromRow,
+  type ClipAggregateRow,
+  type TimelineSummary,
+} from "./timeline-summary";
+
+/** A project in the list, with its counts. */
+export type ProjectListItem = Project &
+  TimelineSummary & { segmentCount: number; totalDurationMs: number };
 
 /**
  * Mirror of the app's lane mixer rules (front laneMixer.computeLaneEffectiveVolume)
@@ -85,32 +96,57 @@ export class ProjectsService {
     return saved;
   }
 
-  async getProjectsForUser(
-    userId: string,
-  ): Promise<(Project & { segmentCount: number; totalDurationMs: number })[]> {
+  /**
+   * The project list. `laneCount` and `timelineDurationMs` are what the editor
+   * shows (see timeline-summary.ts). `segmentCount` and `totalDurationMs` are
+   * the uploaded recordings and their sum, kept as they were for the app
+   * versions already published. Three queries whatever the number of
+   * projects: the projects, then one grouped query for the recordings and one
+   * for the clips.
+   */
+  async getProjectsForUser(userId: string): Promise<ProjectListItem[]> {
     const projects = await this.projectRepo.find({
       where: { userId },
       order: { updatedAt: "DESC" },
     });
+    if (projects.length === 0) return [];
 
-    const results = await Promise.all(
-      projects.map(async (project) => {
-        const segments = await this.segmentRepo.find({
-          where: { projectId: project.id },
-          select: ["id", "durationMs"],
-        });
-        return {
-          ...project,
-          segmentCount: segments.length,
-          totalDurationMs: segments.reduce(
-            (sum, s) => sum + (s.durationMs || 0),
-            0,
-          ),
-        };
-      }),
-    );
+    const ids = projects.map((p) => p.id);
+    const [segmentRows, clipRows] = await Promise.all([
+      this.segmentRepo
+        .createQueryBuilder("segment")
+        .select('segment."projectId"', "projectId")
+        .addSelect("COUNT(*)", "segmentCount")
+        .addSelect('COALESCE(SUM(segment."durationMs"), 0)', "totalDurationMs")
+        .where('segment."projectId" IN (:...ids)', { ids })
+        .groupBy('segment."projectId"')
+        .getRawMany<{
+          projectId: string;
+          segmentCount: string | number;
+          totalDurationMs: string | number | null;
+        }>(),
+      this.clipRepo
+        .createQueryBuilder("clip")
+        .select('clip."projectId"', "projectId")
+        .addSelect(HIGHEST_LANE_SQL, "highestLane")
+        .addSelect(LATEST_END_SQL, "endMs")
+        .where('clip."projectId" IN (:...ids)', { ids })
+        .groupBy('clip."projectId"')
+        .getRawMany<ClipAggregateRow>(),
+    ]);
 
-    return results;
+    const segmentsByProject = new Map(segmentRows.map((r) => [r.projectId, r]));
+    const clipsByProject = new Map(clipRows.map((r) => [r.projectId, r]));
+
+    return projects.map((project) => {
+      const segments = segmentsByProject.get(project.id);
+      return {
+        ...project,
+        segmentCount: Number(segments?.segmentCount ?? 0),
+        totalDurationMs: Number(segments?.totalDurationMs ?? 0),
+        ...timelineSummaryFromRow(clipsByProject.get(project.id)),
+      };
+    });
   }
 
   async getProjectById(

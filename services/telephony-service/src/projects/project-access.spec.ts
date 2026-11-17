@@ -62,6 +62,18 @@ class FakeRepo {
   async remove(row: Row): Promise<void> {
     this.rows = this.rows.filter((r) => r.id !== row.id);
   }
+  // The list's grouped counts (timeline-summary.ts) are tested on their own;
+  // here only who sees which project matters, so the aggregates come back empty.
+  createQueryBuilder() {
+    const qb = {
+      select: () => qb,
+      addSelect: () => qb,
+      where: () => qb,
+      groupBy: () => qb,
+      getRawMany: async () => [],
+    };
+    return qb;
+  }
 }
 
 const ID = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
