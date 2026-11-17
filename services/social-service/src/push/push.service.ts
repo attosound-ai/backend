@@ -6,6 +6,7 @@ import Expo, {
 } from "expo-server-sdk";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
 import { BadgeCalculator } from "./badge-calculator.service";
+import { pushDataFor } from "./push-deep-link";
 
 const PUSH_BODY: Record<string, (actor: string) => string> = {
   follow: (a) => `${a} followed you`,
@@ -15,33 +16,7 @@ const PUSH_BODY: Record<string, (actor: string) => string> = {
   share: (a) => `${a} shared your post`,
   message: (a) => `${a} sent you a message`,
   new_post: (a) => `${a} just posted`,
-};
-
-type DeepLinkFn = (
-  referenceId: string | null,
-  actorId: string,
-  actorUsername?: string,
-) => string | null;
-
-const DEEP_LINK: Record<string, DeepLinkFn> = {
-  follow: (_ref, actorId) => `/user/${actorId}`,
-  like: (ref) => (ref ? `/post/${ref}` : null),
-  comment: (ref) => (ref ? `/post/${ref}` : null),
-  repost: (ref) => (ref ? `/post/${ref}` : null),
-  share: (ref) => (ref ? `/post/${ref}` : null),
-  message: (ref, actorId, actorUsername) => {
-    if (!ref) return null;
-    // `participantName` here is the @username — the front uses this URL
-    // param as the chat header label. Renaming the key would require a
-    // coordinated frontend change (see chat.tsx / messages.tsx).
-    const params = new URLSearchParams({
-      conversationId: ref,
-      participantId: actorId,
-      participantName: actorUsername || "",
-    });
-    return `/chat?${params.toString()}`;
-  },
-  new_post: (ref) => (ref ? `/post/${ref}` : null),
+  mention: (a) => `${a} tagged you in a post`,
 };
 
 @Injectable()
@@ -68,6 +43,7 @@ export class PushService {
     actorUsername: string,
     referenceId?: string | null,
     customBody?: string,
+    commentId?: string | null,
   ): Promise<void> {
     try {
       if (type === "welcome") return;
@@ -95,11 +71,6 @@ export class PushService {
 
       const recipientUsername = recipient?.username;
       const body = customBody || bodyFn(safeActorUsername);
-      const url = DEEP_LINK[type]?.(
-        referenceId ?? null,
-        actorId,
-        safeActorUsername,
-      );
 
       // Computed AFTER the notification row that triggered this push has
       // been written, so the count already reflects the new event. This
@@ -116,12 +87,16 @@ export class PushService {
           title: "ATTO SOUND",
           body,
           badge,
-          data: {
-            ...(url ? { url } : {}),
-            account_id: recipientId,
-            account_username: recipientUsername || undefined,
+          data: pushDataFor({
+            type,
+            actorId,
+            actorUsername: safeActorUsername,
+            referenceId,
+            commentId,
+            recipientId,
+            recipientUsername,
             badge,
-          },
+          }),
           sound: "default" as const,
           priority: "high" as const,
           channelId: "default",
@@ -199,11 +174,6 @@ export class PushService {
       }
 
       const body = bodyFn(safeActorUsername);
-      const url = DEEP_LINK[type]?.(
-        referenceId ?? null,
-        actorId,
-        safeActorUsername,
-      );
 
       // TODO: replace per-id getPushTokens with a GetPushTokensBatch RPC
       // when the user-service supports it. Current cost: 1 gRPC roundtrip
@@ -234,12 +204,15 @@ export class PushService {
             title: "ATTO SOUND",
             body,
             badge,
-            data: {
-              ...(url ? { url } : {}),
-              account_id: recipientId,
-              account_username: recipientUsername || undefined,
+            data: pushDataFor({
+              type,
+              actorId,
+              actorUsername: safeActorUsername,
+              referenceId,
+              recipientId,
+              recipientUsername,
               badge,
-            },
+            }),
             sound: "default" as const,
             priority: "high" as const,
             channelId: "default",

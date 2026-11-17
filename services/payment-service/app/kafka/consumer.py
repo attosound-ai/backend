@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
@@ -85,7 +85,15 @@ async def _handle_user_created(data: dict) -> None:
             await session.commit()
             return
         svc = PaymentService(session)
-        await svc.create_free_subscription(user_id)
+        from app.user_lookup import UserGoneError
+
+        try:
+            await svc.create_free_subscription(user_id)
+        except UserGoneError:
+            # Created and deleted before this event was read: nothing to make.
+            await session.commit()
+            logger.info("user.created for %s arrived after the account was deleted, skipped", user_id)
+            return
         await session.commit()
         logger.info("Provisioned free subscription for new user %s", user_id)
 
@@ -180,6 +188,7 @@ async def _handle_user_deleted(data: dict) -> None:
 
     # 2. Cancel Stripe subscriptions (best-effort, never blocks DB cleanup)
     import stripe
+
     from app.config import settings as cfg
 
     stripe.api_key = cfg.stripe_secret_key
@@ -201,7 +210,10 @@ async def _handle_user_deleted(data: dict) -> None:
     # Fire-and-forget so consumer offset commit isn't blocked on it.
     from app.audit.deletion_audit import audit_user_deletion
 
-    asyncio.create_task(audit_user_deletion([str(u) for u in user_ids]))
+    # A repair pass (the audit republishing this event) is audited once more
+    # but never repaired again, so a stubborn leak cannot loop.
+    attempt = 1 if raw.get("repair") else 0
+    asyncio.create_task(audit_user_deletion([str(u) for u in user_ids], attempt=attempt))
 
 
 # ── Retry + DLQ wrapper ────────────────────────────────────────────────

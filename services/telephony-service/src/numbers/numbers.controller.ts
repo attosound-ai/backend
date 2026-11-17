@@ -10,6 +10,7 @@ import {
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
 import { PhoneNumberAssignment } from "../entities/phone-number-assignment.entity";
+import { resolveVerifiedUserId } from "../common/verified-user-id";
 
 @Controller("telephony/numbers")
 export class NumbersController {
@@ -57,20 +58,6 @@ export class NumbersController {
   }
 
   private resolveUserId(headerUserId: string, authHeader: string): string {
-    if (headerUserId) return headerUserId;
-
-    if (authHeader?.startsWith("Bearer ")) {
-      try {
-        const payload = JSON.parse(
-          Buffer.from(authHeader.slice(7).split(".")[1], "base64").toString(),
-        );
-        const uid = payload.sub || payload.user_id;
-        if (uid) return String(uid);
-      } catch {
-        // fall through
-      }
-    }
-
-    throw new UnauthorizedException("User ID not found");
+    return resolveVerifiedUserId(headerUserId, authHeader);
   }
 }

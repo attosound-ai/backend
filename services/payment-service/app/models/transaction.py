@@ -1,8 +1,10 @@
 import enum
-from datetime import datetime, timezone
-from uuid import UUID as PyUUID, uuid4
+from datetime import UTC, datetime
+from uuid import UUID as PyUUID
+from uuid import uuid4
 
-from sqlalchemy import DateTime, Enum as SAEnum, Numeric, String, func
+from sqlalchemy import DateTime, Numeric, String, func
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -63,6 +65,6 @@ class Transaction(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        onupdate=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(UTC),
         nullable=False,
     )

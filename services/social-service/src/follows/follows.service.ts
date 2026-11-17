@@ -4,7 +4,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
+import { DeactivatedUsersRepository } from "../redis/repositories/deactivated-users.repository";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountsRepository } from "../redis/repositories/counts.repository";
 import { FollowGraphRepository } from "../redis/repositories/follow-graph.repository";
@@ -24,10 +26,28 @@ export class FollowsService {
     private readonly grpcClients: GrpcClientsService,
     private readonly kafkaProducer: KafkaProducer,
     private readonly pushService: PushService,
+    // Accounts in deletion grace: left out of follower and following lists.
+    @Optional() private readonly deactivated?: DeactivatedUsersRepository,
   ) {}
 
-  async getStats(userId: string): Promise<{ followersCount: number; followingCount: number; postsCount: number }> {
-    const [followersCount, followingCount, postsCount] = await Promise.all([
+  /**
+   * Counts for a profile and, when someone else is looking, whether that
+   * viewer follows it. The app's profile screen took the follow state from
+   * user-service, which never knows it, so a profile opened from a chat said
+   * Follow for someone the viewer already followed and the tap answered 409
+   * (Nov 5 2026). `isFollowing` is absent for the viewer's own profile.
+   */
+  async getStats(
+    userId: string,
+    viewerId?: string,
+  ): Promise<{ followersCount: number; followingCount: number; postsCount: number; isFollowing?: boolean }> {
+    const viewerFollows =
+      viewerId && viewerId !== userId
+        ? this.prisma.follow
+            .count({ where: { followerId: viewerId, followingId: userId } })
+            .then((n) => n > 0)
+        : Promise.resolve(undefined);
+    const [followersCount, followingCount, postsCount, isFollowing] = await Promise.all([
       this.prisma.follow.count({ where: { followingId: userId } }),
       this.prisma.follow.count({ where: { followerId: userId } }),
       this.counts.getOrCompute("posts", userId, async () => {
@@ -41,6 +61,7 @@ export class FollowsService {
           return 0;
         }
       }),
+      viewerFollows,
     ]);
 
     // Defensive clamp: counts must never leave this service negative.
@@ -50,6 +71,7 @@ export class FollowsService {
       followersCount: Math.max(0, followersCount),
       followingCount: Math.max(0, followingCount),
       postsCount: Math.max(0, postsCount),
+      ...(isFollowing === undefined ? {} : { isFollowing }),
     };
   }
 
@@ -270,9 +292,13 @@ export class FollowsService {
   }
 
   private async enrichUserSummaries(
-    userIds: string[],
+    allUserIds: string[],
     currentUserId?: string,
   ): Promise<UserSummaryDto[]> {
+    const hidden = this.deactivated
+      ? await this.deactivated.among(allUserIds)
+      : new Set<string>();
+    const userIds = allUserIds.filter((id) => !hidden.has(String(id)));
     if (userIds.length === 0) return [];
 
     // Fetch user details via gRPC

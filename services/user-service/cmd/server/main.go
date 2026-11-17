@@ -46,6 +46,12 @@ func main() {
 		&models.PushToken{},
 		&models.SignupSession{},
 		&models.UserAppIconPreference{},
+		&models.AccountDeletion{},
+		// Borrado con gracia (12 nov 2026): tabla nueva y columnas nuevas y
+		// nulas en users y account_deletions. Solo añade, nada se borra.
+		&models.AccountDeletionRequest{},
+		// Nov 12 2026: remembered accounts. New table only (additive).
+		&models.DeviceKey{},
 	); err != nil {
 		log.Fatalf("[STARTUP] Failed to auto-migrate models: %v", err)
 	}
@@ -80,12 +86,36 @@ func main() {
 
 	authService := services.NewAuthService(repo, jwtMgr, producer, cfg.OTPServiceURL)
 	userService := services.NewUserService(repo, producer)
+	userService.SetDeletionGrace(services.DeletionGraceConfig{Grace: cfg.DeletionGrace})
+	authService.SetAccounts(userService)
+
+	// Real followers and posts for the operator list come from the social
+	// service. Optional: without SOCIAL_SERVICE_URL the list keeps serving the
+	// stored columns. The stats route sits behind the social service guard,
+	// which only trusts a JWT signed with the shared secret, so each page
+	// presents a one minute service token (no user, no role).
+	socialStats := services.NewSocialStatsClient(cfg.SocialServiceURL, func() (string, error) {
+		return jwtMgr.GenerateServiceToken(time.Minute)
+	})
+	userService.SetSocialStats(socialStats)
+	if socialStats.Enabled() {
+		log.Printf("[STARTUP] Operator list reads live stats from %s", cfg.SocialServiceURL)
+	} else {
+		log.Println("[STARTUP] SOCIAL_SERVICE_URL not set: operator list serves stored counts")
+	}
 	signupService := services.NewSignupService(signupRepo, repo, jwtMgr, producer, cfg.OTPServiceURL)
 
 	inmateService := services.NewInmateService()
 
+	// Remembered accounts: device keys that sign a challenge (Nov 12 2026).
+	deviceKeyService := services.NewDeviceKeyService(
+		repositories.NewDeviceKeyRepository(db), repo, authService.IssueSession)
+	authService.SetDeviceKeys(deviceKeyService)
+	deviceKeyHandler := handlers.NewDeviceKeyHandler(deviceKeyService)
+
 	authHandler := handlers.NewAuthHandler(authService)
 	userHandler := handlers.NewUserHandler(userService, cfg.OTPServiceURL)
+	adminHandler := handlers.NewAdminHandler(userService)
 	verificationHandler := handlers.NewVerificationHandler(userService, cfg.OTPServiceURL)
 	inmateHandler := handlers.NewInmateHandler(inmateService)
 	pushTokenHandler := handlers.NewPushTokenHandler(repo)
@@ -124,13 +154,21 @@ func main() {
 	auth.Post("/pre-register", authHandler.PreRegister)
 	auth.Post("/login", authHandler.Login)
 	auth.Post("/login/otp", authHandler.LoginOTP)
+	// Recuperar una cuenta en gracia de borrado con el token que dio el login.
+	auth.Post("/login/recover", authHandler.RecoverAccount)
 	auth.Post("/logout", authHandler.Logout)
 	auth.Post("/refresh", authHandler.Refresh)
+	// Telephony asks it before honouring an expired session token (VoIP).
+	auth.Post("/session-check", authHandler.SessionCheck)
 	auth.Post("/forgot-password", authHandler.ForgotPassword)
 	auth.Post("/reset-password", authHandler.ResetPassword)
 
 	// 2FA login (public — uses temp token, not JWT)
 	auth.Post("/login/2fa", authHandler.Login2FA)
+
+	// Remembered account login (public: the signature is the credential).
+	auth.Post("/login/device/challenge", deviceKeyHandler.Challenge)
+	auth.Post("/login/device", deviceKeyHandler.Login)
 
 	// Auth routes (protected)
 	auth.Get("/me", middleware.RequireAuth(jwtMgr), authHandler.Me)
@@ -153,6 +191,11 @@ func main() {
 	auth.Post("/2fa/confirm", middleware.RequireAuth(jwtMgr), authHandler.Enable2FAConfirm)
 	auth.Post("/2fa/disable", middleware.RequireAuth(jwtMgr), authHandler.Disable2FA)
 
+	// Remembered devices of the signed in account.
+	auth.Post("/devices", middleware.RequireAuth(jwtMgr), deviceKeyHandler.Enroll)
+	auth.Get("/devices", middleware.RequireAuth(jwtMgr), deviceKeyHandler.List)
+	auth.Delete("/devices/:id", middleware.RequireAuth(jwtMgr), deviceKeyHandler.Revoke)
+
 	// User routes (protected — must be registered before parameterized routes)
 	users := app.Group("/users")
 	users.Patch("/me/profile", middleware.RequireAuth(jwtMgr), userHandler.UpdateProfile)
@@ -165,15 +208,28 @@ func main() {
 	users.Put("/me/app-icon", middleware.RequireAuth(jwtMgr), appIconHandler.UpdateAppIcon)
 	users.Delete("/me/account", middleware.RequireAuth(jwtMgr), userHandler.DeleteAccount)
 
+	// Operator only (X-Admin-Token). Under /users so the gateway's existing
+	// user route carries it; registered before the parameterized routes.
+	users.Get("/admin", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListUsers)
+	users.Get("/admin/deletions", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListDeletions)
+	users.Get("/admin/pending-deletions", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.ListPendingDeletions)
+	users.Post("/admin/relink", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.RelinkCreator)
+	users.Delete("/admin/:id", middleware.RequireAdminToken(cfg.AdminAPISecret), adminHandler.DeleteUser)
+
 	// Inmate lookup (public)
 	users.Get("/inmates/lookup", inmateHandler.LookupInmate)
 
 	// User routes (public)
-	users.Get("/search", userHandler.SearchUsers)
+	users.Get("/search", middleware.OptionalAuth(jwtMgr), userHandler.SearchUsers)
 	users.Get("/discover", middleware.RequireAuth(jwtMgr), userHandler.DiscoverUsers)
-	users.Get("/:id", userHandler.GetUser)
+	users.Get("/:id", middleware.OptionalAuth(jwtMgr), userHandler.GetUser)
 	users.Get("/:id/followers", userHandler.GetFollowers)
 	users.Get("/:id/following", userHandler.GetFollowing)
+	// Server to server only (telephony-service): linked account ids and push
+	// tokens. Until Nov 12 2026 they answered anyone, through Kong and through
+	// this service's own public domain. Now a sibling service token or the
+	// owner's own session is required; Kong also blocks the paths.
+	userHandler.MountInternalRoutes(users, middleware.RequireInternalCallerOrOwner(jwtMgr, "id"))
 
 	// ── Signup session cleanup worker ──
 	// Hourly: mark expired sessions abandoned. Grace period 24h before purge so
@@ -192,6 +248,34 @@ func main() {
 			<-ticker.C
 		}
 	}()
+
+	// ── Borrado definitivo de las cuentas que vencen su gracia ──
+	// Corre aquí, en el mismo proceso, porque el borrado es una transacción
+	// en esta misma base (filas del usuario + account_deletions) y no hace
+	// falta nada más en Railway. Con varias réplicas cada lote se borra una
+	// sola vez (peticiones bloqueadas con FOR UPDATE), y si una pasada falla
+	// o el servicio está caído, la siguiente lo recoge: nadie se borra antes
+	// de su fecha, como mucho un intervalo después.
+	if cfg.DeletionSweepEnabled {
+		go func() {
+			// Primer barrido al minuto de arrancar, no en el arranque mismo.
+			time.Sleep(time.Minute)
+			ticker := time.NewTicker(cfg.DeletionSweepInterval)
+			defer ticker.Stop()
+			for {
+				started := time.Now()
+				res := userService.RunDeletionSweep(context.Background(), 50)
+				if len(res.Executed) > 0 || res.Failed > 0 || res.Skipped > 0 {
+					log.Printf("[DELETION-SWEEP] executed=%d skipped=%d failed=%d in %s",
+						len(res.Executed), res.Skipped, res.Failed, time.Since(started))
+				}
+				<-ticker.C
+			}
+		}()
+		log.Printf("[STARTUP] Deletion sweep every %s, grace %s", cfg.DeletionSweepInterval, cfg.DeletionGrace)
+	} else {
+		log.Println("[STARTUP] DELETION_SWEEP=off: accounts past their grace are NOT deleted")
+	}
 
 	// ── Start gRPC server in a goroutine ──
 	grpcServer := usergrpc.NewUserGRPCServer(userService, jwtMgr)
@@ -219,7 +303,7 @@ func main() {
 
 	// ── Start HTTP server ──
 	log.Printf("[STARTUP] HTTP server listening on [::]:%s", cfg.HTTPPort)
-	if err := app.Listen("[::]:"+cfg.HTTPPort); err != nil {
+	if err := app.Listen("[::]:" + cfg.HTTPPort); err != nil {
 		log.Fatalf("[STARTUP] HTTP server failed: %v", err)
 	}
 }

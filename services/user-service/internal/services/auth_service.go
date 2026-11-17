@@ -17,6 +17,7 @@ import (
 	"github.com/atto-sound/user-service/internal/middleware"
 	"github.com/atto-sound/user-service/internal/models"
 	"github.com/atto-sound/user-service/internal/repositories"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -40,6 +41,72 @@ type AuthService struct {
 	producer      *kafka.Producer
 	otpServiceURL string
 	httpClient    *http.Client
+	// accounts da el estado de borrado con gracia. Nil en pruebas viejas:
+	// entonces se lee la columna y no hay token de recuperación.
+	accounts *UserService
+	// deviceKeys ends remembered devices on a password reset or when 2FA is
+	// turned on (see auth_session.go). Nil in tests that do not need it.
+	deviceKeys deviceKeyRevoker
+}
+
+// SetAccounts conecta el borrado con gracia (pantalla de recuperar).
+func (s *AuthService) SetAccounts(us *UserService) { s.accounts = us }
+
+// sessionFor emite las credenciales de una cuenta que acaba de identificarse.
+// Si la cuenta está en gracia de borrado no hay sesión: devuelve el error con
+// la fecha y un token que solo sirve para recuperarla.
+func (s *AuthService) sessionFor(user *models.User) (*models.AuthResponse, error) {
+	if user.IsDeactivated() {
+		var pending *ErrAccountPendingDeletion
+		if s.accounts != nil {
+			pending = s.accounts.PendingDeletionFor(user)
+		}
+		if pending == nil {
+			pending = &ErrAccountPendingDeletion{UserID: user.ID, Username: user.Username}
+			if user.ScheduledDeletionAt != nil {
+				pending.ScheduledDeletionAt = user.ScheduledDeletionAt.UTC()
+			}
+		}
+		tok, err := s.jwtMgr.GenerateRecoveryToken(user.ID)
+		if err != nil {
+			return nil, errors.New("failed to generate tokens")
+		}
+		pending.RecoveryToken = tok
+		return nil, pending
+	}
+	tokens, err := s.jwtMgr.GenerateTokenPair(user)
+	if err != nil {
+		return nil, errors.New("failed to generate tokens")
+	}
+	return &models.AuthResponse{User: user.ToProfile(), Tokens: tokens}, nil
+}
+
+// RecoverAccount cumple "Recuperar" en la pantalla de la cuenta en gracia:
+// reactiva la cuenta con el token de recuperación del login y abre sesión.
+func (s *AuthService) RecoverAccount(ctx context.Context, recoveryToken string) (*models.AuthResponse, []uint64, error) {
+	uid, err := s.jwtMgr.ValidateRecoveryToken(recoveryToken)
+	if err != nil {
+		return nil, nil, errors.New("invalid or expired recovery token")
+	}
+	if s.accounts == nil {
+		return nil, nil, errors.New("account recovery is not available")
+	}
+	user, err := s.repo.FindByID(uid)
+	if err != nil || user == nil {
+		return nil, nil, errors.New("user not found")
+	}
+	if !user.IsDeactivated() {
+		// Ya se recuperó (otro toque, otro dispositivo): se abre la sesión.
+		res, err := s.sessionFor(user)
+		return res, []uint64{uid}, err
+	}
+	by := user.Username + " (" + strconv.FormatUint(uid, 10) + "), from the app after signing in"
+	recovered, ids, err := s.accounts.RecoverAccount(ctx, uid, by)
+	if err != nil {
+		return nil, nil, err
+	}
+	res, err := s.sessionFor(recovered)
+	return res, ids, err
 }
 
 // NewAuthService creates a new AuthService instance.
@@ -74,6 +141,25 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 	}
 	if existingUsername != nil {
 		return nil, errors.New("username already taken")
+	}
+
+	// One creator per inmate number and state (Nov 2026). This legacy route
+	// creates no managed creator for a representative, so only a creator
+	// registering its own number is checked. The state rides in
+	// representativeFields when the client sends it; without one, any creator
+	// with the number counts.
+	if models.Role(req.Role) == models.RoleCreator && req.InmateNumber != nil {
+		state := ""
+		if req.RepresentativeFields != nil {
+			state = req.RepresentativeFields.InmateState
+		}
+		if err := ensureInmateNumberFree(s.repo.FindCreatorsByInmateNumber, *req.InmateNumber, state); err != nil {
+			if errors.Is(err, ErrInmateNumberTaken) {
+				return nil, err
+			}
+			log.Printf("[AUTH] Failed to check inmate number: %v", err)
+			return nil, errors.New("internal error checking inmate number")
+		}
 	}
 
 	// Hash password
@@ -111,7 +197,10 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		return nil, errors.New("failed to create user")
 	}
 
-	// Publish user.created event (fire and forget, log errors)
+	// Publish user.created event (fire and forget, log errors). Legacy
+	// register endpoint doesn't carry a locale, so default to "en" — the
+	// new signup wizard captures and forwards the real value via the
+	// signup_session path.
 	userIDStr := strconv.FormatUint(user.ID, 10)
 	go func() {
 		eventData := map[string]interface{}{
@@ -120,6 +209,7 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 			"email":       strVal(user.Email),
 			"displayName": user.DisplayName,
 			"role":        string(user.Role),
+			"locale":      "en",
 		}
 		if err := s.producer.Publish(context.Background(), "user.created", userIDStr, eventData); err != nil {
 			log.Printf("[AUTH] Failed to publish user.created event: %v", err)
@@ -127,15 +217,7 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 	}()
 
 	// Generate tokens
-	tokens, err := s.jwtMgr.GenerateTokenPair(user)
-	if err != nil {
-		return nil, errors.New("failed to generate tokens")
-	}
-
-	return &models.AuthResponse{
-		User:   user.ToProfile(),
-		Tokens: tokens,
-	}, nil
+	return s.sessionFor(user)
 }
 
 // LoginWithOTP authenticates a user by verifying an OTP code via the OTP service.
@@ -184,15 +266,7 @@ func (s *AuthService) LoginWithOTP(ctx context.Context, req *models.LoginOTPRequ
 		return nil, errors.New("no account found for this identifier")
 	}
 
-	tokens, err := s.jwtMgr.GenerateTokenPair(user)
-	if err != nil {
-		return nil, errors.New("failed to generate tokens")
-	}
-
-	return &models.AuthResponse{
-		User:   user.ToProfile(),
-		Tokens: tokens,
-	}, nil
+	return s.sessionFor(user)
 }
 
 // isDigitsOnly returns true if s contains only ASCII digits and is non-empty.
@@ -282,15 +356,7 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest) (inte
 		}, nil
 	}
 
-	tokens, err := s.jwtMgr.GenerateTokenPair(user)
-	if err != nil {
-		return nil, errors.New("failed to generate tokens")
-	}
-
-	return &models.AuthResponse{
-		User:   user.ToProfile(),
-		Tokens: tokens,
-	}, nil
+	return s.sessionFor(user)
 }
 
 // Login2FA completes the second step of 2FA login.
@@ -334,15 +400,7 @@ func (s *AuthService) Login2FA(ctx context.Context, req *models.Login2FARequest)
 		return nil, err
 	}
 
-	tokens, err := s.jwtMgr.GenerateTokenPair(user)
-	if err != nil {
-		return nil, errors.New("failed to generate tokens")
-	}
-
-	return &models.AuthResponse{
-		User:   user.ToProfile(),
-		Tokens: tokens,
-	}, nil
+	return s.sessionFor(user)
 }
 
 // Enable2FAInit sends a verification OTP to confirm the user controls the channel.
@@ -403,7 +461,12 @@ func (s *AuthService) Enable2FAConfirm(ctx context.Context, userID string, req *
 		return err
 	}
 
-	return s.repo.UpdateCredentials2FA(uid, true, req.Method)
+	if err := s.repo.UpdateCredentials2FA(uid, true, req.Method); err != nil {
+		return err
+	}
+	// Keys enrolled before 2FA was on never passed the second factor.
+	s.revokeDeviceKeys(uid, models.DeviceKeyRevokedTwoFactor)
+	return nil
 }
 
 // Disable2FA turns off 2FA after password verification.
@@ -500,6 +563,12 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 	if err != nil {
 		return nil, errors.New("invalid or expired refresh token")
 	}
+	// Only a session renews a session. Until Nov 12 2026 the 2FA temporary
+	// token (password only) was exchanged here for a full pair, skipping the
+	// second factor.
+	if !middleware.IsSessionToken(claims) {
+		return nil, errors.New("invalid or expired refresh token")
+	}
 
 	userID, err := strconv.ParseUint(claims.UserID, 10, 64)
 	if err != nil {
@@ -510,6 +579,15 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 	if err != nil || user == nil {
 		return nil, errors.New("user not found")
 	}
+	// Cuenta en gracia de borrado: ningún dispositivo renueva su sesión.
+	if user.IsDeactivated() {
+		return nil, errors.New(AccountPendingDeletionCode)
+	}
+	// Al pedir el borrado se cerraron todas las sesiones: un refresh emitido
+	// antes no vale, aunque la cuenta se haya recuperado después.
+	if sessionRevoked(claims.IssuedAt, user.SessionsValidAfter) {
+		return nil, errors.New("session revoked")
+	}
 
 	tokens, err := s.jwtMgr.GenerateTokenPair(user)
 	if err != nil {
@@ -517,6 +595,19 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 	}
 
 	return tokens, nil
+}
+
+// sessionRevoked: el token se emitió antes del último cierre de sesiones.
+// IssuedAt va en segundos enteros, así que se compara con el segundo del
+// cierre: un token del mismo segundo cuenta como anterior.
+func sessionRevoked(issuedAt *jwt.NumericDate, validAfter *time.Time) bool {
+	if validAfter == nil {
+		return false
+	}
+	if issuedAt == nil {
+		return true
+	}
+	return !issuedAt.Time.After(validAfter.Truncate(time.Second))
 }
 
 // CheckPhoneAvailability returns true if the phone is not yet registered.
@@ -575,9 +666,18 @@ func (s *AuthService) SwitchAccount(ctx context.Context, callerID string, target
 	if err != nil || target == nil {
 		return nil, errors.New("target user not found")
 	}
+	// Ni desde ni hacia una cuenta en gracia de borrado.
+	if caller.IsDeactivated() || target.IsDeactivated() {
+		return nil, errors.New(AccountPendingDeletionCode)
+	}
 
-	// Authorization: accounts must be linked
-	authorized := false
+	// Authorization: accounts must be linked. Self-switch (target == caller)
+	// is allowed and idempotent: it just re-issues tokens for the account
+	// the caller already is. A client whose UI identity drifted from its
+	// token converges on retry instead of dead-ending on a 403 (Aug 1 2026:
+	// a desynced client self-switched, got "accounts are not linked", and
+	// the user was stuck unable to switch profiles).
+	authorized := target.ID == uid
 	if target.RepresentativeID != nil && *target.RepresentativeID == uid {
 		authorized = true // rep → their managed creator
 	}
@@ -616,75 +716,171 @@ func (s *AuthService) GetLinkedAccounts(ctx context.Context, callerID string) ([
 		return nil, fmt.Errorf("failed to get linked accounts: %w", err)
 	}
 
-	profiles := make([]*models.UserProfile, len(linked))
-	for i, u := range linked {
-		profiles[i] = u.ToProfile()
+	// El selector de cuentas no ofrece una vinculada en gracia de borrado:
+	// no se puede entrar en ella.
+	profiles := make([]*models.UserProfile, 0, len(linked))
+	for _, u := range linked {
+		if u.IsDeactivated() {
+			continue
+		}
+		profiles = append(profiles, u.ToProfile())
 	}
 	return profiles, nil
 }
 
-// ForgotPassword sends an OTP to the user's email for password reset.
-// Always returns nil to prevent email enumeration.
-func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPasswordRequest) error {
-	user, err := s.repo.FindByEmail(strings.ToLower(req.Email))
-	if err != nil {
-		return nil
+// resolvePasswordResetUser maps an inbound identifier (email or username)
+// to the user account we will reset, plus the email address the OTP should
+// be sent to / verified against. For managed creators (no email of their
+// own) the OTP recipient is the linked representative's email — this is
+// the only recovery channel available since the creator account has no
+// contact info.
+//
+// Returns (target user, OTP recipient email, error). When the identifier
+// doesn't match anything, returns (nil, "", nil) so the caller can short-
+// circuit to a generic success response and avoid enumerating accounts.
+func (s *AuthService) resolvePasswordResetUser(identifier string) (*models.User, string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, "", nil
 	}
-	if user == nil {
+
+	var user *models.User
+	var err error
+
+	if strings.Contains(identifier, "@") {
+		// Treat as an email — covers reps, listeners, and anyone else with
+		// a registered email.
+		user, err = s.repo.FindByEmail(strings.ToLower(identifier))
+	} else {
+		// Treat as a username — covers managed creators (no email) and
+		// anyone who prefers their handle for recovery.
+		user, err = s.repo.FindByUsername(identifier)
+	}
+	if err != nil || user == nil {
+		return nil, "", err
+	}
+
+	// If the user has their own email, use it.
+	if user.Email != nil && strVal(user.Email) != "" {
+		return user, strVal(user.Email), nil
+	}
+
+	// Managed creator with no email of their own — fall back to the
+	// linked representative's email. Without this, the account is
+	// unrecoverable through any self-service path.
+	if user.RepresentativeID != nil {
+		rep, repErr := s.repo.FindByID(*user.RepresentativeID)
+		if repErr == nil && rep != nil && rep.Email != nil && strVal(rep.Email) != "" {
+			return user, strVal(rep.Email), nil
+		}
+	}
+
+	// No usable contact channel — caller will treat as "user not found".
+	return nil, "", nil
+}
+
+// pickRecoveryIdentifier returns the field we should look up against.
+// New clients send `Identifier`; older clients still send `Email`. Prefer
+// `Identifier` so a client that knows about the unified field always wins.
+func pickRecoveryIdentifier(email, identifier string) string {
+	if strings.TrimSpace(identifier) != "" {
+		return identifier
+	}
+	return email
+}
+
+// ForgotPassword sends an OTP for password reset. The OTP goes to the
+// account's own email when one exists; for managed creators (no email)
+// it goes to the linked representative's email.
+//
+// Always returns nil to prevent account enumeration via the response.
+func (s *AuthService) ForgotPassword(ctx context.Context, req *models.ForgotPasswordRequest) error {
+	identifier := pickRecoveryIdentifier(req.Email, req.Identifier)
+	user, otpEmail, err := s.resolvePasswordResetUser(identifier)
+	if err != nil || user == nil || otpEmail == "" {
 		return nil
 	}
 
 	otpBody, _ := json.Marshal(map[string]string{
-		"email":          strVal(user.Email),
+		"email":          otpEmail,
 		"locale":         req.Locale,
 		"email_template": "password-reset",
 	})
 	otpURL := fmt.Sprintf("%s/otp/send", s.otpServiceURL)
 	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(otpBody))
 	if err != nil {
-		log.Printf("[AUTH] Failed to send password reset OTP for %s: %v", req.Email, err)
+		log.Printf("[AUTH] Failed to send password reset OTP for %s: %v", identifier, err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[AUTH] OTP service returned %d for password reset: %s", resp.StatusCode, req.Email)
+		log.Printf("[AUTH] OTP service returned %d for password reset: %s", resp.StatusCode, identifier)
 	}
 	return nil
 }
 
-// ResetPassword verifies the OTP (sent to email) and updates the user's password.
-func (s *AuthService) ResetPassword(ctx context.Context, req *models.ResetPasswordRequest) error {
-	user, err := s.repo.FindByEmail(strings.ToLower(req.Email))
-	if err != nil || user == nil {
-		return errors.New("invalid request")
+// ResetPassword verifies the OTP (sent to the resolved email) and updates
+// the target user's password — even when the OTP went to a different
+// address (managed creator → linked representative).
+func (s *AuthService) ResetPassword(ctx context.Context, req *models.ResetPasswordRequest) (*models.AuthResponse, error) {
+	identifier := pickRecoveryIdentifier(req.Email, req.Identifier)
+	user, otpEmail, err := s.resolvePasswordResetUser(identifier)
+	if err != nil || user == nil || otpEmail == "" {
+		return nil, errors.New("invalid request")
 	}
 
 	// Verify OTP via OTP service (email channel)
 	otpBody, _ := json.Marshal(map[string]string{
 		"channel": "email",
-		"email":   strVal(user.Email),
+		"email":   otpEmail,
 		"code":    req.OTP,
 	})
 	otpURL := fmt.Sprintf("%s/otp/verify", s.otpServiceURL)
 	resp, err := s.httpClient.Post(otpURL, "application/json", bytes.NewReader(otpBody))
 	if err != nil {
 		log.Printf("[AUTH] Failed to reach OTP service for password reset: %v", err)
-		return errors.New("failed to verify code")
+		return nil, errors.New("failed to verify code")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return errors.New("invalid or expired code")
+		return nil, errors.New("invalid or expired code")
 	}
 
-	// Hash and store new password
+	// Hash and store new password ON THE TARGET USER, not the rep —
+	// even when the OTP went to the rep, we are resetting the creator's
+	// credentials (that's the whole point of the recovery flow).
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		return errors.New("failed to process new password")
+		return nil, errors.New("failed to process new password")
 	}
 
-	return s.repo.UpdateCredentialsPassword(user.ID, string(hash))
+	// Every session of the account, on every phone, ends here; so do its
+	// remembered devices (whoever knew the old password may hold one).
+	if err := s.repo.ResetPasswordAndCloseSessions(user.ID, string(hash), ResetSessionCutoff(time.Now())); err != nil {
+		log.Printf("[AUTH] password reset for user %d failed: %v", user.ID, err)
+		return nil, errors.New("failed to process new password")
+	}
+	log.Printf("[AUTH] password reset for user %d: every session and remembered device closed", user.ID)
+
+	// The phone that reset the password stays in with a fresh session, the
+	// one issued after the cut. Not when the account has 2FA (the reset code
+	// proves the email, not the second factor: the login asks it), nor for an
+	// account in its deletion grace (the login shows the recover screen).
+	creds, err := s.repo.FindCredentialsByUserID(user.ID)
+	if err != nil || creds == nil || creds.TwoFactorEnabled {
+		return nil, nil
+	}
+	fresh, err := s.repo.FindByID(user.ID)
+	if err != nil || fresh == nil {
+		return nil, nil
+	}
+	session, err := s.sessionFor(fresh)
+	if err != nil {
+		return nil, nil
+	}
+	return session, nil
 }
 
 // GetCurrentUser retrieves the user profile for the given user ID (from JWT claims).
@@ -700,6 +896,9 @@ func (s *AuthService) GetCurrentUser(ctx context.Context, userID string) (*model
 	}
 	if user == nil {
 		return nil, errors.New("user not found")
+	}
+	if user.IsDeactivated() {
+		return nil, errors.New(AccountPendingDeletionCode)
 	}
 
 	creds, _ := s.repo.FindCredentialsByUserID(uid)

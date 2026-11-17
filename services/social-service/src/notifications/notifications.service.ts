@@ -58,6 +58,7 @@ export class NotificationsService {
           type: notification.type,
           actorId: notification.actorId,
           referenceId: notification.referenceId,
+          commentId: notification.commentId ?? null,
           isRead: notification.isRead,
           createdAt: notification.createdAt.toISOString(),
           actor:

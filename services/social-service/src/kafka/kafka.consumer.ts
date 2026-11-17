@@ -3,6 +3,7 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from "@nestjs/common";
 import { Kafka, Consumer, EachMessagePayload } from "kafkajs";
 import { CountsRepository } from "../redis/repositories/counts.repository";
@@ -11,7 +12,14 @@ import { FeedRepository } from "../redis/repositories/feed.repository";
 import { RedisClientProvider } from "../redis/redis-client.provider";
 import { PrismaService } from "../prisma/prisma.service";
 import { PushService } from "../push/push.service";
+import { chatPushPreview } from "../push/chat-push-preview";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
+import { DeactivatedUsersRepository } from "../redis/repositories/deactivated-users.repository";
+import { visibleComments } from "../interactions/visible-comments";
+import {
+  officialFollowLog,
+  errorFields,
+} from "../common/telemetry/official-follow.telemetry";
 
 @Injectable()
 export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
@@ -27,6 +35,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly pushService: PushService,
     private readonly grpcClients: GrpcClientsService,
+    @Optional() private readonly deactivated?: DeactivatedUsersRepository,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -70,6 +79,8 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           "content.updated",
           "message.sent",
           "user.deleted",
+          "user.deactivated",
+          "user.reactivated",
         ],
         fromBeginning: false,
       });
@@ -81,7 +92,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       });
 
       this.logger.log(
-        "Kafka consumer subscribed to: user.created, content.published, message.sent",
+        "Kafka consumer subscribed to: user.created, content.published, message.sent, user.deleted, user.deactivated, user.reactivated",
       );
     } catch (error) {
       this.logger.error(`Failed to connect Kafka consumer: ${error.message}`);
@@ -128,6 +139,12 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
         case "user.deleted":
           await this.handleUserDeleted(data);
           break;
+        case "user.deactivated":
+          await this.handleUserDeactivated(data);
+          break;
+        case "user.reactivated":
+          await this.handleUserReactivated(data);
+          break;
         default:
           this.logger.warn(`Unhandled topic: ${topic}`);
       }
@@ -165,6 +182,117 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     });
 
     this.logger.log(`Welcome notification created for user ${userId}`);
+
+    await this.autoFollowOfficialAccount(userId);
+  }
+
+  /**
+   * Make every new user follow the official ATTO SOUND account (id from the
+   * OFFICIAL_ACCOUNT_ID env) so its posts reach them via the normal
+   * content.published fan-out (feed entry + new_post notification + push).
+   *
+   * This is a SILENT edge: unlike FollowsService.follow() we deliberately do
+   * NOT create a "follow" notification or send a push — otherwise the official
+   * account would be spammed with one "X started following you" per signup.
+   *
+   * Idempotent: `createMany({ skipDuplicates: true })` makes a redelivered
+   * user.created event (Kafka is at-least-once) a no-op instead of a crash.
+   * No-op when OFFICIAL_ACCOUNT_ID is unset, or for the official account itself.
+   */
+  private async autoFollowOfficialAccount(userId: string): Promise<void> {
+    const officialId = process.env.OFFICIAL_ACCOUNT_ID;
+
+    // The whole feature silently no-ops when the env is missing — that's the
+    // single most likely "why is nobody following ATTO?" prod cause, so make it
+    // LOUD (warn) instead of an invisible early return.
+    if (!officialId) {
+      this.logger.warn(
+        officialFollowLog("signup_auto_follow.skipped_unconfigured", "warn", {
+          userId,
+          remediation:
+            "Set OFFICIAL_ACCOUNT_ID (the ATTO account's numeric user id, e.g. 152) in the social-service environment, then redeploy.",
+        }),
+      );
+      return;
+    }
+    if (userId === officialId) {
+      this.logger.debug(
+        officialFollowLog("signup_auto_follow.skipped_self", "debug", {
+          userId,
+          officialId,
+          outcome: "skipped",
+        }),
+      );
+      return;
+    }
+
+    const startedAt = Date.now();
+    try {
+      const { count } = await this.prisma.follow.createMany({
+        data: [{ followerId: userId, followingId: officialId }],
+        skipDuplicates: true,
+      });
+
+      if (count === 0) {
+        // Idempotent: redelivered user.created (Kafka is at-least-once) or a
+        // user the backfill already covered. Not a failure.
+        this.logger.debug(
+          officialFollowLog("signup_auto_follow.already_following", "debug", {
+            userId,
+            officialId,
+            outcome: "duplicate",
+            durationMs: Date.now() - startedAt,
+          }),
+        );
+        return;
+      }
+
+      // Keep the official account's followers SET warm so a post published
+      // within the cache's 1h TTL fans out to this brand-new follower too.
+      // Best-effort — the DB row above is the source of truth and the cache
+      // re-materializes from it on the next cold read.
+      let cacheWarmed = true;
+      try {
+        await this.followGraph.addEdge(userId, officialId);
+      } catch (err) {
+        cacheWarmed = false;
+        this.logger.warn(
+          officialFollowLog("signup_auto_follow.cache_warm_failed", "warn", {
+            userId,
+            officialId,
+            outcome: "created",
+            ...errorFields(err),
+            remediation:
+              "Non-fatal: the DB follow edge exists; the Redis follow-graph set self-heals on its next cold read (1h TTL). Investigate Redis only if many of these appear together.",
+          }),
+        );
+      }
+
+      this.logger.log(
+        officialFollowLog("signup_auto_follow.success", "log", {
+          userId,
+          officialId,
+          outcome: "created",
+          cacheWarmed,
+          durationMs: Date.now() - startedAt,
+        }),
+      );
+    } catch (err) {
+      // The edge was NOT created — this user will NOT receive ATTO's posts via
+      // fan-out. There is no Kafka retry for this branch (the welcome
+      // notification already committed), so this log is the only signal.
+      this.logger.error(
+        officialFollowLog("signup_auto_follow.db_failed", "error", {
+          userId,
+          officialId,
+          outcome: "error",
+          durationMs: Date.now() - startedAt,
+          ...errorFields(err),
+          remediation:
+            "User did NOT auto-follow ATTO. Re-run scripts/backfill-official-follows.ts (idempotent) to repair this and any other missed users.",
+        }),
+      );
+    }
   }
 
   /**
@@ -226,16 +354,73 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * content.updated -> invalidate cached content (future: notify likers)
+   * content.updated -> tell the people an edit tagged for the first time.
+   * content-service sends only those, so nobody hears twice (Oct 27 2026: the
+   * edit screen can tag people now, and before this an edit never told them).
    */
   private async handleContentUpdated(data: {
     content_id: string;
     author_id: string;
+    tagged_user_ids?: string[];
   }): Promise<void> {
     if (!data.content_id) return;
     this.logger.log(`Processing content.updated for content ${data.content_id}`);
     // No cache to invalidate currently (content is fetched via gRPC, not cached in Redis)
-    // This handler exists for future extensibility (e.g. re-index search, notify)
+    this.notifyTagged(data.content_id, data.author_id, data.tagged_user_ids);
+  }
+
+  /**
+   * A mention notification and push for each person tagged, the author left
+   * out. Used for a new post and for an edit that tags someone new.
+   */
+  private notifyTagged(
+    contentId: string,
+    authorId: string,
+    taggedUserIds: string[] | undefined,
+  ): void {
+    // Whoever the caption tags hears about it whether or not they follow the
+    // author, which is the whole point of being tagged (Instagram style
+    // tagging, Sep 2026). The author tagging themselves is dropped.
+    const taggedIds = Array.from(
+      new Set((taggedUserIds ?? []).map(String).filter(Boolean)),
+    ).filter((id) => id !== String(authorId));
+
+    if (taggedIds.length > 0) {
+      this.prisma.notification
+        .createMany({
+          data: taggedIds.map((recipientId) => ({
+            recipientId,
+            type: "mention",
+            actorId: authorId,
+            referenceId: contentId,
+            isRead: false,
+          })),
+        })
+        .catch((err) =>
+          this.logger.error(
+            `Failed to create mention notifications for content ${contentId}: ${err.message}`,
+          ),
+        );
+
+      this.grpcClients
+        .getUser(authorId)
+        .then((author) =>
+          this.pushService.sendPushBulk(
+            taggedIds,
+            "mention",
+            authorId,
+            author?.username || "Someone",
+            contentId,
+          ),
+        )
+        .catch((err) =>
+          this.logger.error(`Bulk push for mention failed: ${err.message}`),
+        );
+
+      this.logger.log(
+        `Content ${contentId} tagged ${taggedIds.length} people`,
+      );
+    }
   }
 
   /**
@@ -245,6 +430,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     content_id: string;
     author_id: string;
     created_at: string;
+    tagged_user_ids?: string[];
   }): Promise<void> {
     this.logger.log(
       `Processing content.published for content ${data.content_id} by ${data.author_id}`,
@@ -280,6 +466,8 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `Content ${data.content_id} fanned out to ${followerIds.length} followers`,
     );
+
+    this.notifyTagged(data.content_id, data.author_id, data.tagged_user_ids);
 
     // Notify each follower that someone they follow just posted.
     // Bulk insert + bulk push are fire-and-forget so a slow notification
@@ -336,6 +524,8 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     conversation_id?: string;
     message_id: string;
     content?: string;
+    content_type?: string;
+    metadata?: unknown;
   }): Promise<void> {
     if (!data.recipient_id) {
       this.logger.warn(
@@ -370,11 +560,13 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       .getUser(data.sender_id)
       .then((actor) => {
         const senderName = actor?.username || "Someone";
-        const messagePreview = data.content
-          ? data.content.length > 100
-            ? data.content.slice(0, 100) + "…"
-            : data.content
-          : undefined;
+        // A media message keeps its hosted URL in `content`: the body is
+        // decided by type ("📹 Video"), and only text is shown as written.
+        const messagePreview = chatPushPreview(
+          data.content_type,
+          data.content,
+          data.metadata,
+        );
         this.pushService
           .sendPush(
             data.recipient_id!,
@@ -392,6 +584,32 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * user.deactivated (30 day deletion grace, Nov 12 2026): hide the
+   * accounts' posts, comments and list rows, and drop their cached profile
+   * so author lookups stop serving it.
+   */
+  async handleUserDeactivated(data: { userIds?: string[] }): Promise<void> {
+    const userIds = (data?.userIds ?? []).map(String).filter(Boolean);
+    if (userIds.length === 0 || !this.deactivated) return;
+    await this.deactivated.add(userIds);
+    for (const id of userIds) {
+      await this.grpcClients.invalidateUserCache(id);
+    }
+    this.logger.log(`Hid accounts pending deletion: ${userIds.join(", ")}`);
+  }
+
+  /** user.reactivated: the account recovered, show everything again. */
+  async handleUserReactivated(data: { userIds?: string[] }): Promise<void> {
+    const userIds = (data?.userIds ?? []).map(String).filter(Boolean);
+    if (userIds.length === 0 || !this.deactivated) return;
+    await this.deactivated.remove(userIds);
+    for (const id of userIds) {
+      await this.grpcClients.invalidateUserCache(id);
+    }
+    this.logger.log(`Showing recovered accounts again: ${userIds.join(", ")}`);
+  }
+
+  /**
    * user.deleted -> recalculate Redis counts for all posts the user interacted
    * with, clean up follow graph, and delete feed caches.
    *
@@ -406,6 +624,8 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     if (userIds.length === 0) return;
 
     this.logger.log(`Processing user.deleted for users: ${userIds.join(", ")}`);
+    // Out of the deletion grace set: the account is gone for good.
+    await this.deactivated?.remove(userIds.map(String));
 
     for (const userId of userIds) {
       // Invalidate user profile cache
@@ -568,7 +788,9 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           // breaking the entire user.deleted cleanup for every account that
           // had reposts in their feed scope.
           if (type === "comments") {
-            dbCount = await this.prisma.comment.count({ where: { contentId } });
+            dbCount = await this.prisma.comment.count({
+              where: visibleComments(contentId),
+            });
           } else if (type === "reposts") {
             dbCount = await this.prisma.repost.count({ where: { contentId } });
           } else {

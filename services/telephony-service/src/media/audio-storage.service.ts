@@ -53,9 +53,7 @@ export class AudioStorageService implements OnModuleInit {
     // Public client for generating presigned URLs accessible from outside Docker
     const publicEp = s3PublicEndpoint || s3Endpoint;
     this.logger.log(
-      "S3 public endpoint: %s (from env: %s)",
-      publicEp,
-      s3PublicEndpoint || "(empty, falling back to internal)",
+      `S3 public endpoint: ${publicEp} (from env: ${s3PublicEndpoint || "(empty, falling back to internal)"})`,
     );
     this.s3Public = new S3Client({
       endpoint: publicEp,
@@ -70,7 +68,7 @@ export class AudioStorageService implements OnModuleInit {
     // Flush any cached presigned URLs from a previous deploy (endpoint may have changed)
     const flushed = await this.cache.deletePattern("telephony:presigned:*");
     if (flushed > 0) {
-      this.logger.log("Flushed %d cached presigned URLs", flushed);
+      this.logger.log(`Flushed ${flushed} cached presigned URLs`);
     }
   }
 
@@ -78,13 +76,13 @@ export class AudioStorageService implements OnModuleInit {
   private async ensureBucket(): Promise<void> {
     try {
       await this.s3.send(new HeadBucketCommand({ Bucket: this.bucket }));
-      this.logger.log('S3 bucket "%s" exists', this.bucket);
+      this.logger.log(`S3 bucket "${this.bucket}" exists`);
     } catch {
       try {
         await this.s3.send(new CreateBucketCommand({ Bucket: this.bucket }));
-        this.logger.log('S3 bucket "%s" created', this.bucket);
+        this.logger.log(`S3 bucket "${this.bucket}" created`);
       } catch (err) {
-        this.logger.error('Failed to create bucket "%s": %s', this.bucket, err);
+        this.logger.error(`Failed to create bucket "${this.bucket}": ${err}`);
       }
     }
   }
@@ -104,7 +102,7 @@ export class AudioStorageService implements OnModuleInit {
       }),
     );
 
-    this.logger.log("Uploaded %s (%d bytes)", key, data.length);
+    this.logger.log(`Uploaded ${key} (${data.length} bytes)`);
     return { bucket: this.bucket, key, size: data.length };
   }
 

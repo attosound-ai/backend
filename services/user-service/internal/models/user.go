@@ -53,16 +53,30 @@ type User struct {
 	RecordLabel  *string `gorm:"size:100;column:record_label" json:"recordLabel,omitempty"`
 	BookingEmail *string `gorm:"size:255;column:booking_email" json:"bookingEmail,omitempty"`
 
-	DateOfBirth        *time.Time     `gorm:"type:date" json:"dateOfBirth,omitempty"`
-	FollowersCount     int64          `gorm:"default:0" json:"followersCount"`
-	FollowingCount     int64          `gorm:"default:0" json:"followingCount"`
-	PostsCount         int64          `gorm:"default:0" json:"postsCount"`
-	CreatedAt          time.Time      `json:"createdAt"`
-	UpdatedAt          time.Time      `json:"updatedAt"`
-	DeletedAt          gorm.DeletedAt `gorm:"index" json:"-"`
+	DateOfBirth    *time.Time     `gorm:"type:date" json:"dateOfBirth,omitempty"`
+	FollowersCount int64          `gorm:"default:0" json:"followersCount"`
+	FollowingCount int64          `gorm:"default:0" json:"followingCount"`
+	PostsCount     int64          `gorm:"default:0" json:"postsCount"`
+	CreatedAt      time.Time      `json:"createdAt"`
+	UpdatedAt      time.Time      `json:"updatedAt"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
+
+	// Borrado con 30 días de gracia (pedido del cliente, 28 oct 2026).
+	// DeactivatedAt no nulo: la persona pidió borrar la cuenta, nadie más la
+	// ve y no puede entrar sin pasar por la pantalla de recuperar.
+	// ScheduledDeletionAt es cuándo el barrido la borra de verdad.
+	// SessionsValidAfter invalida los refresh emitidos antes (se cierra la
+	// sesión en todos los dispositivos, y siguen cerradas si se recupera).
+	// Las tres son columnas nuevas y nulas: AutoMigrate solo las añade.
+	DeactivatedAt       *time.Time `gorm:"index" json:"-"`
+	ScheduledDeletionAt *time.Time `gorm:"index" json:"-"`
+	SessionsValidAfter  *time.Time `json:"-"`
 
 	Credentials *UserCredentials `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
 }
+
+// IsDeactivated dice si la cuenta está en gracia de borrado.
+func (u *User) IsDeactivated() bool { return u != nil && u.DeactivatedAt != nil }
 
 // UserCredentials stores authentication data separate from the user profile.
 type UserCredentials struct {

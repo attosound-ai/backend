@@ -2,6 +2,7 @@ import {
   IsArray,
   IsInt,
   IsNotEmpty,
+  IsObject,
   IsOptional,
   IsString,
   Max,
@@ -59,6 +60,16 @@ export class UpdatePostDto {
   @IsArray()
   @IsString({ each: true })
   tags?: string[];
+
+  /**
+   * Merged into the post's metadata by content-service (an empty value
+   * removes the key). Without this field the global whitelist stripped it,
+   * so an edit's tags and cover never reached content-service (found Nov 12
+   * 2026 while adding the cover edit).
+   */
+  @IsOptional()
+  @IsObject()
+  metadata?: Record<string, string>;
 }
 
 export class FeedPostDto {

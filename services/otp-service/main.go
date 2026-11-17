@@ -28,6 +28,15 @@ func main() {
 
 	log.Println("[STARTUP] Atto Sound - OTP Service")
 	log.Printf("[STARTUP] HTTP port: %s | delivery: %s", cfg.HTTPPort, cfg.DeliveryProvider)
+	if cfg.BypassRefused {
+		log.Println("[STARTUP] BYPASS_OTP=true is ignored here: the fixed code only works on a laptop with console delivery")
+	}
+	if cfg.BypassOTP {
+		log.Println("[STARTUP] Fixed code 000000 is accepted (laptop, console delivery)")
+	}
+	if cfg.SkipSendLimits {
+		log.Println("[STARTUP] Send limits are off (BYPASS_OTP or OTP_SKIP_SEND_LIMITS)")
+	}
 
 	// ── Connect to Redis ──
 	opts, err := redis.ParseURL(cfg.RedisURL)
@@ -62,6 +71,13 @@ func main() {
 	}
 
 	otpService := services.NewOTPService(cfg, repo, delivery, emailDelivery)
+	if ready, reason := cfg.VerifyReady(); ready {
+		fallback := cfg.SMSFallback == config.SMSFallbackMessages
+		otpService.WithSMSVerifier(providers.NewTwilioVerify(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioVerifyServiceSID), fallback)
+		log.Printf("[DELIVERY] SMS codes through Twilio Verify (%s), fallback to the old provider when Verify is down: %v", cfg.TwilioVerifyServiceSID, fallback)
+	} else if reason != "" {
+		log.Printf("[DELIVERY] OTP_SMS_PROVIDER=verify ignored (%s): SMS codes keep going through %s", reason, cfg.DeliveryProvider)
+	}
 	otpHandler := handlers.NewOTPHandler(otpService)
 	healthHandler := handlers.NewHealthHandler()
 

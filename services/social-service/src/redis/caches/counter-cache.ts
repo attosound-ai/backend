@@ -82,14 +82,32 @@ export class CounterCache {
   }
 
   /**
-   * Atomic increment that preserves the existing TTL (Redis guarantees
-   * INCR does not modify expiry). If the key does not exist, INCR
-   * initializes it to 1 with NO TTL — to avoid that, callers should
-   * ensure {@link getOrCompute} or {@link set} has run at least once
-   * for the id, or treat the resulting unbounded key as a known risk.
+   * Atomic increment that preserves the existing TTL (Redis guarantees INCR
+   * does not modify expiry) and is a NO-OP when the key has not been seeded,
+   * as {@link CountsRepository.increment} has always documented.
+   *
+   * ATTO (Aug 23 2026): the implementation used to be a bare INCR, which
+   * CONTRADICTED that contract and could pin a counter to a wrong value
+   * forever. INCR on a MISSING key creates it at 1 **with no expiry**, so the
+   * first like/comment/follow that lands while the key is cold leaves a
+   * permanent "1" — and because the key never expires, the read-through path
+   * never recomputes it from the database. Callers do not seed first
+   * (addComment goes straight to increment), so the risk was live on every
+   * counter in the service. Skipping the write instead leaves the key absent
+   * and the next read seeds it from a real COUNT(*) with a TTL.
+   *
+   * Returns the new value, or -1 when the increment was skipped. No caller
+   * reads the return value; it exists for tests and diagnosability.
    */
   async increment(id: string): Promise<number> {
-    return this.redis.client().incr(this.keyFor(id));
+    const next = await this.redis
+      .client()
+      .eval(
+        "if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end return redis.call('INCR', KEYS[1])",
+        1,
+        this.keyFor(id),
+      );
+    return Number(next);
   }
 
   /**
@@ -101,11 +119,31 @@ export class CounterCache {
    */
   async decrement(id: string): Promise<number> {
     const key = this.keyFor(id);
-    const next = await this.redis.client().decr(key);
-    if (next < 0) {
+    // Same seeding rule as increment (see there): DECR on a missing key would
+    // create a TTL-less "-1" that the clamp below then froze at 0 forever.
+    // The clamp now happens INSIDE the script, so the read-modify-write can no
+    // longer interleave with another client's decrement.
+    const next = Number(
+      await this.redis
+        .client()
+        .eval(
+          "if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end " +
+            "local v = redis.call('DECR', KEYS[1]) " +
+            "if v < 0 then redis.call('SET', KEYS[1], '0', 'KEEPTTL') return -2 end " +
+            "return v",
+          1,
+          key,
+        ),
+    );
+    if (next === -1) {
+      // Not seeded: nothing to decrement, the next read recomputes the truth.
+      return -1;
+    }
+    if (next === -2) {
+      // Underflow, already clamped to 0 inside the script. Kept as a warning
+      // because a negative denormalized count always means a logic bug
+      // (double-decrement, missing seed, race) worth diagnosing.
       this.logger.warn(`decrement underflow on ${key} — clamped to 0`);
-      // Use SET (no EX) to preserve any existing TTL on the key.
-      await this.redis.client().set(key, "0", "KEEPTTL");
       return 0;
     }
     return next;

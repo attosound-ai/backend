@@ -7,7 +7,7 @@ delivery semantics safe to act on.
 
 See: https://learn.microsoft.com/en-us/azure/architecture/patterns/idempotent-receiver
 """
-from datetime import datetime, timezone
+from datetime import datetime
 from uuid import UUID as PyUUID
 
 from sqlalchemy import DateTime, String, func

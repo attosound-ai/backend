@@ -18,6 +18,8 @@ pub enum ContentError {
     InvalidId(String),
     #[error("Unauthorized: you are not the author of this content")]
     Unauthorized,
+    #[error("Invalid metadata: {0}")]
+    InvalidMetadata(String),
     #[error("Database error: {0}")]
     DatabaseError(#[from] mongodb::error::Error),
 }
@@ -58,12 +60,18 @@ impl ContentService {
         created.id = Some(inserted_id);
 
         // Publish to Kafka
+        // The people the caption tags ride with the event, so social-service
+        // can tell each of them without reading the post back (Instagram style
+        // tagging, Sep 2026). Absent when nobody was tagged.
+        let tagged_user_ids = tagged_ids(&created.metadata);
+
         let event = serde_json::json!({
             "content_id": inserted_id.to_hex(),
             "author_id": &created.author_id,
             "content_type": &created.content_type,
             "title": &created.title,
             "created_at": created.created_at.to_rfc3339(),
+            "tagged_user_ids": tagged_user_ids,
         });
         self.kafka
             .publish(
@@ -159,17 +167,7 @@ impl ContentService {
         let oid = ObjectId::parse_str(id_str)
             .map_err(|_| ContentError::InvalidId(id_str.to_string()))?;
 
-        let mut update_doc = bson::Document::new();
-        if let Some(text) = &input.text_content {
-            update_doc.insert("text_content", text.clone());
-        }
-        if let Some(tags) = &input.tags {
-            update_doc.insert("tags", bson::to_bson(tags).unwrap_or_default());
-        }
-        if let Some(metadata) = &input.metadata {
-            update_doc.insert("metadata", bson::to_bson(metadata).unwrap_or_default());
-        }
-        if update_doc.is_empty() {
+        if input.text_content.is_none() && input.tags.is_none() && input.metadata.is_none() {
             return self.get_content(id_str).await;
         }
 
@@ -178,6 +176,39 @@ impl ContentService {
         if original.author_id != author_id {
             return Err(ContentError::Unauthorized);
         }
+
+        // Metadata sent with an edit is merged into the post's, never swapped
+        // for it: the app's edit screen sends only the tagged people, and a
+        // replace would wipe the duration, cover and size (Oct 27 2026).
+        if let Some(incoming) = &input.metadata {
+            check_cover_edit(&original.content_type, incoming)
+                .map_err(ContentError::InvalidMetadata)?;
+        }
+        let merged_metadata = input
+            .metadata
+            .as_ref()
+            .map(|incoming| merge_metadata(&original.metadata, incoming));
+        let newly_tagged = merged_metadata
+            .as_ref()
+            .map(|after| newly_tagged(&original.metadata, after))
+            .unwrap_or_default();
+
+        let mut update_doc = bson::Document::new();
+        if let Some(text) = &input.text_content {
+            update_doc.insert("text_content", text.clone());
+        }
+        if let Some(tags) = &input.tags {
+            update_doc.insert("tags", bson::to_bson(tags).unwrap_or_default());
+        }
+        if let Some(metadata) = &merged_metadata {
+            update_doc.insert("metadata", bson::to_bson(metadata).unwrap_or_default());
+        }
+        // The edit's time is stored too: it was only set on the answer, so a
+        // later read brought back the creation time, the "edited" mark went
+        // away and the phones could not order a live edit against what they
+        // had. Serialized like every insert, so reads stay the same type.
+        let now = Utc::now();
+        update_doc.insert("updated_at", bson::to_bson(&now).unwrap_or_default());
 
         info!("Updating content id={} author={} fields={:?}", id_str, author_id, update_doc);
         let matched = self
@@ -196,17 +227,26 @@ impl ContentService {
         if let Some(tags) = &input.tags {
             original.tags = tags.clone();
         }
-        if let Some(metadata) = &input.metadata {
-            original.metadata = metadata.clone();
+        if let Some(metadata) = merged_metadata {
+            original.metadata = metadata;
         }
-        original.updated_at = Utc::now();
+        original.updated_at = now;
         let updated = original;
 
-        // Publish Kafka event
+        // Publish Kafka event. Only the people this edit tagged for the first
+        // time ride with it, so social-service tells them and nobody twice.
+        //
+        // The post as it is now rides along too (caption, whole metadata and
+        // type), so chat-service can push it live to every phone showing the
+        // post (`post_updated` on post:<id>) without anyone reading it back.
         let event = serde_json::json!({
             "content_id": id_str,
             "author_id": author_id,
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": now.to_rfc3339(),
+            "tagged_user_ids": newly_tagged,
+            "content_type": updated.content_type,
+            "text_content": updated.text_content,
+            "metadata": updated.metadata,
         });
         self.kafka
             .publish("content.updated", id_str, &event.to_string())
@@ -290,5 +330,170 @@ impl ContentService {
 
     pub fn content_to_metadata_map(metadata: &HashMap<String, String>) -> HashMap<String, String> {
         metadata.clone()
+    }
+}
+
+/// The ids a post tags, from its `taggedUserIds` metadata (comma joined).
+fn tagged_ids(metadata: &HashMap<String, String>) -> Vec<String> {
+    metadata
+        .get("taggedUserIds")
+        .map(|raw| {
+            raw.split(',')
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// An edit's metadata over the post's: sent keys win, an empty value removes
+/// the key, and every key not sent stays as it was.
+fn merge_metadata(
+    original: &HashMap<String, String>,
+    incoming: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut merged = original.clone();
+    for (key, value) in incoming {
+        if value.is_empty() {
+            merged.remove(key);
+        } else {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    merged
+}
+
+/// The metadata key of an audio post's cover (app: features/feed/utils/coverArt).
+const COVER_KEY: &str = "coverPublicId";
+
+/// An edit may set or remove the cover only on an audio post, and only to a
+/// Cloudinary public id of ours (`atto/...`), never to a full URL: the app
+/// and the web build the picture's address from it. An empty value removes.
+fn check_cover_edit(
+    content_type: &str,
+    incoming: &HashMap<String, String>,
+) -> Result<(), String> {
+    let Some(value) = incoming.get(COVER_KEY) else {
+        return Ok(());
+    };
+    if value.is_empty() {
+        return Ok(());
+    }
+    if content_type != "audio" {
+        return Err("only an audio post has a cover".into());
+    }
+    let ok = value.len() <= 200
+        && value.starts_with("atto/")
+        && !value.contains("..")
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err("the cover must be a public id of an uploaded picture".into())
+    }
+}
+
+/// The people tagged after an edit who were not tagged before it.
+fn newly_tagged(before: &HashMap<String, String>, after: &HashMap<String, String>) -> Vec<String> {
+    let already = tagged_ids(before);
+    tagged_ids(after)
+        .into_iter()
+        .filter(|id| !already.contains(id))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests_edit_cover {
+    use super::*;
+
+    fn meta(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn a_new_cover_replaces_the_old_and_keeps_the_rest() {
+        let post = meta(&[("duration", "32"), ("coverPublicId", "atto/content/content_old")]);
+        let edit = meta(&[("coverPublicId", "atto/content/square_9f3a1b2c4d5e")]);
+        assert!(check_cover_edit("audio", &edit).is_ok());
+        let merged = merge_metadata(&post, &edit);
+        assert_eq!(merged.get("coverPublicId").map(String::as_str), Some("atto/content/square_9f3a1b2c4d5e"));
+        assert_eq!(merged.get("duration").map(String::as_str), Some("32"));
+    }
+
+    #[test]
+    fn an_empty_cover_removes_it_on_any_post() {
+        let post = meta(&[("duration", "32"), ("coverPublicId", "atto/content/content_old")]);
+        let edit = meta(&[("coverPublicId", "")]);
+        assert!(check_cover_edit("audio", &edit).is_ok());
+        assert!(check_cover_edit("image", &edit).is_ok());
+        assert!(!merge_metadata(&post, &edit).contains_key("coverPublicId"));
+    }
+
+    #[test]
+    fn only_audio_posts_take_a_cover() {
+        let edit = meta(&[("coverPublicId", "atto/content/square_1")]);
+        assert!(check_cover_edit("image", &edit).is_err());
+        assert!(check_cover_edit("video", &edit).is_err());
+    }
+
+    #[test]
+    fn a_url_or_a_foreign_path_is_refused() {
+        for bad in [
+            "https://evil.example/x.jpg",
+            "content/square_1",
+            "atto/../secrets",
+            "atto/content/a b",
+            "atto/content/x?y",
+        ] {
+            let edit = meta(&[("coverPublicId", bad)]);
+            assert!(check_cover_edit("audio", &edit).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_edit_without_a_cover_is_not_checked() {
+        let edit = meta(&[("taggedUserIds", "167")]);
+        assert!(check_cover_edit("image", &edit).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests_edit_tags {
+    use super::*;
+
+    fn meta(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn an_edit_keeps_duration_and_cover_and_adds_the_tag() {
+        let post = meta(&[("duration", "137.135"), ("coverPublicId", "atto/content/c")]);
+        let edit = meta(&[("taggedUserIds", "167"), ("taggedUsernames", "youngraybeats")]);
+        let merged = merge_metadata(&post, &edit);
+        assert_eq!(merged.get("duration").map(String::as_str), Some("137.135"));
+        assert_eq!(merged.get("coverPublicId").map(String::as_str), Some("atto/content/c"));
+        assert_eq!(merged.get("taggedUserIds").map(String::as_str), Some("167"));
+        assert_eq!(newly_tagged(&post, &merged), vec!["167".to_string()]);
+    }
+
+    #[test]
+    fn empty_values_remove_the_tags_and_tell_nobody() {
+        let post = meta(&[("duration", "9"), ("taggedUserIds", "167"), ("taggedUsernames", "youngraybeats")]);
+        let edit = meta(&[("taggedUserIds", ""), ("taggedUsernames", "")]);
+        let merged = merge_metadata(&post, &edit);
+        assert!(!merged.contains_key("taggedUserIds"));
+        assert!(!merged.contains_key("taggedUsernames"));
+        assert_eq!(merged.get("duration").map(String::as_str), Some("9"));
+        assert!(newly_tagged(&post, &merged).is_empty());
+    }
+
+    #[test]
+    fn someone_already_tagged_is_not_told_again() {
+        let post = meta(&[("taggedUserIds", "167"), ("taggedUsernames", "youngraybeats")]);
+        let edit = meta(&[("taggedUserIds", "167,28"), ("taggedUsernames", "youngraybeats,andrey.plazas")]);
+        let merged = merge_metadata(&post, &edit);
+        assert_eq!(newly_tagged(&post, &merged), vec!["28".to_string()]);
     }
 }

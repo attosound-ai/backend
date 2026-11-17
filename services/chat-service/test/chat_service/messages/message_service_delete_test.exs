@@ -25,14 +25,24 @@ defmodule ChatService.Messages.MessageServiceDeleteTest do
       authorizer: Application.get_env(:chat_service, :message_authorizer),
       persistence: Application.get_env(:chat_service, :message_persistence),
       cleaner: Application.get_env(:chat_service, :message_reaction_cleaner),
-      publisher: Application.get_env(:chat_service, :message_event_publisher)
+      publisher: Application.get_env(:chat_service, :message_event_publisher),
+      preview: Application.get_env(:chat_service, :message_conversation_preview)
     }
+
+    # Every test gets the recording double for the conversation list step: the
+    # default one talks to Cassandra and to the user channels.
+    Application.put_env(
+      :chat_service,
+      :message_conversation_preview,
+      Doubles.ConversationPreview.Recording
+    )
 
     on_exit(fn ->
       restore(:message_authorizer, original.authorizer)
       restore(:message_persistence, original.persistence)
       restore(:message_reaction_cleaner, original.cleaner)
       restore(:message_event_publisher, original.publisher)
+      restore(:message_conversation_preview, original.preview)
     end)
 
     :ok
@@ -84,6 +94,49 @@ defmodule ChatService.Messages.MessageServiceDeleteTest do
       # Publish runs last, with payload containing the persistence-stamped timestamp
       assert_received {:event_publisher_deleted, publish_payload}
       assert publish_payload.deleted_at == Doubles.Persistence.Ok.fixed_timestamp()
+    end
+
+    test "the conversation list is told, with who deleted the message" do
+      swap(
+        message_authorizer: Doubles.Authorizer.Ok,
+        message_persistence: Doubles.Persistence.Ok,
+        message_reaction_cleaner: Doubles.ReactionCleaner.Recording,
+        message_event_publisher: Doubles.EventPublisher.Recording
+      )
+
+      {:ok, _} = MessageService.delete_message(@message_id, @conversation_id, @user_id)
+
+      assert_received {:conversation_preview_deleted, @message_id, @conversation_id, @user_id}
+    end
+  end
+
+  describe "delete_message/3 — the conversation list is left alone when nothing was deleted" do
+    test "not told when the user may not delete the message" do
+      swap(
+        message_authorizer: Doubles.Authorizer.Forbidden,
+        message_persistence: Doubles.Persistence.Ok,
+        message_reaction_cleaner: Doubles.ReactionCleaner.Recording,
+        message_event_publisher: Doubles.EventPublisher.Recording
+      )
+
+      assert {:error, :forbidden} =
+               MessageService.delete_message(@message_id, @conversation_id, @user_id)
+
+      refute_received {:conversation_preview_deleted, _, _, _}
+    end
+
+    test "not told when the delete could not be written" do
+      swap(
+        message_authorizer: Doubles.Authorizer.Ok,
+        message_persistence: Doubles.Persistence.Fails,
+        message_reaction_cleaner: Doubles.ReactionCleaner.Recording,
+        message_event_publisher: Doubles.EventPublisher.Recording
+      )
+
+      assert {:error, :update_failed} =
+               MessageService.delete_message(@message_id, @conversation_id, @user_id)
+
+      refute_received {:conversation_preview_deleted, _, _, _}
     end
   end
 

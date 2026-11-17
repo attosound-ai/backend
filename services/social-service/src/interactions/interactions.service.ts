@@ -4,13 +4,17 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from "@nestjs/common";
+import { DeactivatedUsersRepository } from "../redis/repositories/deactivated-users.repository";
+import { withoutAuthors } from "../common/deactivated-authors";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountsRepository } from "../redis/repositories/counts.repository";
 import { GrpcClientsService } from "../grpc/grpc-clients.service";
 import { KafkaProducer } from "../kafka/kafka.producer";
 import { PushService } from "../push/push.service";
 import { CommentResponseDto } from "./dto/interaction.dto";
+import { visibleComments } from "./visible-comments";
 
 @Injectable()
 export class InteractionsService {
@@ -22,6 +26,8 @@ export class InteractionsService {
     private readonly grpcClients: GrpcClientsService,
     private readonly kafkaProducer: KafkaProducer,
     private readonly pushService: PushService,
+    // Accounts in deletion grace: their comments are hidden.
+    @Optional() private readonly deactivated?: DeactivatedUsersRepository,
   ) {}
 
   /** Fire-and-forget push notification after creating a notification in DB. */
@@ -30,6 +36,7 @@ export class InteractionsService {
     type: string,
     actorId: string,
     referenceId: string,
+    commentId?: string,
   ): void {
     this.grpcClients.getUser(actorId).then((actor) => {
       this.pushService
@@ -39,6 +46,8 @@ export class InteractionsService {
           actorId,
           actor?.username || "Someone",
           referenceId,
+          undefined,
+          commentId,
         )
         .catch((err) => this.logger.error(`Push failed: ${err.message}`));
     });
@@ -139,21 +148,16 @@ export class InteractionsService {
     text: string,
     parentId?: string,
   ): Promise<CommentResponseDto> {
-    if (parentId) {
-      const parent = await this.prisma.comment.findUnique({
-        where: { id: parentId },
-      });
-      if (!parent || parent.contentId !== contentId) {
-        throw new NotFoundException("Parent comment not found");
-      }
-    }
+    const threadId = parentId
+      ? await this.threadOf(parentId, contentId)
+      : null;
 
     const comment = await this.prisma.comment.create({
       data: {
         userId,
         contentId,
         text,
-        parentId: parentId || null,
+        parentId: threadId,
       },
     });
 
@@ -167,6 +171,8 @@ export class InteractionsService {
           type: "comment",
           actorId: userId,
           referenceId: contentId,
+          // A tap on the notice opens this comment, not only the post.
+          commentId: comment.id,
         },
       });
 
@@ -175,8 +181,9 @@ export class InteractionsService {
         recipient_id: content.author_id,
         actor_id: userId,
         reference_id: contentId,
+        comment_id: comment.id,
       });
-      this.firePush(content.author_id, "comment", userId, contentId);
+      this.firePush(content.author_id, "comment", userId, contentId, comment.id);
     }
 
     await this.kafkaProducer.send("interaction.created", {
@@ -210,6 +217,35 @@ export class InteractionsService {
     };
   }
 
+  /**
+   * The comment a new reply hangs from. The list shows one level of replies,
+   * so an answer to a reply joins the thread of that reply; hung from the
+   * reply itself nobody would ever see it. A deleted comment takes no
+   * replies, for the same reason.
+   */
+  private async threadOf(parentId: string, contentId: string): Promise<string> {
+    const parent = await this.prisma.comment.findUnique({
+      where: { id: parentId },
+    });
+    if (!parent || parent.isDeleted || parent.contentId !== contentId) {
+      throw new NotFoundException("Parent comment not found");
+    }
+    if (!parent.parentId) return parent.id;
+
+    const thread = await this.prisma.comment.findUnique({
+      where: { id: parent.parentId },
+    });
+    if (!thread || thread.isDeleted) {
+      throw new NotFoundException("Parent comment not found");
+    }
+    return thread.id;
+  }
+
+  /** The number the post shows: only what the list of comments can show. */
+  private countVisibleComments(contentId: string): Promise<number> {
+    return this.prisma.comment.count({ where: visibleComments(contentId) });
+  }
+
   async getComments(
     contentId: string,
     page: number,
@@ -220,17 +256,18 @@ export class InteractionsService {
   }> {
     const skip = (page - 1) * limit;
 
-    const [comments, total] = await Promise.all([
+    const [allComments, total] = await Promise.all([
       this.prisma.comment.findMany({
         where: { contentId, parentId: null, isDeleted: false },
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,
         include: {
+          // Every reply: the app has no "view more replies", so a cap here
+          // (it was 3) hid the fourth one from everybody, its author included.
           replies: {
             where: { isDeleted: false },
             orderBy: { createdAt: "asc" },
-            take: 3,
           },
         },
       }),
@@ -238,6 +275,19 @@ export class InteractionsService {
         where: { contentId, parentId: null, isDeleted: false },
       }),
     ]);
+
+    // Comments and replies of accounts in their deletion grace are hidden
+    // (the page total still counts them; they come back if recovered).
+    const authorIds: string[] = [];
+    for (const c of allComments) {
+      authorIds.push(c.userId, ...c.replies.map((r) => r.userId));
+    }
+    const hidden = this.deactivated
+      ? await this.deactivated.among(authorIds)
+      : new Set<string>();
+    const comments = withoutAuthors(allComments, (c) => c.userId, hidden).map(
+      (c) => ({ ...c, replies: withoutAuthors(c.replies, (r) => r.userId, hidden) }),
+    );
 
     const userIds = new Set<string>();
     for (const c of comments) {
@@ -360,7 +410,13 @@ export class InteractionsService {
       data: { isDeleted: true, deletedAt: new Date() },
     });
 
-    await this.counts.decrement("comments", comment.contentId);
+    // Counted again, not one taken off: a comment leaves with its replies,
+    // and counting also repairs a number that had drifted before.
+    await this.counts.set(
+      "comments",
+      comment.contentId,
+      await this.countVisibleComments(comment.contentId),
+    );
 
     await this.kafkaProducer.send("interaction.deleted", {
       id: commentId,
@@ -553,7 +609,7 @@ export class InteractionsService {
           this.prisma.interaction.count({ where: { contentId, type: "LIKE" } }),
         ),
         this.counts.getOrCompute("comments", contentId, () =>
-          this.prisma.comment.count({ where: { contentId } }),
+          this.countVisibleComments(contentId),
         ),
         this.counts.getOrCompute("shares", contentId, () =>
           this.prisma.interaction.count({
@@ -639,7 +695,7 @@ export class InteractionsService {
           }),
           this.prisma.comment.groupBy({
             by: ["contentId"],
-            where: { contentId: { in: missingIds } },
+            where: visibleComments({ in: missingIds }),
             _count: { contentId: true },
           }),
           this.prisma.interaction.groupBy({

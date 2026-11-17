@@ -22,6 +22,8 @@ export class NotificationResponseDto {
   type: string;
   actorId: string;
   referenceId: string | null;
+  /** The comment a "comment" notice is about; null for other types and old rows. */
+  commentId: string | null;
   isRead: boolean;
   createdAt: string;
   actor?: {

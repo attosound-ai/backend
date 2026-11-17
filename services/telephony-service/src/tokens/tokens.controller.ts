@@ -8,6 +8,9 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { jwt as TwilioJwt } from "twilio";
+import { AnalyticsService } from "../analytics/analytics.service";
+import { verifiedUserIdFromBearer } from "../common/verified-user-id";
+import { choosePushCredential, normalizePlatform } from "./push-credential";
 
 const { AccessToken } = TwilioJwt;
 const { VoiceGrant } = AccessToken;
@@ -16,7 +19,10 @@ const { VoiceGrant } = AccessToken;
 export class TokensController {
   private readonly logger = new Logger(TokensController.name);
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly analytics: AnalyticsService,
+  ) {}
 
   /**
    * Generate a Twilio Access Token with a VoiceGrant for the authenticated user.
@@ -40,23 +46,17 @@ export class TokensController {
     const apiKeySid = this.config.get<string>("twilio.apiKeySid", "");
     const apiKeySecret = this.config.get<string>("twilio.apiKeySecret", "");
     const twimlAppSid = this.config.get<string>("twilio.twimlAppSid", "");
-    const pushCredentialFcm = this.config.get<string>(
-      "twilio.pushCredentialSidFcm",
-      "",
-    );
-    const pushCredentialApns = this.config.get<string>(
-      "twilio.pushCredentialSidApns",
-      "",
-    );
+    const pushChoice = choosePushCredential(platform, {
+      apns: this.config.get<string>("twilio.pushCredentialSidApns", ""),
+      android: this.config.get<string>("twilio.pushCredentialSidAndroid", ""),
+      fcmLegacy: this.config.get<string>("twilio.pushCredentialSidFcm", ""),
+    });
+    const pushCredentialSid = pushChoice.sid;
 
     const token = new AccessToken(accountSid, apiKeySid, apiKeySecret, {
       identity,
       ttl: 3600, // 1 hour
     });
-
-    // Select push credential based on client platform
-    const pushCredentialSid =
-      platform === "ios" ? pushCredentialApns : pushCredentialFcm;
 
     const voiceGrant = new VoiceGrant({
       outgoingApplicationSid: twimlAppSid,
@@ -66,9 +66,26 @@ export class TokensController {
 
     token.addGrant(voiceGrant);
 
-    this.logger.log(
-      `Voice token generated: identity=${identity} platform=${platform || "unknown"} pushCredSid=${pushCredentialSid}`,
-    );
+    const platformName = normalizePlatform(platform);
+    if (pushChoice.missingReason) {
+      // The token still goes out (outgoing calls work); incoming pushes cannot
+      // reach this device until the credential exists.
+      this.logger.warn(
+        `Voice token WITHOUT push credential: identity=${identity} platform=${platformName} reason=${pushChoice.missingReason}`,
+      );
+    } else {
+      this.logger.log(
+        `Voice token generated: identity=${identity} platform=${platformName} pushCredSource=${pushChoice.source}`,
+      );
+    }
+
+    this.analytics.capture(resolvedUserId, "backend_voice_token_issued", {
+      identity,
+      platform: platformName,
+      has_push_cred: !!pushCredentialSid,
+      push_cred_source: pushChoice.source,
+      push_cred_missing_reason: pushChoice.missingReason,
+    });
 
     return {
       token: token.toJwt(),
@@ -76,18 +93,8 @@ export class TokensController {
     };
   }
 
-  /** Extract user ID from the Authorization Bearer JWT. */
+  /** The user ID from a Bearer JWT signed with our secret (see verified-user-id.ts). */
   private extractUserIdFromJwt(authHeader: string): string | null {
-    if (!authHeader?.startsWith("Bearer ")) return null;
-
-    try {
-      const jwtToken = authHeader.slice(7);
-      const payload = JSON.parse(
-        Buffer.from(jwtToken.split(".")[1], "base64").toString(),
-      );
-      return payload.sub || payload.user_id || null;
-    } catch {
-      return null;
-    }
+    return verifiedUserIdFromBearer(authHeader);
   }
 }

@@ -2,9 +2,9 @@ defmodule ChatService.KafkaConsumer do
   @moduledoc """
   GenServer-based Kafka consumer using brod.
 
-  Subscribes to `interaction.created`, `interaction.removed`, and
-  `notification.trigger` topics, then broadcasts events via Phoenix PubSub
-  to `post:<content_id>` and `user:<recipient_id>` channels.
+  Subscribes to `interaction.created`, `interaction.removed`,
+  `content.updated` and `notification.trigger` topics, then broadcasts events
+  via Phoenix PubSub to `post:<content_id>` and `user:<recipient_id>` channels.
   """
 
   use GenServer
@@ -13,7 +13,15 @@ defmodule ChatService.KafkaConsumer do
 
   @client_id :chat_service_kafka_consumer
   @group_id "chat-social-broadcast"
-  @topics ["interaction.created", "interaction.removed", "notification.trigger", "user.deleted"]
+  @topics [
+    "interaction.created",
+    "interaction.removed",
+    "content.updated",
+    "notification.trigger",
+    "user.deleted",
+    "user.deactivated",
+    "user.reactivated"
+  ]
 
   # Public API
 
@@ -142,6 +150,18 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
               })
             end
 
+          "content.updated" ->
+            # An edit (caption, tags or the cover of an audio post, Nov 2026)
+            # reaches every phone that shows the post, so nobody has to pull
+            # to refresh to see the new cover.
+            case post_updated_payload(payload) do
+              {:ok, content_id, out} ->
+                ChatServiceWeb.Endpoint.broadcast("post:#{content_id}", "post_updated", out)
+
+              :skip ->
+                nil
+            end
+
           "notification.trigger" ->
             recipient_id = payload["recipient_id"]
             type = payload["type"]
@@ -155,14 +175,27 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
               )
             end
 
+          "user.deactivated" ->
+            data = payload["data"] || payload
+            user_ids = data["userIds"] || []
+            Logger.info("Hiding chats of accounts pending deletion: #{inspect(user_ids)}")
+            ChatService.Accounts.Deactivated.add(user_ids)
+
+          "user.reactivated" ->
+            data = payload["data"] || payload
+            user_ids = data["userIds"] || []
+            Logger.info("Showing chats of recovered accounts: #{inspect(user_ids)}")
+            ChatService.Accounts.Deactivated.remove(user_ids)
+
           "user.deleted" ->
             data = payload["data"] || payload
             user_ids = data["userIds"] || []
-            Logger.info("Deleting chat data for users: #{inspect(user_ids)}")
+            Logger.info("Processing user.deleted for: #{inspect(user_ids)}")
+            ChatService.Accounts.Deactivated.remove(user_ids)
 
-            for uid <- user_ids do
-              ChatService.Conversations.ConversationService.delete_all_for_user(uid)
-            end
+            # brod forces us to ACK, so a failed cascade must NOT vanish silently:
+            # retry briefly, then dead-letter (topic + table + Sentry) before ACK.
+            Enum.each(user_ids, &process_user_deletion/1)
 
           _ ->
             nil
@@ -173,5 +206,85 @@ defmodule ChatService.KafkaConsumer.MessageHandler do
     end
 
     {:ok, :ack, state}
+  end
+
+  # What `post_updated` carries: only the post's public fields, as
+  # content-service sent them. The tagged ids of the edit stay out (they are
+  # for notifications). Public so it can be tested without Kafka.
+  def post_updated_payload(payload) when is_map(payload) do
+    data = payload["data"] || payload
+    content_id = data["content_id"]
+
+    if is_binary(content_id) and content_id != "" do
+      out =
+        data
+        |> Map.take(["content_id", "content_type", "text_content", "metadata", "updated_at"])
+        |> Map.reject(fn {_k, v} -> is_nil(v) end)
+
+      {:ok, content_id, out}
+    else
+      :skip
+    end
+  end
+
+  def post_updated_payload(_), do: :skip
+
+  # --- user.deleted cascade with retry + dead-letter ---
+
+  @max_inline_attempts 2
+  @inline_backoff_ms 200
+
+  defp process_user_deletion(user_id) do
+    user_id = to_string(user_id)
+
+    case attempt_delete(user_id, 1) do
+      {:ok, summary} ->
+        ChatService.Telemetry.Audit.log(:user_deletion_completed, summary)
+
+      {:error, reason, partial} ->
+        send_to_dlq(user_id, reason, partial)
+    end
+  end
+
+  # One quick inline retry; serious retries are delegated to the DLQ reprocessor
+  # so we never block this partition for long.
+  defp attempt_delete(user_id, attempt) do
+    case ChatService.Conversations.AccountDeletion.delete_all_for_user(user_id) do
+      {:ok, summary} ->
+        {:ok, summary}
+
+      {:error, _reason, _partial} when attempt < @max_inline_attempts ->
+        Process.sleep(@inline_backoff_ms)
+        attempt_delete(user_id, attempt + 1)
+
+      {:error, reason, partial} ->
+        {:error, reason, partial}
+    end
+  end
+
+  defp send_to_dlq(user_id, reason, partial) do
+    Logger.error("user.deleted cascade failed for #{user_id}: #{inspect(reason)} — routing to DLQ")
+
+    ChatService.KafkaProducer.produce("user.deleted.dlq", user_id, %{
+      "userId" => user_id,
+      "reason" => inspect(reason),
+      "partial" => inspect(partial),
+      "failed_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+    })
+
+    ChatService.Repo.execute_prepared(
+      "INSERT INTO failed_deletions (user_id, reason, attempts, failed_at) VALUES (?, ?, ?, ?)",
+      %{
+        "user_id" => {"text", user_id},
+        "reason" => {"text", inspect(reason)},
+        "attempts" => {"int", @max_inline_attempts},
+        "failed_at" => {"timestamp", DateTime.utc_now()}
+      }
+    )
+
+    Sentry.capture_message("user.deleted chat cascade routed to DLQ",
+      level: :error,
+      extra: %{user_id: user_id, reason: inspect(reason)}
+    )
   end
 end

@@ -1,13 +1,24 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  Optional,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CountsRepository } from '../redis/repositories/counts.repository';
 import { FeedRepository } from '../redis/repositories/feed.repository';
 import { FollowGraphRepository } from '../redis/repositories/follow-graph.repository';
 import { RedisClientProvider } from '../redis/redis-client.provider';
-import { GrpcClientsService } from '../grpc/grpc-clients.service';
+import {
+  ContentUnavailableError,
+  GrpcClientsService,
+} from '../grpc/grpc-clients.service';
 import { InteractionsService } from '../interactions/interactions.service';
 import { FollowsService } from '../follows/follows.service';
 import { FeedPostDto } from './dto/feed.dto';
+import { DeactivatedUsersRepository } from '../redis/repositories/deactivated-users.repository';
+import { hideDeactivatedAuthors } from '../common/deactivated-authors';
 
 @Injectable()
 export class FeedService {
@@ -22,6 +33,8 @@ export class FeedService {
     private readonly grpcClients: GrpcClientsService,
     private readonly interactionsService: InteractionsService,
     private readonly followsService: FollowsService,
+    // Accounts in deletion grace: their posts are hidden everywhere.
+    @Optional() private readonly deactivated?: DeactivatedUsersRepository,
   ) {}
 
   /**
@@ -78,7 +91,9 @@ export class FeedService {
     }
 
     // Step 2+3: Fetch content + authors in parallel
-    const { contents } = await this.grpcClients.getContentBatch(contentIds);
+    const { contents: fetched } = await this.grpcClients.getContentBatch(contentIds);
+    // Posts of accounts in their 30 day deletion grace are not shown.
+    const contents = await hideDeactivatedAuthors(fetched, (c) => c.author_id, this.deactivated);
     const t2 = Date.now();
     this.logger.log(`[PERF] Step 2 getContentBatch gRPC: ${t2 - t1}ms (${contents.length} contents)`);
 
@@ -140,8 +155,13 @@ export class FeedService {
   /**
    * GET /api/v1/posts/reels - TikTok-style FYP reels feed.
    *
-   * Mixes personalised (from following) + globally trending reels,
-   * scored with a completion-weighted EdgeRank.
+   * Walks the content service's newest-first list (all types) and keeps only
+   * reels and vertical videos, so a reel is found however many images or
+   * audios were posted after it. Each page is the next `limit` reels older
+   * than `cursor`, ranked with the completion-weighted reel score.
+   *
+   * `cursor` is the created_at (ms) of the oldest reel already returned; 0 is
+   * the first page.
    */
   async getReelsFeed(
     userId: string,
@@ -151,60 +171,64 @@ export class FeedService {
     posts: FeedPostDto[];
     meta: { nextCursor: number | null; hasMore: boolean };
   }> {
-    const REEL_TYPES = new Set(['reel', 'video']);
+    // Reels = actual reels + vertical (~9:16) videos. height/width ≥ this counts
+    // as vertical; 9:16 ≈ 1.78. Landscape/square videos stay out of reels.
+    const REEL_MIN_ASPECT = 1.6;
+    // Content service caps a list page at 100; bound the walk per request.
+    const SCAN_PAGE = 100;
+    const SCAN_MAX_PAGES = 10;
 
-    // Get personalised feed IDs (larger window so we have enough reels after filtering)
-    let personalIds: string[] = [];
-    try {
-      const { members } = await this.feedRepo.page(userId, cursor, limit * 5);
-      personalIds = members;
-    } catch (err) {
-      this.logger.warn(
-        `Redis reels feed read failed, using empty list: ${(err as Error).message}`,
-      );
-    }
-    if (personalIds.length === 0 && cursor === 0) {
-      const result = await this.buildFeedFromFollowing(userId, 0, limit * 5);
-      personalIds = result.contentIds;
-    }
+    type Content = Awaited<ReturnType<typeof this.grpcClients.listRecentContent>>['contents'][number];
+    const isReel = (c: Content): boolean => {
+      if (c.content_type === 'reel') return true;
+      if (c.content_type !== 'video') return false;
+      const w = Number(c.metadata?.width);
+      const h = Number(c.metadata?.height);
+      // Exclude only confirmed landscape/square. Videos with unknown dimensions
+      // are kept (the client gates by aspect too).
+      if (w > 0 && h > 0 && h / w < REEL_MIN_ASPECT) return false;
+      return true;
+    };
+    const tsOf = (c: Content): number => new Date(c.created_at).getTime();
 
-    // Trending content IDs by like count over last 7 days
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const trending = await this.prisma.interaction.groupBy({
-      by: ['contentId'],
-      where: { type: 'LIKE', createdAt: { gte: sevenDaysAgo } },
-      _count: { contentId: true },
-      orderBy: { _count: { contentId: 'desc' } },
-      take: 50,
-    });
-    const trendingIds = trending.map((t) => t.contentId);
-
-    // Deduplicate: trending first, then personal
-    const seenIds = new Set<string>();
-    const candidateIds: string[] = [];
-    for (const id of [...trendingIds, ...personalIds]) {
-      if (!seenIds.has(id)) {
-        seenIds.add(id);
-        candidateIds.push(id);
+    // The list is ordered by _id; start just past the cursor's second (2 s of
+    // margin for _id vs created_at skew) and cut exactly by created_at below.
+    let scanCursor =
+      cursor > 0
+        ? Math.floor(cursor / 1000 + 2).toString(16).padStart(8, '0') + '0'.repeat(16)
+        : '';
+    const picked: Content[] = [];
+    let exhausted = false;
+    let lastScannedTs: number | null = null;
+    for (let i = 0; i < SCAN_MAX_PAGES && picked.length <= limit; i++) {
+      const { contents, meta } = await this.grpcClients.listRecentContent(scanCursor, SCAN_PAGE);
+      for (const c of contents) {
+        const ts = tsOf(c);
+        if (cursor > 0 && !(ts < cursor)) continue;
+        lastScannedTs = ts;
+        if (isReel(c) && picked.length <= limit) picked.push(c);
       }
+      if (!meta.has_more || !meta.next_cursor) {
+        exhausted = true;
+        break;
+      }
+      scanCursor = meta.next_cursor;
     }
 
-    if (candidateIds.length === 0) {
-      return { posts: [], meta: { nextCursor: null, hasMore: false } };
-    }
+    const pageContents = picked.slice(0, limit);
+    const hasMore = picked.length > limit || (!exhausted && lastScannedTs !== null);
+    const nextCursor = !hasMore
+      ? null
+      : picked.length > limit
+        ? tsOf(pageContents[pageContents.length - 1])
+        : lastScannedTs;
 
-    // Fetch content and filter to reel/video types
-    const { contents } = await this.grpcClients.getContentBatch(
-      candidateIds.slice(0, limit * 5),
-    );
-    const reelContents = contents.filter((c) => REEL_TYPES.has(c.content_type));
-
-    if (reelContents.length === 0) {
-      return { posts: [], meta: { nextCursor: null, hasMore: false } };
+    if (pageContents.length === 0) {
+      return { posts: [], meta: { nextCursor, hasMore } };
     }
 
     // Batch resolve authors + interactions + follows in parallel
-    const posts = await this.resolvePostsBatch(reelContents, userId);
+    const posts = await this.resolvePostsBatch(pageContents, userId);
 
     // Score with reels formula
     const followingSet = new Set(posts.filter((p) => p.isFollowingAuthor).map((p) => p.authorId));
@@ -215,13 +239,9 @@ export class FeedService {
         this.computeReelScore(a, followingSet.has(a.authorId), String(a.authorId) === reelsViewerId),
     );
 
-    const page = posts.slice(0, limit);
-    const hasMore = posts.length > limit;
-    const lastTs = page.length > 0 ? new Date(page[page.length - 1].createdAt).getTime() : null;
-
     return {
-      posts: page,
-      meta: { nextCursor: hasMore ? lastTs : null, hasMore },
+      posts,
+      meta: { nextCursor, hasMore },
     };
   }
 
@@ -467,13 +487,18 @@ export class FeedService {
   async updatePost(
     userId: string,
     postId: string,
-    data: { textContent?: string; tags?: string[] },
+    data: {
+      textContent?: string;
+      tags?: string[];
+      metadata?: Record<string, string>;
+    },
   ): Promise<FeedPostDto> {
     const updated = await this.grpcClients.updateContent({
       contentId: postId,
       authorId: userId,
       textContent: data.textContent,
       tags: data.tags,
+      metadata: data.metadata,
     });
 
     if (!updated) {
@@ -496,6 +521,11 @@ export class FeedService {
     posts: FeedPostDto[];
     meta: { nextCursor: string | null; hasMore: boolean; total?: number };
   }> {
+    // A profile in its deletion grace shows no posts to anybody.
+    if ((await this.deactivated?.among([String(authorId)]))?.has(String(authorId))) {
+      return { posts: [], meta: { nextCursor: null, hasMore: false, total: 0 } };
+    }
+
     // Fetch content authored by the target user
     const { contents, meta } = await this.grpcClients.getContentByAuthor(
       authorId,
@@ -526,13 +556,28 @@ export class FeedService {
    * Get a single post with author info and interaction counts
    */
   async getPost(postId: string, currentUserId: string): Promise<FeedPostDto> {
-    const content = await this.grpcClients.getContent(postId);
+    // 404 only when the post is really gone: the app tells the person it was
+    // deleted. Content service not answering is a 503, which the app shows
+    // as "couldn't load" and retries.
+    let content;
+    try {
+      content = await this.grpcClients.getContentOrMissing(postId);
+    } catch (err) {
+      if (err instanceof ContentUnavailableError) {
+        throw new ServiceUnavailableException('Content service unavailable');
+      }
+      throw err;
+    }
 
     if (!content) {
       throw new NotFoundException('Post not found');
     }
 
     const [post] = await this.resolvePostsBatch([content], currentUserId);
+    // Hidden author (deletion grace): same answer as a deleted post.
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
     return post;
   }
 
@@ -618,9 +663,12 @@ export class FeedService {
    * Eliminates the N+1 pattern across all feed endpoints.
    */
   private async resolvePostsBatch(
-    contents: any[],
+    allContents: any[],
     viewerId: string,
   ): Promise<FeedPostDto[]> {
+    // Every feed (reels, explore, profile, single post) passes through here:
+    // drop what accounts in their deletion grace authored.
+    const contents = await hideDeactivatedAuthors(allContents, (c) => c.author_id, this.deactivated);
     if (contents.length === 0) return [];
 
     const postIds = contents.map((c) => c.id);

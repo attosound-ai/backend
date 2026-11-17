@@ -2,6 +2,8 @@ use actix_web::HttpRequest;
 use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 use serde::Deserialize;
 
+use super::token_kind::is_two_factor_pending;
+
 /// JWT claims matching the user-service token structure.
 /// `sub` contains the user ID; `scope` distinguishes full sessions from
 /// in-progress signup tokens that must not reach content endpoints.
@@ -10,6 +12,8 @@ struct Claims {
     sub: String,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    iss: Option<String>,
 }
 
 const SCOPE_SIGNUP_PENDING: &str = "signup_pending";
@@ -26,10 +30,23 @@ pub fn extract_user_id(req: &HttpRequest, jwt_secret: &str) -> Option<String> {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
                 let key = DecodingKey::from_secret(jwt_secret.as_bytes());
-                let mut validation = Validation::new(Algorithm::HS256);
-                validation.validate_exp = false; // Let refresh flow handle expiry
+                // Nov 12 2026: expiry is checked. It was off ("let the refresh
+                // flow handle it"), so any session token ever signed opened
+                // the content routes forever, even after a password reset
+                // closed every session. An expired one answers 401 now, the
+                // app refreshes and retries like on every other service.
+                // Default leeway (60 s) for clock skew.
+                let validation = Validation::new(Algorithm::HS256);
                 if let Ok(data) = decode::<Claims>(token, &key, &validation) {
                     if data.claims.scope.as_deref() == Some(SCOPE_SIGNUP_PENDING) {
+                        return None;
+                    }
+                    // The 2FA temporary token (password only) is never a
+                    // session, and it does not fall back to X-User-ID either.
+                    if is_two_factor_pending(
+                        data.claims.iss.as_deref(),
+                        data.claims.scope.as_deref(),
+                    ) {
                         return None;
                     }
                     return Some(data.claims.sub);

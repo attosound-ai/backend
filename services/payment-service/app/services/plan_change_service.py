@@ -6,20 +6,21 @@ The DB writes live in TransactionRepository. This file coordinates.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 import stripe
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.entitlements import can_upgrade
+from app import plan_catalog
 from app.models.subscription import Subscription
 from app.models.transaction import Transaction
 from app.repositories.transaction_repo import TransactionRepository
 from app.services.proration_calculator import (
-    PLAN_RANK,
     PlanChangePreview,
+)
+from app.services.proration_calculator import (
     preview as build_preview,
 )
 from app.services.stripe_service import get_or_create_customer
@@ -38,13 +39,21 @@ class PlanChangeService:
 
     # ── Read-only preview ─────────────────────────────────────────────
 
+    async def _require_target(self, target_plan: str) -> None:
+        row = await plan_catalog.get_plan(self.session, target_plan)
+        if not row or not row.active:
+            raise PlanChangeError(f"Unknown plan: {target_plan}")
+
+    async def _build_preview(self, sub: Subscription, target_plan: str) -> PlanChangePreview:
+        prices = await plan_catalog.prices_usd(self.session)
+        return build_preview(sub.plan, target_plan, sub.expires_at, prices=prices)
+
     async def preview(self, user_id: str, target_plan: str) -> PlanChangePreview:
         sub = await self.repo.get_active_subscription(user_id)
         if not sub:
             raise PlanChangeError("No active subscription")
-        if target_plan not in PLAN_RANK:
-            raise PlanChangeError(f"Unknown plan: {target_plan}")
-        return build_preview(sub.plan, target_plan, sub.expires_at)
+        await self._require_target(target_plan)
+        return await self._build_preview(sub, target_plan)
 
     # ── State-mutating actions ────────────────────────────────────────
 
@@ -65,14 +74,15 @@ class PlanChangeService:
         sub = await self.repo.get_active_subscription(user_id)
         if not sub:
             raise PlanChangeError("No active subscription")
+        await self._require_target(target_plan)
 
-        prv = build_preview(sub.plan, target_plan, sub.expires_at)
+        prv = await self._build_preview(sub, target_plan)
 
         if prv.direction == "same":
             raise PlanChangeError("Already on this plan")
 
         if prv.direction == "upgrade":
-            if not can_upgrade(sub.plan, target_plan):
+            if not await plan_catalog.can_upgrade(self.session, sub.plan, target_plan):
                 raise PlanChangeError("Invalid upgrade path")
             return await self._charge_upgrade_prorated(sub, prv, email or "")
 
@@ -129,7 +139,7 @@ class PlanChangeService:
             await self.repo.upgrade_subscription_plan(sub.id, prv.target_plan)
             return {
                 "kind": "upgrade_free",
-                "appliesAt": datetime.now(timezone.utc).isoformat(),
+                "appliesAt": datetime.now(UTC).isoformat(),
                 "targetPlan": prv.target_plan,
             }
 
@@ -196,7 +206,7 @@ async def materialize_pending_if_due(
     """
     if not sub.pending_plan or not sub.pending_plan_applies_at:
         return sub
-    if sub.pending_plan_applies_at > datetime.now(timezone.utc):
+    if sub.pending_plan_applies_at > datetime.now(UTC):
         return sub
 
     target = sub.pending_plan

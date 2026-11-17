@@ -36,7 +36,7 @@ export class KafkaProducer implements OnModuleInit, OnModuleDestroy {
       await this.producer.connect();
       this.logger.log("Kafka producer connected");
     } catch (err) {
-      this.logger.error("Kafka producer failed to connect: %s", err);
+      this.logger.error(`Kafka producer failed to connect: ${err}`);
     }
   }
 
@@ -66,9 +66,9 @@ export class KafkaProducer implements OnModuleInit, OnModuleDestroy {
           },
         ],
       });
-      this.logger.log("Published event to %s", topic);
+      this.logger.log(`Published event to ${topic}`);
     } catch (err) {
-      this.logger.error("Failed to publish to %s: %s", topic, err);
+      this.logger.error(`Failed to publish to ${topic}: ${err}`);
       // Don't throw — Kafka publish is fire-and-forget.
       // Crashing the service because a telemetry event failed to publish
       // takes down voice calls for all users.

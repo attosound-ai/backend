@@ -24,6 +24,21 @@ type Config struct {
 	JWTAccessExpiry  time.Duration
 	JWTRefreshExpiry time.Duration
 	OTPServiceURL    string
+	// AdminAPISecret gates the operator only routes (X-Admin-Token). Empty
+	// means those routes answer 503: never open by default.
+	AdminAPISecret string
+	// SocialServiceURL is the base URL of the social service on the private
+	// network (for example http://social-service.railway.internal:3000). The
+	// operator list asks it for the real followers and posts of each row.
+	// Optional: empty means the list keeps serving the stored columns.
+	SocialServiceURL string
+	// DeletionGrace es cuánto espera una cuenta desactivada antes del borrado
+	// definitivo (30 días, pedido del cliente el 28 oct 2026).
+	DeletionGrace time.Duration
+	// DeletionSweepInterval es cada cuánto corre el barrido que borra las
+	// cuentas vencidas. DeletionSweepEnabled=false lo apaga (DELETION_SWEEP=off).
+	DeletionSweepInterval time.Duration
+	DeletionSweepEnabled  bool
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -45,6 +60,19 @@ func Load() *Config {
 		JWTAccessExpiry:  parseDuration(getEnv("JWT_ACCESS_EXPIRY", "15m"), 15*time.Minute),
 		JWTRefreshExpiry: parseDuration(getEnv("JWT_REFRESH_EXPIRY", "168h"), 168*time.Hour),
 		OTPServiceURL:    getEnv("OTP_SERVICE_URL", "http://otp-service:8000"),
+		AdminAPISecret:   getEnv("ADMIN_API_SECRET", ""),
+		SocialServiceURL: getEnv("SOCIAL_SERVICE_URL", ""),
+
+		DeletionGrace:         parseDuration(getEnv("DELETION_GRACE", "720h"), 720*time.Hour),
+		DeletionSweepInterval: parseDuration(getEnv("DELETION_SWEEP_INTERVAL", "1h"), time.Hour),
+		DeletionSweepEnabled:  !strings.EqualFold(getEnv("DELETION_SWEEP", "on"), "off"),
+	}
+	// Nunca menos de un día de gracia, aunque alguien se equivoque de unidad.
+	if cfg.DeletionGrace < 24*time.Hour {
+		cfg.DeletionGrace = 24 * time.Hour
+	}
+	if cfg.DeletionSweepInterval < time.Minute {
+		cfg.DeletionSweepInterval = time.Minute
 	}
 
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {

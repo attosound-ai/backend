@@ -8,10 +8,24 @@ defmodule ChatServiceWeb.PostChannel do
   """
   use Phoenix.Channel
 
+  alias ChatServiceWeb.TokenExpiry
+
   @impl true
   def join("post:" <> _post_id, _payload, socket) do
-    {:ok, socket}
+    if TokenExpiry.expired?(socket) do
+      {:error, %{reason: "invalid_token"}}
+    else
+      {:ok, TokenExpiry.arm(socket)}
+    end
   end
+
+  @impl true
+  def handle_info(:atto_token_expired, socket) do
+    TokenExpiry.disconnect(socket)
+    {:noreply, socket}
+  end
+
+  def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
   def handle_in(_event, _payload, socket) do
