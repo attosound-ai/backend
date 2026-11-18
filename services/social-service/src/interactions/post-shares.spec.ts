@@ -213,7 +213,7 @@ describe("shares counted per destination", () => {
 
   it("notifies and pushes the author only the first time a person shares", async () => {
     const ctx = setup();
-    const results = [];
+    const results: Array<{ counted: boolean; firstShare: boolean }> = [];
     for (let i = 1; i <= 8; i++) {
       results.push(await ctx.service.share(SENDER, POST, { channel: "chat", conversationId: chat(i) }));
     }
