@@ -334,7 +334,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
 
     // Clean up interaction counts from Redis through the repository.
     await Promise.all(
-      (["likes", "comments", "shares", "reposts"] as const).map((type) =>
+      (["likes", "comments", "shares", "reposts", "sharers"] as const).map((type) =>
         this.counts.invalidate(type, data.content_id),
       ),
     );
@@ -342,6 +342,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     // Clean up DB interactions for this content
     await Promise.all([
       this.prisma.interaction.deleteMany({ where: { contentId: data.content_id } }),
+      this.prisma.postShare.deleteMany({ where: { contentId: data.content_id } }),
       this.prisma.comment.deleteMany({ where: { contentId: data.content_id } }),
       this.prisma.bookmark.deleteMany({ where: { contentId: data.content_id } }),
       this.prisma.repost.deleteMany({ where: { contentId: data.content_id } }),
@@ -643,7 +644,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
       }
 
       // 1. Delete all social Postgres rows + creator logo votes (Fix #1)
-      const [notifs, follows1, follows2, interactions, comments, bookmarks, reposts, reelViews, logoVotes] =
+      const [notifs, follows1, follows2, interactions, comments, bookmarks, reposts, reelViews, logoVotes, postShares] =
         await Promise.all([
           this.prisma.notification.deleteMany({
             where: { OR: [{ recipientId: userId }, { actorId: userId }] },
@@ -656,13 +657,15 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           this.prisma.repost.deleteMany({ where: { userId } }),
           this.prisma.reelView.deleteMany({ where: { userId } }),
           this.prisma.creatorLogoVote.deleteMany({ where: { userId } }),
+          this.prisma.postShare.deleteMany({ where: { userId } }),
         ]);
       this.logger.log(
         `Deleted social DB for user ${userId}: ` +
         `${notifs.count} notifs, ${follows1.count + follows2.count} follows, ` +
         `${interactions.count} interactions, ${comments.count} comments, ` +
         `${bookmarks.count} bookmarks, ${reposts.count} reposts, ` +
-        `${reelViews.count} reel views, ${logoVotes.count} logo votes`,
+        `${reelViews.count} reel views, ${logoVotes.count} logo votes, ` +
+        `${postShares.count} post shares`,
       );
 
       // 2. Delete all content (MongoDB) via gRPC
@@ -738,9 +741,10 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
           countPipeline.del(`social:count:comments:${cid}`);
           countPipeline.del(`social:count:shares:${cid}`);
           countPipeline.del(`social:count:reposts:${cid}`);
+          countPipeline.del(`social:count:sharers:${cid}`);
         }
         await countPipeline.exec();
-        this.logger.log(`Cleaned ${cleanedEntries} orphaned entries from other feeds + ${userContentIds.length * 4} count keys`);
+        this.logger.log(`Cleaned ${cleanedEntries} orphaned entries from other feeds + ${userContentIds.length * 5} count keys`);
       }
 
       // Fix #3: Delete Cloudinary media (fire-and-forget)
@@ -760,7 +764,7 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
     //    the `social:count:*` namespace, which is not a repository-level
     //    API, so we drop down to the raw client deliberately.
     const client = this.redisClient.client();
-    const countTypes = ["likes", "comments", "shares", "reposts"] as const;
+    const countTypes = ["likes", "comments", "shares", "reposts", "sharers"] as const;
 
     for (const type of countTypes) {
       const pattern = `social:count:${type}:*`;
@@ -793,7 +797,11 @@ export class KafkaConsumer implements OnModuleInit, OnModuleDestroy {
             });
           } else if (type === "reposts") {
             dbCount = await this.prisma.repost.count({ where: { contentId } });
+          } else if (type === "shares") {
+            // Shown number: one per destination (Nov 18 2026).
+            dbCount = await this.prisma.postShare.count({ where: { contentId } });
           } else {
+            // likes, and sharers: the people behind the SHARE rows.
             const interactionType = type === "likes" ? "LIKE" : "SHARE";
             dbCount = await this.prisma.interaction.count({
               where: { contentId, type: interactionType },

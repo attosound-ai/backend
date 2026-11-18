@@ -12,6 +12,7 @@ export type CountType =
   | "likes"
   | "comments"
   | "shares"
+  | "sharers"
   | "reposts"
   | "posts"
   | "followers"
@@ -80,6 +81,9 @@ const TTL_BY_TYPE: Record<CountType, { ttl: number; negativeTtl: number }> = {
   likes: { ttl: 600, negativeTtl: 60 },
   comments: { ttl: 600, negativeTtl: 60 },
   shares: { ttl: 600, negativeTtl: 60 },
+  // People who shared a post (SHARE rows), for the feed ranking; "shares"
+  // is the number shown, one per destination (post_shares rows).
+  sharers: { ttl: 600, negativeTtl: 60 },
   reposts: { ttl: 600, negativeTtl: 60 },
   posts: { ttl: 1800, negativeTtl: 60 },
   followers: { ttl: 1800, negativeTtl: 60 },

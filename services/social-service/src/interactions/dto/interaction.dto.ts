@@ -1,5 +1,6 @@
-import { IsInt, IsNotEmpty, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
+import { IsIn, IsInt, IsNotEmpty, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
 import { Type } from 'class-transformer';
+import { SHARE_CHANNELS, ShareChannel } from '../post-shares';
 
 export class CreateCommentDto {
   @IsString()
@@ -10,6 +11,20 @@ export class CreateCommentDto {
   @IsOptional()
   @IsString()
   parentId?: string;
+}
+
+/**
+ * Body of POST /posts/:id/share, optional: app builds before Nov 18 2026 send
+ * none and count once per person. `conversationId` goes with `chat` only.
+ */
+export class ShareDto {
+  @IsOptional()
+  @IsIn(SHARE_CHANNELS as unknown as string[])
+  channel?: ShareChannel;
+
+  @IsOptional()
+  @IsUUID('all')
+  conversationId?: string;
 }
 
 export class InteractionPaginationDto {

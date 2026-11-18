@@ -34,6 +34,24 @@ model Interaction {
   @@map("interactions")
 }
 
+/// One row per place a person sent a post to (Nov 18 2026). The SHARE row in
+/// `interactions` stays one per person and drives the feed ranking; this table
+/// drives the number a post shows. `targetKey` is the conversation id for
+/// `chat` and empty for `external`, `link` and `legacy` (a share that did not
+/// say where it went: old app builds and the rows copied from `interactions`).
+model PostShare {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  contentId String   @map("content_id")
+  channel   String
+  targetKey String   @default("") @map("target_key")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, contentId, channel, targetKey])
+  @@index([contentId])
+  @@map("post_shares")
+}
+
 model Comment {
   id        String    @id @default(uuid())
   userId    String    @map("user_id")

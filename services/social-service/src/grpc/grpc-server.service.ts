@@ -135,10 +135,9 @@ export class GrpcServerService implements OnModuleInit, OnModuleDestroy {
         this.counts.getOrCompute("comments", contentId, () =>
           this.prisma.comment.count({ where: visibleComments(contentId) }),
         ),
+        // One per destination (post_shares), the number the app shows.
         this.counts.getOrCompute("shares", contentId, () =>
-          this.prisma.interaction.count({
-            where: { contentId, type: "SHARE" },
-          }),
+          this.prisma.postShare.count({ where: { contentId } }),
         ),
       ]);
       callback(null, { likesCount, commentsCount, sharesCount });

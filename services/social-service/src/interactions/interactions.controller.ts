@@ -14,7 +14,7 @@ import {
 import { AuthGuard } from '../common/guards/auth.guard';
 import { CurrentUserId } from '../common/decorators/current-user.decorator';
 import { InteractionsService } from './interactions.service';
-import { CreateCommentDto, UpdateCommentDto, InteractionPaginationDto } from './dto/interaction.dto';
+import { CreateCommentDto, UpdateCommentDto, InteractionPaginationDto, ShareDto } from './dto/interaction.dto';
 
 @Controller('api/v1/posts')
 @UseGuards(AuthGuard)
@@ -194,11 +194,13 @@ export class InteractionsController {
   async share(
     @Param('id') contentId: string,
     @CurrentUserId() userId: string,
+    // Optional: older builds send none, and the pipe hands an empty object.
+    @Body() body: ShareDto,
   ) {
-    await this.interactionsService.share(userId, contentId);
+    const result = await this.interactionsService.share(userId, contentId, body);
     return {
       success: true,
-      data: { message: 'Share tracked successfully' },
+      data: { message: 'Share tracked successfully', counted: result.counted },
       error: null,
     };
   }

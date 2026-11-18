@@ -14,11 +14,18 @@ import {
   ContentUnavailableError,
   GrpcClientsService,
 } from '../grpc/grpc-clients.service';
-import { InteractionsService } from '../interactions/interactions.service';
+import { InteractionCounts, InteractionsService } from '../interactions/interactions.service';
 import { FollowsService } from '../follows/follows.service';
 import { FeedPostDto } from './dto/feed.dto';
 import { DeactivatedUsersRepository } from '../redis/repositories/deactivated-users.repository';
 import { hideDeactivatedAuthors } from '../common/deactivated-authors';
+
+/** The people who shared each post, for the ranking (0 when unknown). */
+export function sharersOf(
+  countsMap: Map<string, InteractionCounts>,
+): (post: FeedPostDto) => number {
+  return (post) => countsMap.get(post.id)?.sharersCount ?? 0;
+}
 
 @Injectable()
 export class FeedService {
@@ -130,10 +137,11 @@ export class FeedService {
     });
     const followingSet = new Set(followingIds);
     const viewerId = String(userId);
+    const sharers = sharersOf(countsMap);
     posts.sort(
       (a, b) =>
-        this.computeEdgeRankScore(b, followingSet.has(b.authorId), String(b.authorId) === viewerId) -
-        this.computeEdgeRankScore(a, followingSet.has(a.authorId), String(a.authorId) === viewerId),
+        this.computeEdgeRankScore(b, sharers(b), followingSet.has(b.authorId), String(b.authorId) === viewerId) -
+        this.computeEdgeRankScore(a, sharers(a), followingSet.has(a.authorId), String(a.authorId) === viewerId),
     );
 
     // Tag each post with whether the viewer follows the author
@@ -228,15 +236,16 @@ export class FeedService {
     }
 
     // Batch resolve authors + interactions + follows in parallel
-    const posts = await this.resolvePostsBatch(pageContents, userId);
+    const { posts, countsMap } = await this.resolvePostsWithCounts(pageContents, userId);
 
     // Score with reels formula
     const followingSet = new Set(posts.filter((p) => p.isFollowingAuthor).map((p) => p.authorId));
     const reelsViewerId = String(userId);
+    const sharers = sharersOf(countsMap);
     posts.sort(
       (a, b) =>
-        this.computeReelScore(b, followingSet.has(b.authorId), String(b.authorId) === reelsViewerId) -
-        this.computeReelScore(a, followingSet.has(a.authorId), String(a.authorId) === reelsViewerId),
+        this.computeReelScore(b, sharers(b), followingSet.has(b.authorId), String(b.authorId) === reelsViewerId) -
+        this.computeReelScore(a, sharers(a), followingSet.has(a.authorId), String(a.authorId) === reelsViewerId),
     );
 
     return {
@@ -303,12 +312,13 @@ export class FeedService {
     }
 
     // Batch resolve authors + interactions + follows in parallel
-    const posts = await this.resolvePostsBatch(contents, userId);
+    const { posts, countsMap } = await this.resolvePostsWithCounts(contents, userId);
 
     const trendingViewerId = String(userId);
+    const sharers = sharersOf(countsMap);
     posts.sort((a, b) =>
-      this.computeReelScore(b, false, String(b.authorId) === trendingViewerId) -
-      this.computeReelScore(a, false, String(a.authorId) === trendingViewerId),
+      this.computeReelScore(b, sharers(b), false, String(b.authorId) === trendingViewerId) -
+      this.computeReelScore(a, sharers(a), false, String(a.authorId) === trendingViewerId),
     );
 
     const page = posts.slice(0, limit);
@@ -604,9 +614,13 @@ export class FeedService {
    * ── Self-boost (own post visibility) ──
    *   +50 for own posts < 10 min (see your post immediately)
    *   Rapid decay so it sinks to natural position quickly
+   *
+   * `sharesCount` here is the people who shared the post (SHARE rows), not
+   * the number shown on the card, which counts every destination (Nov 18
+   * 2026): one person sending a post to many chats does not lift it.
    */
-  private computeEdgeRankScore(post: FeedPostDto, fromFollowing = false, isOwnPost = false): number {
-    const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
+  private computeEdgeRankScore(post: FeedPostDto, sharesCount: number, fromFollowing = false, isOwnPost = false): number {
+    const { likesCount, commentsCount, repostsCount } = post.interactions;
     const ageMs = Date.now() - new Date(post.createdAt).getTime();
     const hours = ageMs / (1000 * 60 * 60);
     const minutes = ageMs / (1000 * 60);
@@ -635,8 +649,9 @@ export class FeedService {
    * - Faster time decay (-0.08, reels cycle faster than feed posts)
    * - Faster recency decay (half-life ~24h vs 48h for feed)
    */
-  private computeReelScore(post: FeedPostDto, fromFollowing = false, isOwnPost = false): number {
-    const { likesCount, commentsCount, sharesCount, repostsCount } = post.interactions;
+  private computeReelScore(post: FeedPostDto, sharesCount: number, fromFollowing = false, isOwnPost = false): number {
+    // sharesCount: people who shared it, as in computeEdgeRankScore.
+    const { likesCount, commentsCount, repostsCount } = post.interactions;
     const ageMs = Date.now() - new Date(post.createdAt).getTime();
     const hours = ageMs / (1000 * 60 * 60);
     const minutes = ageMs / (1000 * 60);
@@ -666,10 +681,18 @@ export class FeedService {
     allContents: any[],
     viewerId: string,
   ): Promise<FeedPostDto[]> {
+    return (await this.resolvePostsWithCounts(allContents, viewerId)).posts;
+  }
+
+  /** resolvePostsBatch plus the counts it read, for the ranking. */
+  private async resolvePostsWithCounts(
+    allContents: any[],
+    viewerId: string,
+  ): Promise<{ posts: FeedPostDto[]; countsMap: Map<string, InteractionCounts> }> {
     // Every feed (reels, explore, profile, single post) passes through here:
     // drop what accounts in their deletion grace authored.
     const contents = await hideDeactivatedAuthors(allContents, (c) => c.author_id, this.deactivated);
-    if (contents.length === 0) return [];
+    if (contents.length === 0) return { posts: [], countsMap: new Map() };
 
     const postIds = contents.map((c) => c.id);
     const authorIds = [...new Set(contents.map((c) => c.author_id))];
@@ -686,7 +709,7 @@ export class FeedService {
     const defaultCounts = { likesCount: 0, commentsCount: 0, sharesCount: 0, repostsCount: 0 };
     const defaultUi = { isLiked: false, isBookmarked: false, isReposted: false };
 
-    return contents.map((content) => {
+    const posts = contents.map((content) => {
       const author = userMap.get(content.author_id);
       const counts = countsMap.get(content.id) || defaultCounts;
       const ui = userInteractionsMap.get(content.id) || defaultUi;
@@ -694,6 +717,7 @@ export class FeedService {
       post.isFollowingAuthor = followingStrSet.has(String(post.authorId)) || String(post.authorId) === String(viewerId);
       return post;
     });
+    return { posts, countsMap };
   }
 
   private buildFeedPost(

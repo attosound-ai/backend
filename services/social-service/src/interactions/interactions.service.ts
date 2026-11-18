@@ -15,6 +15,22 @@ import { KafkaProducer } from "../kafka/kafka.producer";
 import { PushService } from "../push/push.service";
 import { CommentResponseDto } from "./dto/interaction.dto";
 import { visibleComments } from "./visible-comments";
+import {
+  LEGACY_CHANNEL,
+  MAX_TARGETS_PER_POST,
+  ShareTargetInput,
+  shareTargetOf,
+} from "./post-shares";
+
+/** Counts of one post. `sharesCount` is shown (one per destination);
+ *  `sharersCount` is the people who shared it, for the feed ranking only. */
+export interface InteractionCounts {
+  likesCount: number;
+  commentsCount: number;
+  sharesCount: number;
+  repostsCount: number;
+  sharersCount: number;
+}
 
 @Injectable()
 export class InteractionsService {
@@ -546,45 +562,113 @@ export class InteractionsService {
 
   // ── Shares ──
 
-  async share(userId: string, contentId: string): Promise<void> {
-    await this.prisma.interaction.upsert({
-      where: {
-        userId_contentId_type: { userId, contentId, type: "SHARE" },
-      },
-      update: {},
-      create: { userId, contentId, type: "SHARE" },
+  /**
+   * One call per destination (Nov 18 2026). The number shown counts
+   * `post_shares` rows: each chat once, `external` and `link` once each, and
+   * a call without a body (older builds) once per person. The SHARE row of
+   * `interactions` stays one per person: only its first insert notifies the
+   * author, and it is what the feed ranking counts.
+   */
+  async share(
+    userId: string,
+    contentId: string,
+    input?: ShareTargetInput | null,
+  ): Promise<{ counted: boolean; firstShare: boolean }> {
+    const { channel, targetKey } = shareTargetOf(input);
+
+    const existing = await this.prisma.postShare.count({
+      where: { userId, contentId },
     });
+    // A legacy share says nothing about where it went: it counts only when the
+    // person has no share of this post yet. A known destination counts until
+    // the person reaches the cap for this post.
+    const addRow =
+      channel === LEGACY_CHANNEL
+        ? existing === 0
+        : existing < MAX_TARGETS_PER_POST;
 
-    await this.counts.increment("shares", contentId);
-
-    const content = await this.grpcClients.getContent(contentId);
-    if (content && content.author_id !== userId) {
-      await this.prisma.notification.create({
-        data: {
-          recipientId: content.author_id,
-          type: "share",
-          actorId: userId,
-          referenceId: contentId,
-        },
+    // Both rows in one transaction (ON CONFLICT DO NOTHING each): the start
+    // time backfill never sees the SHARE row without its post_shares row.
+    const addPerson = () =>
+      this.prisma.interaction.createMany({
+        data: [{ userId, contentId, type: "SHARE" }],
+        skipDuplicates: true,
       });
-
-      await this.kafkaProducer.send("notification.trigger", {
-        type: "share",
-        recipient_id: content.author_id,
-        actor_id: userId,
-        reference_id: contentId,
-      });
-      this.firePush(content.author_id, "share", userId, contentId);
+    let counted = false;
+    let firstShare: boolean;
+    if (addRow) {
+      const [rows, person] = await this.prisma.$transaction([
+        this.prisma.postShare.createMany({
+          data: [{ userId, contentId, channel, targetKey }],
+          skipDuplicates: true,
+        }),
+        addPerson(),
+      ]);
+      counted = rows.count > 0;
+      firstShare = person.count > 0;
+    } else {
+      firstShare = (await addPerson()).count > 0;
     }
 
-    await this.kafkaProducer.send("interaction.created", {
-      user_id: userId,
-      content_id: contentId,
-      type: "share",
-      created_at: new Date().toISOString(),
-    });
+    if (!addRow && channel !== LEGACY_CHANNEL) {
+      this.logger.warn(
+        `Share cap: user ${userId} already has ${existing} destinations for ${contentId}`,
+      );
+    }
 
-    this.logger.log(`User ${userId} shared content ${contentId}`);
+    if (counted) await this.counts.increment("shares", contentId);
+    if (firstShare) await this.counts.increment("sharers", contentId);
+
+    if (firstShare) {
+      const content = await this.grpcClients.getContent(contentId);
+      if (content && content.author_id !== userId) {
+        await this.prisma.notification.create({
+          data: {
+            recipientId: content.author_id,
+            type: "share",
+            actorId: userId,
+            referenceId: contentId,
+          },
+        });
+
+        await this.kafkaProducer.send("notification.trigger", {
+          type: "share",
+          recipient_id: content.author_id,
+          actor_id: userId,
+          reference_id: contentId,
+        });
+        this.firePush(content.author_id, "share", userId, contentId);
+      }
+    }
+
+    // Live update of the number on open screens (chat-service broadcasts it):
+    // only when the number moved.
+    if (counted) {
+      await this.kafkaProducer.send("interaction.created", {
+        user_id: userId,
+        content_id: contentId,
+        type: "share",
+        channel,
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    this.logger.log(
+      `User ${userId} shared content ${contentId} (channel=${channel}, counted=${counted}, first=${firstShare})`,
+    );
+    return { counted, firstShare };
+  }
+
+  /** The number of shares a post shows: one per destination. */
+  countShares(contentId: string): Promise<number> {
+    return this.prisma.postShare.count({ where: { contentId } });
+  }
+
+  /** People who shared a post, whatever the number of destinations. */
+  countSharers(contentId: string): Promise<number> {
+    return this.prisma.interaction.count({
+      where: { contentId, type: "SHARE" },
+    });
   }
 
   // ── Counts ──
@@ -612,9 +696,7 @@ export class InteractionsService {
           this.countVisibleComments(contentId),
         ),
         this.counts.getOrCompute("shares", contentId, () =>
-          this.prisma.interaction.count({
-            where: { contentId, type: "SHARE" },
-          }),
+          this.countShares(contentId),
         ),
         this.counts.getOrCompute("reposts", contentId, () =>
           this.prisma.repost.count({ where: { contentId } }),
@@ -633,28 +715,21 @@ export class InteractionsService {
    */
   async getInteractionCountsBatch(
     contentIds: string[],
-  ): Promise<Map<string, { likesCount: number; commentsCount: number; sharesCount: number; repostsCount: number }>> {
-    const result = new Map<
-      string,
-      {
-        likesCount: number;
-        commentsCount: number;
-        sharesCount: number;
-        repostsCount: number;
-      }
-    >();
+  ): Promise<Map<string, InteractionCounts>> {
+    const result = new Map<string, InteractionCounts>();
     if (contentIds.length === 0) return result;
 
     // 4 pipelined batch reads (one per count type). Each round-trip is
     // a few ms on the internal Railway network, so the total is on par
     // with the previous single-pipeline implementation while keeping
     // Redis details fully encapsulated in CountsRepository.
-    const [cachedLikes, cachedComments, cachedShares, cachedReposts] =
+    const [cachedLikes, cachedComments, cachedShares, cachedReposts, cachedSharers] =
       await Promise.all([
         this.counts.getMany("likes", contentIds),
         this.counts.getMany("comments", contentIds),
         this.counts.getMany("shares", contentIds),
         this.counts.getMany("reposts", contentIds),
+        this.counts.getMany("sharers", contentIds),
       ]);
 
     // A content id is considered "fully cached" only when ALL four
@@ -667,18 +742,21 @@ export class InteractionsService {
       const comments = cachedComments.get(id);
       const shares = cachedShares.get(id);
       const reposts = cachedReposts.get(id);
+      const sharers = cachedSharers.get(id);
 
       if (
         likes != null &&
         comments != null &&
         shares != null &&
-        reposts != null
+        reposts != null &&
+        sharers != null
       ) {
         result.set(id, {
           likesCount: likes,
           commentsCount: comments,
           sharesCount: shares,
           repostsCount: reposts,
+          sharersCount: sharers,
         });
       } else {
         missingIds.push(id);
@@ -686,7 +764,7 @@ export class InteractionsService {
     }
 
     if (missingIds.length > 0) {
-      const [likeGroups, commentGroups, shareGroups, repostGroups] =
+      const [likeGroups, commentGroups, shareGroups, repostGroups, sharerGroups] =
         await Promise.all([
           this.prisma.interaction.groupBy({
             by: ["contentId"],
@@ -698,14 +776,19 @@ export class InteractionsService {
             where: visibleComments({ in: missingIds }),
             _count: { contentId: true },
           }),
-          this.prisma.interaction.groupBy({
+          this.prisma.postShare.groupBy({
             by: ["contentId"],
-            where: { contentId: { in: missingIds }, type: "SHARE" },
+            where: { contentId: { in: missingIds } },
             _count: { contentId: true },
           }),
           this.prisma.repost.groupBy({
             by: ["contentId"],
             where: { contentId: { in: missingIds } },
+            _count: { contentId: true },
+          }),
+          this.prisma.interaction.groupBy({
+            by: ["contentId"],
+            where: { contentId: { in: missingIds }, type: "SHARE" },
             _count: { contentId: true },
           }),
         ]);
@@ -722,11 +805,15 @@ export class InteractionsService {
       const repostMap = new Map(
         repostGroups.map((g) => [g.contentId, g._count.contentId]),
       );
+      const sharerMap = new Map(
+        sharerGroups.map((g) => [g.contentId, g._count.contentId]),
+      );
 
       const likesEntries: Array<{ id: string; count: number }> = [];
       const commentsEntries: Array<{ id: string; count: number }> = [];
       const sharesEntries: Array<{ id: string; count: number }> = [];
       const repostsEntries: Array<{ id: string; count: number }> = [];
+      const sharersEntries: Array<{ id: string; count: number }> = [];
 
       for (const id of missingIds) {
         const counts = {
@@ -734,12 +821,14 @@ export class InteractionsService {
           commentsCount: commentMap.get(id) ?? 0,
           sharesCount: shareMap.get(id) ?? 0,
           repostsCount: repostMap.get(id) ?? 0,
+          sharersCount: sharerMap.get(id) ?? 0,
         };
         result.set(id, counts);
         likesEntries.push({ id, count: counts.likesCount });
         commentsEntries.push({ id, count: counts.commentsCount });
         sharesEntries.push({ id, count: counts.sharesCount });
         repostsEntries.push({ id, count: counts.repostsCount });
+        sharersEntries.push({ id, count: counts.sharersCount });
       }
 
       // Write back to cache (zeros included — each entry's TTL respects
@@ -749,6 +838,7 @@ export class InteractionsService {
         this.counts.setMany("comments", commentsEntries),
         this.counts.setMany("shares", sharesEntries),
         this.counts.setMany("reposts", repostsEntries),
+        this.counts.setMany("sharers", sharersEntries),
       ]);
     }
 
